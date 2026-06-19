@@ -115,6 +115,8 @@ class DataImportScreen(QWidget):
             self._file_name_lbl.setText(f"Selected: {filename}")
 
     def _start_import(self):
+        if hasattr(self, "_timer") and self._timer.isActive():
+            self._timer.stop()
         self._progress.setValue(0)
         self._progress.setVisible(True)
         self._progress_value = 0

@@ -68,6 +68,7 @@ class Sidebar(QWidget):
         broker_label.setContentsMargins(14, 4, 0, 4)
         layout.addWidget(broker_label)
 
+        self._dot_labels = []
         for name, color_token in BROKERS:
             row = QWidget()
             row_layout = QHBoxLayout(row)
@@ -78,6 +79,7 @@ class Sidebar(QWidget):
             dot.setFont(QFont("Courier New", 10))
             dot.setStyleSheet(f"color: {self._theme.get(color_token)};")
             dot.setFixedWidth(14)
+            self._dot_labels.append((dot, color_token))
 
             name_lbl = QLabel(name)
             name_lbl.setFont(QFont("Courier New", 11))
@@ -108,6 +110,7 @@ class Sidebar(QWidget):
             f"background: {self._theme.get('accent')}; color: {self._theme.get('background')};"
             "border-radius: 16px;"
         )
+        self._avatar_label = avatar
 
         user_info = QVBoxLayout()
         user_info.setSpacing(0)
@@ -145,3 +148,11 @@ class Sidebar(QWidget):
         for key, btn in self._buttons.items():
             btn.setStyleSheet(self._nav_style(key == screen_name))
             btn.setChecked(key == screen_name)
+
+    def refresh_theme(self):
+        for dot, color_token in self._dot_labels:
+            dot.setStyleSheet(f"color: {self._theme.get(color_token)};")
+        self._avatar_label.setStyleSheet(
+            f"background: {self._theme.get('accent')}; color: {self._theme.get('background')};"
+            "border-radius: 16px;"
+        )

@@ -17,6 +17,7 @@ MENUS = {
 
 class TopBar(QWidget):
     theme_toggled = Signal()
+    restart_requested = Signal()
 
     def __init__(self, theme: ThemeManager, parent=None):
         super().__init__(parent)
@@ -89,4 +90,4 @@ class TopBar(QWidget):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
-            self.theme_toggled.emit()
+            self.restart_requested.emit()

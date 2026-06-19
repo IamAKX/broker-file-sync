@@ -22,6 +22,7 @@ class MainWindow(QMainWindow):
 
         self._topbar = TopBar(self._controller.theme)
         self._topbar.theme_toggled.connect(self._on_theme_toggled)
+        self._topbar.restart_requested.connect(lambda: self.navigate("dashboard"))
         root.addWidget(self._topbar)
 
         body = QHBoxLayout()
@@ -69,3 +70,7 @@ class MainWindow(QMainWindow):
         self._topbar.repaint()
         for w in self._screens.values():
             w.repaint()
+        self._sidebar.refresh_theme()
+        profile = self._screens.get("profile")
+        if profile and hasattr(profile, "_theme_check"):
+            profile._theme_check.setChecked(self._controller.theme.current_mode == "dark")

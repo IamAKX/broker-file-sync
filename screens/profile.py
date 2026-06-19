@@ -112,7 +112,7 @@ class ProfileScreen(QWidget):
         logout_btn.setFont(QFont("Courier New", 12, QFont.Weight.Bold))
         logout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         logout_btn.setStyleSheet(
-            f"background: {t.get('destructive')}; color: white;"
+            f"background: {t.get('destructive')}; color: {t.get('background')};"
             "border: none; border-radius: 4px; padding: 0 20px;"
         )
         logout_btn.clicked.connect(self._controller.show_login)
