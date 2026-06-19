@@ -1,0 +1,175 @@
+from PySide6.QtWidgets import QApplication
+
+DARK = {
+    "background":    "#0d1117",
+    "sidebar_bg":    "#161b22",
+    "card_bg":       "#1c2128",
+    "border":        "#30363d",
+    "accent":        "#39d353",
+    "accent_hover":  "#2ea043",
+    "text_primary":  "#e6edf3",
+    "text_secondary":"#8b949e",
+    "status_red":    "#f85149",
+    "status_blue":   "#58a6ff",
+    "status_orange": "#e3b341",
+    "info_banner_bg":"#0d4429",
+    "input_bg":      "#0d1117",
+    "button_bg":     "#21262d",
+    "destructive":   "#da3633",
+}
+
+LIGHT = {
+    "background":    "#ffffff",
+    "sidebar_bg":    "#f6f8fa",
+    "card_bg":       "#ffffff",
+    "border":        "#d0d7de",
+    "accent":        "#1a7f37",
+    "accent_hover":  "#116329",
+    "text_primary":  "#1f2328",
+    "text_secondary":"#656d76",
+    "status_red":    "#cf222e",
+    "status_blue":   "#0969da",
+    "status_orange": "#9a6700",
+    "info_banner_bg":"#dafbe1",
+    "input_bg":      "#ffffff",
+    "button_bg":     "#f6f8fa",
+    "destructive":   "#cf222e",
+}
+
+PALETTES = {"dark": DARK, "light": LIGHT}
+
+
+class ThemeManager:
+    def __init__(self, app: QApplication):
+        self._app = app
+        self._mode = "dark"
+        self.apply()
+
+    @property
+    def current_mode(self) -> str:
+        return self._mode
+
+    def get(self, token: str) -> str:
+        return PALETTES[self._mode][token]
+
+    def toggle(self):
+        self._mode = "light" if self._mode == "dark" else "dark"
+        self.apply()
+
+    def apply(self):
+        p = PALETTES[self._mode]
+        self._app.setStyleSheet(f"""
+            QWidget {{
+                background-color: {p['background']};
+                color: {p['text_primary']};
+                font-family: 'Courier New', Consolas, monospace;
+                font-size: 13px;
+            }}
+            QLineEdit, QPlainTextEdit, QTextEdit, QComboBox {{
+                background-color: {p['input_bg']};
+                color: {p['text_primary']};
+                border: 1px solid {p['border']};
+                border-radius: 4px;
+                padding: 6px 10px;
+                font-family: 'Courier New', Consolas, monospace;
+            }}
+            QLineEdit:focus, QPlainTextEdit:focus {{
+                border: 1px solid {p['accent']};
+            }}
+            QPushButton {{
+                background-color: {p['button_bg']};
+                color: {p['text_primary']};
+                border: 1px solid {p['border']};
+                border-radius: 4px;
+                padding: 6px 14px;
+                font-family: 'Courier New', Consolas, monospace;
+            }}
+            QPushButton:hover {{
+                border-color: {p['accent']};
+                color: {p['accent']};
+            }}
+            QTabWidget::pane {{
+                border: 1px solid {p['border']};
+                background: {p['card_bg']};
+            }}
+            QTabBar::tab {{
+                background: {p['button_bg']};
+                color: {p['text_secondary']};
+                padding: 6px 16px;
+                border: 1px solid {p['border']};
+                font-family: 'Courier New', Consolas, monospace;
+            }}
+            QTabBar::tab:selected {{
+                background: {p['card_bg']};
+                color: {p['accent']};
+                border-bottom: 2px solid {p['accent']};
+            }}
+            QScrollBar:vertical {{
+                background: {p['sidebar_bg']};
+                width: 8px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {p['border']};
+                border-radius: 4px;
+            }}
+            QTableWidget {{
+                background: {p['card_bg']};
+                color: {p['text_primary']};
+                gridline-color: {p['border']};
+                border: 1px solid {p['border']};
+            }}
+            QHeaderView::section {{
+                background: {p['button_bg']};
+                color: {p['text_secondary']};
+                border: 1px solid {p['border']};
+                padding: 4px 8px;
+                font-family: 'Courier New', Consolas, monospace;
+                font-size: 11px;
+                text-transform: uppercase;
+            }}
+            QMenuBar {{
+                background-color: {p['sidebar_bg']};
+                color: {p['text_primary']};
+                font-family: 'Courier New', Consolas, monospace;
+                font-size: 12px;
+            }}
+            QMenuBar::item:selected {{
+                background: {p['button_bg']};
+            }}
+            QMenu {{
+                background-color: {p['card_bg']};
+                color: {p['text_primary']};
+                border: 1px solid {p['border']};
+                font-family: 'Courier New', Consolas, monospace;
+            }}
+            QMenu::item:selected {{
+                background: {p['accent']};
+                color: {p['background']};
+            }}
+            QProgressBar {{
+                border: 1px solid {p['border']};
+                border-radius: 4px;
+                background: {p['card_bg']};
+                text-align: center;
+                color: {p['text_primary']};
+            }}
+            QProgressBar::chunk {{
+                background: {p['accent']};
+                border-radius: 3px;
+            }}
+            QCheckBox {{
+                color: {p['text_primary']};
+                font-family: 'Courier New', Consolas, monospace;
+            }}
+            QCheckBox::indicator:checked {{
+                background: {p['accent']};
+                border: 1px solid {p['accent']};
+            }}
+            QDialog {{
+                background: {p['background']};
+            }}
+            QMessageBox {{
+                background: {p['background']};
+                color: {p['text_primary']};
+            }}
+        """)
