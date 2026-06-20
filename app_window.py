@@ -1,4 +1,4 @@
-from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QStackedWidget
+from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QStackedWidget, QApplication
 from PySide6.QtCore import Qt
 from components.sidebar import Sidebar
 from components.topbar import TopBar
@@ -23,6 +23,10 @@ class MainWindow(QMainWindow):
         self._topbar = TopBar(self._controller.theme)
         self._topbar.theme_toggled.connect(self._on_theme_toggled)
         self._topbar.restart_requested.connect(lambda: self.navigate("dashboard"))
+        self._topbar.navigate.connect(self.navigate)
+        self._topbar.quit_requested.connect(QApplication.quit)
+        self._topbar.logout_requested.connect(self._controller.show_login)
+        self._topbar.fullscreen_requested.connect(self._toggle_fullscreen)
         root.addWidget(self._topbar)
 
         body = QHBoxLayout()
@@ -47,13 +51,37 @@ class MainWindow(QMainWindow):
         from screens.config_editor import ConfigEditorScreen
         from screens.notifications import NotificationsScreen
         from screens.profile import ProfileScreen
+        from screens.strategy_builder import StrategyBuilderScreen
+
+        dashboard        = DashboardScreen(self._controller)
+        data_import      = DataImportScreen(self._controller)
+        strategy_builder = StrategyBuilderScreen(self._controller)
+
+        data_import.broker_imported.connect(
+            lambda name, rows: self._sidebar.set_broker_active(name, True)
+        )
+        data_import.broker_reset.connect(
+            lambda name: self._sidebar.set_broker_active(name, False)
+        )
+        data_import.broker_imported.connect(dashboard.on_broker_imported)
+        data_import.broker_reset.connect(dashboard.on_broker_reset)
+
+        # When LMV opens: push headers to strategy builder, push strategies to LMV
+        def _on_lmv_ready(headers):
+            strategy_builder.set_lmv_headers(headers)
+            viewer = getattr(data_import, "_live_viewer", None)
+            if viewer is not None:
+                viewer.set_strategies(strategy_builder.get_active_strategies())
+
+        data_import.lmv_headers_ready.connect(_on_lmv_ready)
 
         screens = [
-            ("dashboard",     DashboardScreen(self._controller)),
-            ("data_import",   DataImportScreen(self._controller)),
-            ("config_editor", ConfigEditorScreen(self._controller)),
-            ("notifications", NotificationsScreen(self._controller)),
-            ("profile",       ProfileScreen(self._controller)),
+            ("dashboard",        dashboard),
+            ("data_import",      data_import),
+            ("config_editor",    ConfigEditorScreen(self._controller)),
+            ("strategy_builder", strategy_builder),
+            ("notifications",    NotificationsScreen(self._controller)),
+            ("profile",          ProfileScreen(self._controller)),
         ]
         for name, widget in screens:
             self._screens[name] = widget
@@ -64,6 +92,22 @@ class MainWindow(QMainWindow):
             self._stack.setCurrentWidget(self._screens[screen_name])
             self._sidebar.set_active(screen_name)
 
+    def closeEvent(self, event):
+        self._controller.watcher.stop()
+        # Close live viewer if open
+        data_import = self._screens.get("data_import")
+        if data_import is not None:
+            viewer = getattr(data_import, "_live_viewer", None)
+            if viewer is not None:
+                viewer.close()
+        super().closeEvent(event)
+
+    def _toggle_fullscreen(self):
+        if self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showFullScreen()
+
     def _on_theme_toggled(self):
         self._controller.theme.apply()
         self._sidebar.repaint()
@@ -71,6 +115,11 @@ class MainWindow(QMainWindow):
         for w in self._screens.values():
             w.repaint()
         self._sidebar.refresh_theme()
-        profile = self._screens.get("profile")
-        if profile and hasattr(profile, "_theme_check"):
-            profile._theme_check.setChecked(self._controller.theme.current_mode == "dark")
+        data_import = self._screens.get("data_import")
+        if data_import is not None:
+            viewer = getattr(data_import, "_live_viewer", None)
+            if viewer is not None and viewer.isVisible():
+                viewer.refresh_theme()
+        strategy_builder = self._screens.get("strategy_builder")
+        if strategy_builder is not None:
+            strategy_builder.refresh_theme()

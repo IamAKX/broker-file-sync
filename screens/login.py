@@ -37,12 +37,12 @@ class LoginScreen(QWidget):
         card_layout.setSpacing(16)
 
         title = QLabel("BROKER FILE SYNC")
-        title.setFont(QFont("Courier New", 20, QFont.Weight.Bold))
+        title.setFont(QFont("", 28, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(title)
 
         subtitle = QLabel("Excel Processing Software")
-        subtitle.setFont(QFont("Courier New", 11))
+        subtitle.setFont(QFont("", 11))
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         card_layout.addWidget(subtitle)
@@ -50,7 +50,7 @@ class LoginScreen(QWidget):
         card_layout.addSpacing(16)
 
         email_label = QLabel("EMAIL")
-        email_label.setFont(QFont("Courier New", 10))
+        email_label.setFont(QFont("", 10))
         email_label.setStyleSheet(f"color: {t.get('text_secondary')};")
         card_layout.addWidget(email_label)
 
@@ -60,7 +60,7 @@ class LoginScreen(QWidget):
         card_layout.addWidget(self._email)
 
         pwd_label = QLabel("PASSWORD")
-        pwd_label.setFont(QFont("Courier New", 10))
+        pwd_label.setFont(QFont("", 10))
         pwd_label.setStyleSheet(f"color: {t.get('text_secondary')};")
         card_layout.addWidget(pwd_label)
 
@@ -74,7 +74,7 @@ class LoginScreen(QWidget):
 
         login_btn = QPushButton("Login")
         login_btn.setFixedHeight(42)
-        login_btn.setFont(QFont("Courier New", 13, QFont.Weight.Bold))
+        login_btn.setFont(QFont("", 13, QFont.Weight.Bold))
         login_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         login_btn.setStyleSheet(
             f"background: {t.get('accent')}; color: {t.get('background')};"
@@ -86,7 +86,7 @@ class LoginScreen(QWidget):
         signup_link = QPushButton("Don't have an account? Sign Up")
         signup_link.setFlat(True)
         signup_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        signup_link.setFont(QFont("Courier New", 11))
+        signup_link.setFont(QFont("", 11))
         signup_link.setStyleSheet(
             f"color: {t.get('status_blue')}; background: transparent; border: none;"
         )

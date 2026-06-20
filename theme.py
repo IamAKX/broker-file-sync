@@ -12,7 +12,12 @@ DARK = {
     "status_red":    "#f85149",
     "status_blue":   "#58a6ff",
     "status_orange": "#e3b341",
-    "info_banner_bg":"#0d4429",
+    "info_banner_bg":"#2d1f00",
+    "info_banner_border":"#d97706",
+    "info_banner_text":"#fcd34d",
+    "watcher_banner_bg":"#0d2116",
+    "watcher_banner_border":"#39d353",
+    "divider":        "#2a2f36",
     "input_bg":      "#0d1117",
     "button_bg":     "#21262d",
     "destructive":   "#da3633",
@@ -21,7 +26,7 @@ DARK = {
 LIGHT = {
     "background":    "#ffffff",
     "sidebar_bg":    "#f6f8fa",
-    "card_bg":       "#ffffff",
+    "card_bg":       "#f6f8fa",
     "border":        "#d0d7de",
     "accent":        "#1a7f37",
     "accent_hover":  "#116329",
@@ -30,9 +35,14 @@ LIGHT = {
     "status_red":    "#cf222e",
     "status_blue":   "#0969da",
     "status_orange": "#9a6700",
-    "info_banner_bg":"#dafbe1",
+    "info_banner_bg":"#fffbeb",
+    "info_banner_border":"#d97706",
+    "info_banner_text":"#78350f",
+    "watcher_banner_bg":"#f0fdf4",
+    "watcher_banner_border":"#1a7f37",
+    "divider":        "#e5e7eb",
     "input_bg":      "#ffffff",
-    "button_bg":     "#f6f8fa",
+    "button_bg":     "#eaecef",
     "destructive":   "#cf222e",
 }
 
@@ -62,18 +72,27 @@ class ThemeManager:
             QWidget {{
                 background-color: {p['background']};
                 color: {p['text_primary']};
-                font-family: 'Courier New', Consolas, monospace;
                 font-size: 13px;
             }}
-            QLineEdit, QPlainTextEdit, QTextEdit, QComboBox {{
+            QLabel {{
+                background-color: transparent;
+            }}
+            QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox {{
                 background-color: {p['input_bg']};
                 color: {p['text_primary']};
                 border: 1px solid {p['border']};
                 border-radius: 4px;
                 padding: 6px 10px;
-                font-family: 'Courier New', Consolas, monospace;
             }}
-            QLineEdit:focus, QPlainTextEdit:focus {{
+            QSpinBox::up-button, QSpinBox::down-button {{
+                background: {p['button_bg']};
+                border: 1px solid {p['border']};
+                width: 16px;
+            }}
+            QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
+                background: {p['accent']};
+            }}
+            QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus {{
                 border: 1px solid {p['accent']};
             }}
             QPushButton {{
@@ -82,7 +101,6 @@ class ThemeManager:
                 border: 1px solid {p['border']};
                 border-radius: 4px;
                 padding: 6px 14px;
-                font-family: 'Courier New', Consolas, monospace;
             }}
             QPushButton:hover {{
                 border-color: {p['accent']};
@@ -97,7 +115,6 @@ class ThemeManager:
                 color: {p['text_secondary']};
                 padding: 6px 16px;
                 border: 1px solid {p['border']};
-                font-family: 'Courier New', Consolas, monospace;
             }}
             QTabBar::tab:selected {{
                 background: {p['card_bg']};
@@ -123,14 +140,11 @@ class ThemeManager:
                 color: {p['text_secondary']};
                 border: 1px solid {p['border']};
                 padding: 4px 8px;
-                font-family: 'Courier New', Consolas, monospace;
                 font-size: 11px;
-                text-transform: uppercase;
             }}
             QMenuBar {{
                 background-color: {p['sidebar_bg']};
                 color: {p['text_primary']};
-                font-family: 'Courier New', Consolas, monospace;
                 font-size: 12px;
             }}
             QMenuBar::item:selected {{
@@ -140,7 +154,6 @@ class ThemeManager:
                 background-color: {p['card_bg']};
                 color: {p['text_primary']};
                 border: 1px solid {p['border']};
-                font-family: 'Courier New', Consolas, monospace;
             }}
             QMenu::item:selected {{
                 background: {p['accent']};
@@ -159,7 +172,6 @@ class ThemeManager:
             }}
             QCheckBox {{
                 color: {p['text_primary']};
-                font-family: 'Courier New', Consolas, monospace;
             }}
             QCheckBox::indicator:checked {{
                 background: {p['accent']};
@@ -171,5 +183,28 @@ class ThemeManager:
             QMessageBox {{
                 background: {p['background']};
                 color: {p['text_primary']};
+            }}
+            QFrame#statCard, QFrame#brokerPanel, QFrame#activityPanel,
+            QFrame#infoCard, QFrame#prefCard, QFrame#notifItem,
+            QFrame#dropArea {{
+                background: {p['card_bg']};
+                border: 1px solid {p['border']};
+                border-radius: 8px;
+            }}
+            QFrame#watcherBanner {{
+                background: {p['watcher_banner_bg']};
+                border: 1px solid {p['watcher_banner_border']};
+                border-radius: 8px;
+            }}
+            QFrame#infoBanner {{
+                background: {p['info_banner_bg']};
+                border-left: 4px solid {p['info_banner_border']};
+                border-top: 1px solid {p['info_banner_border']};
+                border-right: 1px solid {p['info_banner_border']};
+                border-bottom: 1px solid {p['info_banner_border']};
+                border-radius: 4px;
+            }}
+            QLabel#bannerText {{
+                color: {p['info_banner_text']};
             }}
         """)

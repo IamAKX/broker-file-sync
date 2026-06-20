@@ -1,0 +1,69 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# Distribution / packaging
+*.egg-info/
+*.egg
+.eggs/
+dist/
+wheels/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+coverage.xml
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Output / generated files
+output/
+*.xlsx
+*.xls
+*.csv
+
+# Secrets / env
+.env
+.env.*
+*.pem
+*.key
+
+# Temporary
+tmp/
+temp/
+*.tmp
+*.bak
+strategies.json
+

@@ -6,7 +6,7 @@ from app import AppController
 
 def main():
     app = QApplication(sys.argv)
-    app.setFont(QFont("Courier New", 13))
+    app.setFont(QFont("", 13))
     controller = AppController(app)
     controller.start()
     sys.exit(app.exec())

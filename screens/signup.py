@@ -37,12 +37,12 @@ class SignupScreen(QWidget):
         card_layout.setSpacing(14)
 
         title = QLabel("CREATE ACCOUNT")
-        title.setFont(QFont("Courier New", 18, QFont.Weight.Bold))
+        title.setFont(QFont("", 26, QFont.Weight.Bold))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(title)
 
         subtitle = QLabel("Broker File Sync")
-        subtitle.setFont(QFont("Courier New", 11))
+        subtitle.setFont(QFont("", 11))
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         card_layout.addWidget(subtitle)
@@ -56,7 +56,7 @@ class SignupScreen(QWidget):
             ("CONFIRM PASSWORD", "Confirm your password",     True),
         ]:
             lbl = QLabel(field_label)
-            lbl.setFont(QFont("Courier New", 10))
+            lbl.setFont(QFont("", 10))
             lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
             card_layout.addWidget(lbl)
 
@@ -71,7 +71,7 @@ class SignupScreen(QWidget):
 
         create_btn = QPushButton("Create Account")
         create_btn.setFixedHeight(42)
-        create_btn.setFont(QFont("Courier New", 13, QFont.Weight.Bold))
+        create_btn.setFont(QFont("", 13, QFont.Weight.Bold))
         create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         create_btn.setStyleSheet(
             f"background: {t.get('accent')}; color: {t.get('background')};"
@@ -83,7 +83,7 @@ class SignupScreen(QWidget):
         login_link = QPushButton("Already have an account? Login")
         login_link.setFlat(True)
         login_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        login_link.setFont(QFont("Courier New", 11))
+        login_link.setFont(QFont("", 11))
         login_link.setStyleSheet(
             f"color: {t.get('status_blue')}; background: transparent; border: none;"
         )

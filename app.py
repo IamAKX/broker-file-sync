@@ -9,6 +9,9 @@ class AppController:
         self._login = None
         self._signup = None
         self._main_window = None
+        self.output_dir = ""    # set from Profile → Preferences
+        from services.watcher import FileWatcher
+        self.watcher = FileWatcher()
 
     def start(self):
         from screens.login import LoginScreen

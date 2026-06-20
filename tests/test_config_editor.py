@@ -25,13 +25,13 @@ def test_has_tab_widget(screen):
     assert len(tabs) == 1
 
 
-def test_has_two_tabs(screen):
+def test_has_four_tabs(screen):
     from PySide6.QtWidgets import QTabWidget
     tab = screen.findChildren(QTabWidget)[0]
-    assert tab.count() == 2
+    assert tab.count() == 4
 
 
-def test_has_save_button(screen):
+def test_has_add_row_button(screen):
     from PySide6.QtWidgets import QPushButton
     btns = [b.text() for b in screen.findChildren(QPushButton)]
-    assert any("Save" in t for t in btns)
+    assert any("Add Row" in t for t in btns)

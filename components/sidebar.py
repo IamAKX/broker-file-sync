@@ -1,16 +1,22 @@
+import re
+import os
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame, QSizePolicy
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame
 )
-from PySide6.QtCore import Signal, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtCore import Signal, Qt, QByteArray, QSize
+from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter
+from PySide6.QtSvg import QSvgRenderer
 from theme import ThemeManager
 
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
+
 NAV_ITEMS = [
-    ("dashboard",     "⊞  Dashboard"),
-    ("data_import",   "⬆  Data Import"),
-    ("config_editor", "⚙  Config Editor"),
-    ("notifications", "🔔  Notifications"),
-    ("profile",       "👤  My Profile"),
+    ("dashboard",        "Dashboard",       "dashboard.svg"),
+    ("data_import",      "Data Import",     "import.svg"),
+    ("config_editor",    "Config Editor",   "config_editor.svg"),
+    ("strategy_builder", "Strategy Builder","strategy_builder.svg"),
+    ("notifications",    "Notifications",   "notification.svg"),
+    ("profile",          "My Profile",      "profile.svg"),
 ]
 
 BROKERS = [
@@ -20,6 +26,30 @@ BROKERS = [
 ]
 
 
+def _svg_icon(filename: str, color: str) -> QIcon:
+    path = os.path.join(ASSETS_DIR, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            svg = f.read()
+    except FileNotFoundError:
+        return QIcon()
+
+    svg = re.sub(r'<rect\s+width="24"\s+height="24"[^/]*/>', '', svg)
+    svg = re.sub(r'<rect\s+width="24"\s+height="24"[^>]*></rect>', '', svg)
+    # Rewrite fill on root <svg> element (covers inherited fills on child rects)
+    svg = re.sub(r'(<svg\b[^>]*)\bfill="(?!none)[^"]*"', rf'\1fill="{color}"', svg)
+    svg = re.sub(r'(<(?:path|circle|ellipse|polygon|polyline|line|rect)[^>]*)\bfill="(?!none)[^"]*"', rf'\1fill="{color}"', svg)
+    svg = re.sub(r'(<(?:path|circle|ellipse|polygon|polyline|line|rect)[^>]*)\bstroke="(?!none)[^"]*"', rf'\1stroke="{color}"', svg)
+
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
+
+
 class Sidebar(QWidget):
     navigate = Signal(str)
 
@@ -27,7 +57,11 @@ class Sidebar(QWidget):
         super().__init__(parent)
         self._theme = theme
         self._buttons: dict[str, QPushButton] = {}
+        self._nav_meta: list[tuple[str, str, str]] = []
         self._active = "dashboard"
+        # broker row state: name -> (dot_label, name_label, selected)
+        self._broker_rows: list[tuple[str, QLabel, QLabel]] = []
+        self._selected_brokers: set[str] = set()
         self.setMinimumWidth(180)
         self.setMaximumWidth(180)
         self._build()
@@ -37,87 +71,85 @@ class Sidebar(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
-        # Logo
-        logo = QLabel("BROKER\nFILE SYNC")
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
-        logo.setContentsMargins(0, 20, 0, 20)
-        layout.addWidget(logo)
-
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        layout.addWidget(sep)
-
         # Nav items
-        for key, label in NAV_ITEMS:
-            btn = QPushButton(label)
+        for key, label, icon_file in NAV_ITEMS:
+            self._nav_meta.append((key, label, icon_file))
+            btn = QPushButton(f"  {label}")
             btn.setFlat(True)
-            btn.setFixedHeight(40)
+            btn.setFixedHeight(42)
             btn.setCheckable(True)
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setIconSize(QSize(18, 18))
             btn.clicked.connect(lambda _, k=key: self._on_nav(k))
             btn.setStyleSheet(self._nav_style(key == self._active))
+            self._set_btn_icon(btn, icon_file, key == self._active)
             self._buttons[key] = btn
             layout.addWidget(btn)
 
-        layout.addSpacing(16)
+        layout.addStretch()
 
-        # Broker Files section
+        # Broker Files section — above user widget
         broker_label = QLabel("BROKER FILES")
-        broker_label.setFont(QFont("Courier New", 9))
-        broker_label.setContentsMargins(14, 4, 0, 4)
+        broker_label.setFont(QFont("", 9))
+        broker_label.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
+        broker_label.setContentsMargins(14, 8, 0, 4)
         layout.addWidget(broker_label)
 
-        self._dot_labels = []
         for name, color_token in BROKERS:
             row = QWidget()
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(14, 4, 8, 4)
             row_layout.setSpacing(8)
 
-            dot = QLabel("●")
-            dot.setFont(QFont("Courier New", 10))
-            dot.setStyleSheet(f"color: {self._theme.get(color_token)};")
+            dot = QLabel("○")
+            dot.setFont(QFont("", 11))
             dot.setFixedWidth(14)
-            self._dot_labels.append((dot, color_token))
+            dot.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
 
             name_lbl = QLabel(name)
-            name_lbl.setFont(QFont("Courier New", 11))
+            name_lbl.setFont(QFont("", 11))
+            name_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
 
             row_layout.addWidget(dot)
             row_layout.addWidget(name_lbl)
             row_layout.addStretch()
             layout.addWidget(row)
 
-        layout.addStretch()
+            self._broker_rows.append((name, dot, name_lbl))
 
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        layout.addWidget(sep2)
+        layout.addSpacing(8)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        sep.setStyleSheet(f"color: {self._theme.get('border')}; max-height: 1px;")
+        layout.addWidget(sep)
 
         # User widget
         user_widget = QWidget()
-        user_widget.setObjectName("userWidget")
         user_layout = QHBoxLayout(user_widget)
-        user_layout.setContentsMargins(10, 8, 10, 8)
+        user_layout.setContentsMargins(10, 6, 10, 6)
         user_layout.setSpacing(8)
 
-        avatar = QLabel("RJ")
-        avatar.setFixedSize(32, 32)
+        avatar = QLabel("SP")
+        avatar.setFixedSize(28, 28)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
+        avatar.setFont(QFont("", 10, QFont.Weight.Bold))
         avatar.setStyleSheet(
             f"background: {self._theme.get('accent')}; color: {self._theme.get('background')};"
-            "border-radius: 16px;"
+            "border-radius: 14px;"
         )
         self._avatar_label = avatar
 
         user_info = QVBoxLayout()
         user_info.setSpacing(0)
-        name_lbl2 = QLabel("Rajesh")
-        name_lbl2.setFont(QFont("Courier New", 11, QFont.Weight.Bold))
-        email_lbl = QLabel("rajesh.kumar@exa...")
-        email_lbl.setFont(QFont("Courier New", 9))
+        name_lbl2 = QLabel("Sunder P.")
+        name_lbl2.setFont(QFont("", 10))
+        name_lbl2.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
+        email_lbl = QLabel("sunder@gmail.com")
+        email_lbl.setFont(QFont("", 8))
+        email_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
+        self._user_name_lbl = name_lbl2
+        self._user_email_lbl = email_lbl
         user_info.addWidget(name_lbl2)
         user_info.addWidget(email_lbl)
 
@@ -125,18 +157,43 @@ class Sidebar(QWidget):
         user_layout.addLayout(user_info)
         layout.addWidget(user_widget)
 
+    def set_broker_active(self, name: str, active: bool):
+        if active:
+            self._selected_brokers.add(name)
+        else:
+            self._selected_brokers.discard(name)
+        self._refresh_broker_rows()
+
+    def _refresh_broker_rows(self):
+        for name, dot, name_lbl in self._broker_rows:
+            selected = name in self._selected_brokers
+            if selected:
+                dot.setText("●")
+                dot.setStyleSheet(f"color: {self._theme.get('accent')};")
+                name_lbl.setFont(QFont("", 11, QFont.Weight.Bold))
+                name_lbl.setStyleSheet(f"color: {self._theme.get('text_primary')};")
+            else:
+                dot.setText("○")
+                dot.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
+                name_lbl.setFont(QFont("", 11))
+                name_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
+
+    def _set_btn_icon(self, btn: QPushButton, icon_file: str, active: bool):
+        color = self._theme.get("background") if active else self._theme.get("text_secondary")
+        btn.setIcon(_svg_icon(icon_file, color))
+
     def _nav_style(self, active: bool) -> str:
         if active:
             return (
                 f"background: {self._theme.get('accent')};"
                 f"color: {self._theme.get('background')};"
                 "text-align: left; padding-left: 14px; border: none;"
-                "font-family: 'Courier New', monospace; font-size: 13px;"
+                "font-size: 13px;"
             )
         return (
             f"color: {self._theme.get('text_secondary')};"
             "background: transparent; text-align: left; padding-left: 14px;"
-            "border: none; font-family: 'Courier New', monospace; font-size: 13px;"
+            "border: none; font-size: 13px;"
         )
 
     def _on_nav(self, key: str):
@@ -146,13 +203,25 @@ class Sidebar(QWidget):
     def set_active(self, screen_name: str):
         self._active = screen_name
         for key, btn in self._buttons.items():
-            btn.setStyleSheet(self._nav_style(key == screen_name))
-            btn.setChecked(key == screen_name)
+            active = key == screen_name
+            btn.setStyleSheet(self._nav_style(active))
+            btn.setChecked(active)
+            for k, _, icon_file in self._nav_meta:
+                if k == key:
+                    self._set_btn_icon(btn, icon_file, active)
+                    break
 
     def refresh_theme(self):
-        for dot, color_token in self._dot_labels:
-            dot.setStyleSheet(f"color: {self._theme.get(color_token)};")
         self._avatar_label.setStyleSheet(
             f"background: {self._theme.get('accent')}; color: {self._theme.get('background')};"
-            "border-radius: 16px;"
+            "border-radius: 14px;"
         )
+        self._user_name_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
+        self._user_email_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
+        self._refresh_broker_rows()
+        for key, btn in self._buttons.items():
+            active = key == self._active
+            for k, _, icon_file in self._nav_meta:
+                if k == key:
+                    self._set_btn_icon(btn, icon_file, active)
+                    break
