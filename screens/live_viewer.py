@@ -1,3 +1,4 @@
+import font_scale
 import os
 import sys
 import time
@@ -57,7 +58,7 @@ class StrategyPickerPopup(QWidget):
         # Title
         hdr_row = QHBoxLayout()
         title = QLabel("Strategies")
-        title.setFont(QFont("", 13, QFont.Weight.Bold))
+        title.setFont(font_scale.font(font_scale.MEDIUM, True))
         title.setStyleSheet(f"color:{txt};border:none;")
         hdr_row.addWidget(title)
         hdr_row.addStretch()
@@ -65,7 +66,7 @@ class StrategyPickerPopup(QWidget):
 
         if not self._strategies:
             empty = QLabel("No strategies defined yet.\nGo to Strategy Builder.")
-            empty.setFont(QFont("", 10))
+            empty.setFont(font_scale.font(font_scale.SMALL, False))
             empty.setStyleSheet(f"color:{txts};border:none;")
             empty.setWordWrap(True)
             lay.addWidget(empty)
@@ -74,7 +75,7 @@ class StrategyPickerPopup(QWidget):
             for strat in self._strategies:
                 cb = QCheckBox(strat.get("name", "Unnamed"))
                 cb.setChecked(strat.get("active", True))
-                cb.setFont(QFont("", 11))
+                cb.setFont(font_scale.font(font_scale.SMALL, False))
                 cb.setFixedHeight(30)
                 cb.setStyleSheet(
                     f"QCheckBox{{color:{txt};background:transparent;border:none;"
@@ -97,7 +98,7 @@ class StrategyPickerPopup(QWidget):
         # Apply button
         apply_btn = QPushButton("Apply")
         apply_btn.setFixedHeight(32)
-        apply_btn.setFont(QFont("", 11, QFont.Weight.Bold))
+        apply_btn.setFont(font_scale.font(font_scale.SMALL, True))
         apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_btn.setStyleSheet(
             f"QPushButton{{background:{accent};color:{win_bg};"
@@ -157,11 +158,11 @@ class ColumnFilterPopup(QWidget):
         # ── Header ──────────────────────────────────────────────────────────
         hdr_row = QHBoxLayout()
         title = QLabel("Columns")
-        title.setFont(QFont("", 13, QFont.Weight.Bold))
+        title.setFont(font_scale.font(font_scale.MEDIUM, True))
         title.setStyleSheet(f"color: {txt}; border: none;")
 
         self._sel_lbl = QLabel()
-        self._sel_lbl.setFont(QFont("", 10))
+        self._sel_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._sel_lbl.setStyleSheet(f"color: {txt_s}; border: none;")
 
         hdr_row.addWidget(title)
@@ -173,7 +174,7 @@ class ColumnFilterPopup(QWidget):
         self._search = QLineEdit()
         self._search.setPlaceholderText("Search columns…")
         self._search.setFixedHeight(34)
-        self._search.setFont(QFont("", 11))
+        self._search.setFont(font_scale.font(font_scale.SMALL, False))
         self._search.setStyleSheet(
             f"QLineEdit {{ background: {inp_bg}; color: {txt};"
             f"border: 1px solid {border}; border-radius: 6px; padding: 0 10px; }}"
@@ -186,7 +187,7 @@ class ColumnFilterPopup(QWidget):
         for label, slot in [("Select All", self._select_all), ("Clear All", self._clear_all)]:
             btn = QPushButton(label)
             btn.setFixedHeight(26)
-            btn.setFont(QFont("", 10))
+            btn.setFont(font_scale.font(font_scale.SMALL, False))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(
                 f"QPushButton {{ background: transparent; color: {accent};"
@@ -225,7 +226,7 @@ class ColumnFilterPopup(QWidget):
         for i, header in enumerate(self._headers):
             cb = QCheckBox(header)
             cb.setChecked(i in self._visible)
-            cb.setFont(QFont("", 11))
+            cb.setFont(font_scale.font(font_scale.SMALL, False))
             cb.setFixedHeight(32)
             cb.setStyleSheet(
                 f"QCheckBox {{ color: {txt}; background: transparent; border: none;"
@@ -247,7 +248,7 @@ class ColumnFilterPopup(QWidget):
         # ── Apply button ────────────────────────────────────────────────────
         apply_btn = QPushButton("Apply")
         apply_btn.setFixedHeight(34)
-        apply_btn.setFont(QFont("", 11, QFont.Weight.Bold))
+        apply_btn.setFont(font_scale.font(font_scale.SMALL, True))
         apply_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         apply_btn.setStyleSheet(
             f"QPushButton {{ background: {accent}; color: {win_bg};"
@@ -337,21 +338,21 @@ class LiveViewerWindow(QWidget):
         top = QHBoxLayout()
 
         title = QLabel("Live Master View")
-        title.setFont(QFont("", 16, QFont.Weight.Bold))
+        title.setFont(font_scale.font(font_scale.LARGE, True))
         top.addWidget(title)
         top.addStretch()
 
         self._dot = QLabel("●")
-        self._dot.setFont(QFont("", 14))
+        self._dot.setFont(font_scale.font(font_scale.MEDIUM, False))
         self._dot.setStyleSheet(f"color: {accent};")
 
         self._status_lbl = QLabel("Watching for changes…")
-        self._status_lbl.setFont(QFont("", 11))
+        self._status_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._status_lbl.setStyleSheet(f"color: {text_s};")
 
         self._col_btn = QPushButton("⊞  Columns")
         self._col_btn.setFixedHeight(30)
-        self._col_btn.setFont(QFont("", 10))
+        self._col_btn.setFont(font_scale.font(font_scale.SMALL, False))
         self._col_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._col_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {text_s};"
@@ -362,7 +363,7 @@ class LiveViewerWindow(QWidget):
 
         self._strat_btn = QPushButton("⚡  Strategies")
         self._strat_btn.setFixedHeight(30)
-        self._strat_btn.setFont(QFont("", 10))
+        self._strat_btn.setFont(font_scale.font(font_scale.SMALL, False))
         self._strat_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._strat_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {text_s};"
@@ -373,7 +374,7 @@ class LiveViewerWindow(QWidget):
 
         stop_btn = QPushButton("Stop")
         stop_btn.setFixedHeight(30)
-        stop_btn.setFont(QFont("", 10))
+        stop_btn.setFont(font_scale.font(font_scale.SMALL, False))
         stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         stop_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {red};"
@@ -401,7 +402,7 @@ class LiveViewerWindow(QWidget):
 
         # ── Table ─────────────────────────────────────────────────────────────
         self._table = QTableWidget()
-        self._table.setFont(QFont("", 11))
+        self._table.setFont(font_scale.font(font_scale.SMALL, False))
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -555,7 +556,7 @@ class LiveViewerWindow(QWidget):
 
         all_dicts = [dict(zip(disp_headers, row)) for row in disp_data]
 
-        bold_font = QFont("", 11, QFont.Weight.Bold)
+        bold_font = font_scale.font(font_scale.SMALL, True)
         for r, row in enumerate(disp_data):
             row_dict = dict(zip(disp_headers, row))
             for c, val in enumerate(row):

@@ -1,3 +1,4 @@
+import font_scale
 import re
 import os
 from PySide6.QtWidgets import (
@@ -90,7 +91,7 @@ class Sidebar(QWidget):
 
         # Broker Files section — above user widget
         broker_label = QLabel("BROKER FILES")
-        broker_label.setFont(QFont("", 9))
+        broker_label.setFont(font_scale.font(font_scale.SMALL, False))
         broker_label.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
         broker_label.setContentsMargins(14, 8, 0, 4)
         layout.addWidget(broker_label)
@@ -102,12 +103,12 @@ class Sidebar(QWidget):
             row_layout.setSpacing(8)
 
             dot = QLabel("○")
-            dot.setFont(QFont("", 11))
+            dot.setFont(font_scale.font(font_scale.SMALL, False))
             dot.setFixedWidth(14)
             dot.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
 
             name_lbl = QLabel(name)
-            name_lbl.setFont(QFont("", 11))
+            name_lbl.setFont(font_scale.font(font_scale.SMALL, False))
             name_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
 
             row_layout.addWidget(dot)
@@ -133,7 +134,7 @@ class Sidebar(QWidget):
         avatar = QLabel("SP")
         avatar.setFixedSize(28, 28)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setFont(QFont("", 10, QFont.Weight.Bold))
+        avatar.setFont(font_scale.font(font_scale.SMALL, True))
         avatar.setStyleSheet(
             f"background: {self._theme.get('accent')}; color: {self._theme.get('background')};"
             "border-radius: 14px;"
@@ -143,10 +144,10 @@ class Sidebar(QWidget):
         user_info = QVBoxLayout()
         user_info.setSpacing(0)
         name_lbl2 = QLabel("Sunder P.")
-        name_lbl2.setFont(QFont("", 10))
+        name_lbl2.setFont(font_scale.font(font_scale.SMALL, False))
         name_lbl2.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
         email_lbl = QLabel("sunder@gmail.com")
-        email_lbl.setFont(QFont("", 8))
+        email_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         email_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
         self._user_name_lbl = name_lbl2
         self._user_email_lbl = email_lbl
@@ -170,12 +171,12 @@ class Sidebar(QWidget):
             if selected:
                 dot.setText("●")
                 dot.setStyleSheet(f"color: {self._theme.get('accent')};")
-                name_lbl.setFont(QFont("", 11, QFont.Weight.Bold))
+                name_lbl.setFont(font_scale.font(font_scale.SMALL, True))
                 name_lbl.setStyleSheet(f"color: {self._theme.get('text_primary')};")
             else:
                 dot.setText("○")
                 dot.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
-                name_lbl.setFont(QFont("", 11))
+                name_lbl.setFont(font_scale.font(font_scale.SMALL, False))
                 name_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
 
     def _set_btn_icon(self, btn: QPushButton, icon_file: str, active: bool):
@@ -187,13 +188,13 @@ class Sidebar(QWidget):
             return (
                 f"background: {self._theme.get('accent')};"
                 f"color: {self._theme.get('background')};"
-                "text-align: left; padding-left: 14px; border: none;"
-                "font-size: 13px;"
+                f"text-align: left; padding-left: 14px; border: none;"
+                f"font-size: {font_scale.MEDIUM}pt;"
             )
         return (
             f"color: {self._theme.get('text_secondary')};"
-            "background: transparent; text-align: left; padding-left: 14px;"
-            "border: none; font-size: 13px;"
+            f"background: transparent; text-align: left; padding-left: 14px;"
+            f"border: none; font-size: {font_scale.MEDIUM}pt;"
         )
 
     def _on_nav(self, key: str):

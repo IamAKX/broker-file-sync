@@ -1,3 +1,4 @@
+import font_scale
 """
 Strategy Builder screen.
 """
@@ -62,7 +63,7 @@ def _apply_dialog_bg(dialog: QDialog, theme):
 def _btn(text, accent=False, theme=None, small=False, danger=False, outlined=False):
     b = QPushButton(text)
     b.setFixedHeight(28 if small else 34)
-    b.setFont(QFont("", 10 if small else 11))
+    b.setFont(QFont("", 13 if small else 11))
     b.setCursor(Qt.CursorShape.PointingHandCursor)
     _restyle_btn(b, theme, accent=accent, danger=danger, outlined=outlined)
     return b
@@ -186,12 +187,12 @@ class TokenChip(QFrame):
         lay.setSpacing(2)
 
         lbl = QLabel(text)
-        lbl.setFont(QFont("", 10))
+        lbl.setFont(font_scale.font(font_scale.SMALL, False))
         lbl.setStyleSheet(f"color:{fg};background:transparent;border:none;")
 
         x = QPushButton("×")
         x.setFixedSize(16, 16)
-        x.setFont(QFont("", 9))
+        x.setFont(font_scale.font(font_scale.SMALL, False))
         x.setCursor(Qt.CursorShape.PointingHandCursor)
         x.setStyleSheet(
             f"QPushButton{{background:transparent;color:{fg};border:none;padding:0;}}"
@@ -271,12 +272,12 @@ class FormulaBuilder(QWidget):
         self._num_input = QLineEdit()
         self._num_input.setPlaceholderText("Constant…")
         self._num_input.setFixedHeight(30)
-        self._num_input.setFont(QFont("", 10))
+        self._num_input.setFont(font_scale.font(font_scale.SMALL, False))
         self._num_input.setFixedWidth(110)
 
         add_num = QPushButton("Add")
         add_num.setFixedHeight(30)
-        add_num.setFont(QFont("", 10))
+        add_num.setFont(font_scale.font(font_scale.SMALL, False))
         add_num.setCursor(Qt.CursorShape.PointingHandCursor)
         add_num.setStyleSheet(
             f"QPushButton{{background:{accent};color:{_t(t,'background')};border:none;border-radius:4px;padding:0 10px;}}"
@@ -285,7 +286,7 @@ class FormulaBuilder(QWidget):
 
         clr = QPushButton("Clear")
         clr.setFixedHeight(30)
-        clr.setFont(QFont("", 10))
+        clr.setFont(font_scale.font(font_scale.SMALL, False))
         clr.setCursor(Qt.CursorShape.PointingHandCursor)
         clr.setStyleSheet(
             f"QPushButton{{background:transparent;color:{txts};"
@@ -308,11 +309,11 @@ class FormulaBuilder(QWidget):
             self._add_button_row(root, "Conditions", COND_OPS, "op")
             this_row = QHBoxLayout()
             lbl = QLabel("Self-ref:")
-            lbl.setFont(QFont("", 10))
+            lbl.setFont(font_scale.font(font_scale.SMALL, False))
             lbl.setStyleSheet(f"color:{txts};")
             this_btn = QPushButton("THIS (own value)")
             this_btn.setFixedHeight(28)
-            this_btn.setFont(QFont("", 10))
+            this_btn.setFont(font_scale.font(font_scale.SMALL, False))
             this_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             this_btn.setStyleSheet(
                 "QPushButton{background:#9a670033;color:#fbbf24;"
@@ -330,7 +331,7 @@ class FormulaBuilder(QWidget):
 
         # ── Aggregate functions ───────────────────────────────────────────
         agg_lbl = QLabel("Aggregate (across all rows):")
-        agg_lbl.setFont(QFont("", 10))
+        agg_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         agg_lbl.setStyleSheet(f"color:{txts};")
         root.addWidget(agg_lbl)
 
@@ -347,7 +348,7 @@ class FormulaBuilder(QWidget):
 
         # ── LMV column chips ──────────────────────────────────────────────
         col_lbl = QLabel("LMV Columns (click to insert):")
-        col_lbl.setFont(QFont("", 10))
+        col_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         col_lbl.setStyleSheet(f"color:{txts};")
         root.addWidget(col_lbl)
 
@@ -373,7 +374,7 @@ class FormulaBuilder(QWidget):
     def _add_button_row(self, layout, label_text: str, items: list, tok_type: str):
         txts = _t(self._theme, "text_secondary")
         lbl = QLabel(f"{label_text}:")
-        lbl.setFont(QFont("", 10))
+        lbl.setFont(font_scale.font(font_scale.SMALL, False))
         lbl.setStyleSheet(f"color:{txts};")
         layout.addWidget(lbl)
 
@@ -410,7 +411,7 @@ class FormulaBuilder(QWidget):
         bg, fg = palette.get(color, palette["op"])
         b = QPushButton(text)
         b.setFixedHeight(26)
-        b.setFont(QFont("", 10))
+        b.setFont(font_scale.font(font_scale.SMALL, False))
         b.setCursor(Qt.CursorShape.PointingHandCursor)
         b.setStyleSheet(
             f"QPushButton{{background:{bg};color:{fg};"
@@ -500,7 +501,7 @@ class _AggColDialog(QDialog):
         for h in self._headers:
             b = QPushButton(h)
             b.setFlat(True)
-            b.setFont(QFont("", 10))
+            b.setFont(font_scale.font(font_scale.SMALL, False))
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.clicked.connect(lambda _, name=h: self._pick(name))
             vlay.addWidget(b)
@@ -561,7 +562,7 @@ class ColumnEditorDialog(QDialog):
 
         # Formula
         flbl = QLabel("Formula (value):")
-        flbl.setFont(QFont("", 11, QFont.Weight.Bold))
+        flbl.setFont(font_scale.font(font_scale.SMALL, True))
         root.addWidget(flbl)
 
         self._formula_builder = FormulaBuilder(
@@ -577,7 +578,7 @@ class ColumnEditorDialog(QDialog):
         # Conditional formatting
         fmt_hdr = QHBoxLayout()
         fmt_lbl = QLabel("Conditional Formatting:")
-        fmt_lbl.setFont(QFont("", 11, QFont.Weight.Bold))
+        fmt_lbl.setFont(font_scale.font(font_scale.SMALL, True))
         add_rule = _btn("+ Add Rule", theme=t, small=True)
         add_rule.clicked.connect(self._add_fmt_rule)
         fmt_hdr.addWidget(fmt_lbl)
@@ -586,7 +587,7 @@ class ColumnEditorDialog(QDialog):
         root.addLayout(fmt_hdr)
 
         hint = QLabel("First matching rule wins. Use THIS to reference this column's own value.")
-        hint.setFont(QFont("", 9))
+        hint.setFont(font_scale.font(font_scale.SMALL, False))
         hint.setStyleSheet(f"color:{txts};background:transparent;")
         root.addWidget(hint)
 
@@ -645,7 +646,7 @@ class ColumnEditorDialog(QDialog):
 
             hdr = QHBoxLayout()
             lbl = QLabel(f"Rule {idx + 1}")
-            lbl.setFont(QFont("", 10, QFont.Weight.Bold))
+            lbl.setFont(font_scale.font(font_scale.SMALL, True))
             lbl.setStyleSheet("background:transparent;")
             hdr.addWidget(lbl)
             hdr.addStretch()
@@ -672,7 +673,7 @@ class ColumnEditorDialog(QDialog):
             rlay.addLayout(hdr)
 
             cond_lbl = QLabel("Condition (evaluates to true/false):")
-            cond_lbl.setFont(QFont("", 9))
+            cond_lbl.setFont(font_scale.font(font_scale.SMALL, False))
             cond_lbl.setStyleSheet("background:transparent;")
             rlay.addWidget(cond_lbl)
 
@@ -733,14 +734,14 @@ class StrategyCard(QFrame):
 
         top = QHBoxLayout()
         name_lbl = QLabel(self._strategy.get("name", "Unnamed"))
-        name_lbl.setFont(QFont("", 12, QFont.Weight.Bold))
+        name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
         name_lbl.setStyleSheet(f"color:{txt};background:transparent;")
 
         active = self._strategy.get("active", True)
         _color = a if active else txts
         toggle = QPushButton("● Active" if active else "○ Inactive")
         toggle.setFixedHeight(24)
-        toggle.setFont(QFont("", 9))
+        toggle.setFont(font_scale.font(font_scale.SMALL, False))
         toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         toggle.setCheckable(True)
         toggle.setChecked(active)
@@ -758,7 +759,7 @@ class StrategyCard(QFrame):
 
         ncols  = len(self._strategy.get("columns", []))
         info   = QLabel(f"{ncols} column{'s' if ncols != 1 else ''}")
-        info.setFont(QFont("", 10))
+        info.setFont(font_scale.font(font_scale.SMALL, False))
         info.setStyleSheet(f"color:{txts};background:transparent;")
         lay.addWidget(info)
 
@@ -810,7 +811,7 @@ class StrategyEditor(QWidget):
         lbl.setFixedWidth(130)
         self._name_edit = QLineEdit(self._strategy.get("name", ""))
         self._name_edit.setFixedHeight(36)
-        self._name_edit.setFont(QFont("", 12))
+        self._name_edit.setFont(font_scale.font(font_scale.MEDIUM, False))
         name_row.addWidget(lbl)
         name_row.addWidget(self._name_edit)
         root.addLayout(name_row)
@@ -819,7 +820,7 @@ class StrategyEditor(QWidget):
 
         col_hdr = QHBoxLayout()
         col_title = QLabel("Columns")
-        col_title.setFont(QFont("", 13, QFont.Weight.Bold))
+        col_title.setFont(font_scale.font(font_scale.MEDIUM, True))
         add_col  = _btn("+ Add Column",  outlined=True, theme=t, small=True)
         save_btn = _btn("Save Strategy", accent=True,   theme=t, small=True)
         add_col.clicked.connect(self._add_column)
@@ -836,7 +837,7 @@ class StrategyEditor(QWidget):
         warn_txt = _t(t, "status_orange")
         warn_bdr = "#9a670066" if is_dark else "#d97706"
         self._warn_lbl = QLabel("⚠  Load Live Master View first — column names are needed to build formulas.")
-        self._warn_lbl.setFont(QFont("", 10))
+        self._warn_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._warn_lbl.setStyleSheet(
             f"color:{warn_txt};background:{warn_bg};"
             f"border:1px solid {warn_bdr};border-radius:4px;padding:6px 10px;"
@@ -915,12 +916,12 @@ class StrategyEditor(QWidget):
             # Top: name + actions
             top_row = QHBoxLayout()
             name_lbl = QLabel(col.get("name", f"Col{idx+1}"))
-            name_lbl.setFont(QFont("", 11, QFont.Weight.Bold))
+            name_lbl.setFont(font_scale.font(font_scale.SMALL, True))
             name_lbl.setStyleSheet(f"color:{txt};background:transparent;")
 
             nrules   = len(col.get("fmt_rules", []))
             rule_lbl = QLabel(f"{nrules} format rule{'s' if nrules != 1 else ''}")
-            rule_lbl.setFont(QFont("", 9))
+            rule_lbl.setFont(font_scale.font(font_scale.SMALL, False))
             rule_lbl.setStyleSheet(f"color:{txts};background:transparent;")
 
             edit_b = _btn("Edit", theme=t, small=True)
@@ -989,10 +990,10 @@ class StrategyBuilderScreen(QWidget):
         top_lay.setContentsMargins(20, 0, 20, 0)
 
         title = QLabel("Strategy Builder")
-        title.setFont(QFont("", 16, QFont.Weight.Bold))
+        title.setFont(font_scale.font(font_scale.LARGE, True))
 
         self._lmv_warn = QLabel()
-        self._lmv_warn.setFont(QFont("", 10))
+        self._lmv_warn.setFont(font_scale.font(font_scale.SMALL, False))
         self._update_lmv_warn()
 
         new_btn = _btn("+ New Strategy", accent=True, theme=t)
@@ -1022,7 +1023,7 @@ class StrategyBuilderScreen(QWidget):
         left_root.setSpacing(8)
 
         list_title = QLabel("Strategies")
-        list_title.setFont(QFont("", 12, QFont.Weight.Bold))
+        list_title.setFont(font_scale.font(font_scale.MEDIUM, True))
         left_root.addWidget(list_title)
 
         self._list_scroll = QScrollArea()
@@ -1046,7 +1047,7 @@ class StrategyBuilderScreen(QWidget):
 
         self._placeholder = QLabel("← Select a strategy to edit, or create a new one")
         self._placeholder.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._placeholder.setFont(QFont("", 13))
+        self._placeholder.setFont(font_scale.font(font_scale.MEDIUM, False))
         self._placeholder.setStyleSheet(f"color:{txts};")
         right_root.addWidget(self._placeholder)
 
@@ -1072,7 +1073,7 @@ class StrategyBuilderScreen(QWidget):
 
         if not self._strategies:
             empty = QLabel("No strategies yet.\nClick '+ New Strategy'.")
-            empty.setFont(QFont("", 10))
+            empty.setFont(font_scale.font(font_scale.SMALL, False))
             empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
             empty.setWordWrap(True)
             self._list_layout.insertWidget(0, empty)

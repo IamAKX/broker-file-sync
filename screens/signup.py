@@ -1,3 +1,4 @@
+import font_scale
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QFrame
@@ -24,7 +25,7 @@ class SignupScreen(QWidget):
         h.addStretch()
 
         card = QFrame()
-        card.setFixedWidth(420)
+        card.setFixedWidth(480)
         card.setObjectName("signupCard")
         t = self._controller.theme
         card.setStyleSheet(
@@ -37,12 +38,12 @@ class SignupScreen(QWidget):
         card_layout.setSpacing(14)
 
         title = QLabel("CREATE ACCOUNT")
-        title.setFont(QFont("", 26, QFont.Weight.Bold))
+        title.setFont(font_scale.font(font_scale.DISPLAY_LG, True))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(title)
 
         subtitle = QLabel("Broker File Sync")
-        subtitle.setFont(QFont("", 11))
+        subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         card_layout.addWidget(subtitle)
@@ -56,13 +57,14 @@ class SignupScreen(QWidget):
             ("CONFIRM PASSWORD", "Confirm your password",     True),
         ]:
             lbl = QLabel(field_label)
-            lbl.setFont(QFont("", 10))
+            lbl.setFont(font_scale.font(font_scale.MEDIUM, False))
             lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
             card_layout.addWidget(lbl)
 
             inp = QLineEdit()
             inp.setPlaceholderText(placeholder)
-            inp.setFixedHeight(36)
+            inp.setFixedHeight(44)
+            inp.setFont(font_scale.font(font_scale.MEDIUM, False))
             if echo:
                 inp.setEchoMode(QLineEdit.EchoMode.Password)
             card_layout.addWidget(inp)
@@ -70,8 +72,8 @@ class SignupScreen(QWidget):
         card_layout.addSpacing(8)
 
         create_btn = QPushButton("Create Account")
-        create_btn.setFixedHeight(42)
-        create_btn.setFont(QFont("", 13, QFont.Weight.Bold))
+        create_btn.setFixedHeight(48)
+        create_btn.setFont(font_scale.font(font_scale.LARGE, True))
         create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         create_btn.setStyleSheet(
             f"background: {t.get('accent')}; color: {t.get('background')};"
@@ -83,7 +85,7 @@ class SignupScreen(QWidget):
         login_link = QPushButton("Already have an account? Login")
         login_link.setFlat(True)
         login_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        login_link.setFont(QFont("", 11))
+        login_link.setFont(font_scale.font(font_scale.MEDIUM, False))
         login_link.setStyleSheet(
             f"color: {t.get('status_blue')}; background: transparent; border: none;"
         )

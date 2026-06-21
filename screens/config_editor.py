@@ -1,3 +1,4 @@
+import font_scale
 import re
 import os
 from PySide6.QtWidgets import (
@@ -68,7 +69,7 @@ class ConfigTabWidget(QWidget):
         toolbar = QHBoxLayout()
         add_btn = QPushButton("+ Add Row")
         add_btn.setFixedHeight(32)
-        add_btn.setFont(QFont("", 11))
+        add_btn.setFont(font_scale.font(font_scale.SMALL, False))
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         add_btn.setStyleSheet(
             f"background: transparent; color: {t.get('accent')};"
@@ -78,7 +79,7 @@ class ConfigTabWidget(QWidget):
         toolbar.addWidget(add_btn)
 
         self._count_lbl = QLabel()
-        self._count_lbl.setFont(QFont("", 10))
+        self._count_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._count_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         toolbar.addWidget(self._count_lbl)
         toolbar.addStretch()
@@ -87,14 +88,14 @@ class ConfigTabWidget(QWidget):
         self._search_box.setPlaceholderText("Search…")
         self._search_box.setFixedHeight(32)
         self._search_box.setFixedWidth(220)
-        self._search_box.setFont(QFont("", 11))
+        self._search_box.setFont(font_scale.font(font_scale.SMALL, False))
         self._search_box.textChanged.connect(self._on_search)
         toolbar.addWidget(self._search_box)
         layout.addLayout(toolbar)
 
         # Table
         self._table = QTableWidget(0, self._total_cols)
-        self._table.setFont(QFont("", 12))
+        self._table.setFont(font_scale.font(font_scale.MEDIUM, False))
         self._table.verticalHeader().setVisible(False)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
@@ -143,13 +144,13 @@ class ConfigTabWidget(QWidget):
 
         reset_btn = QPushButton("Reset")
         reset_btn.setFixedHeight(36)
-        reset_btn.setFont(QFont("", 12))
+        reset_btn.setFont(font_scale.font(font_scale.MEDIUM, False))
         reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         reset_btn.clicked.connect(self._reset)
 
         save_btn = QPushButton("Save")
         save_btn.setFixedHeight(36)
-        save_btn.setFont(QFont("", 12, QFont.Weight.Bold))
+        save_btn.setFont(font_scale.font(font_scale.MEDIUM, True))
         save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         save_btn.setStyleSheet(
             f"background: {t.get('accent')}; color: {t.get('background')};"
@@ -166,7 +167,7 @@ class ConfigTabWidget(QWidget):
     def _outlined_style(color: str) -> str:
         return (
             f"QPushButton {{ background: transparent; color: {color};"
-            f"border: 1px solid {color}; border-radius: 4px; font-size: 12px; font-weight: bold; }}"
+            f"border: 1px solid {color}; border-radius: 4px; font-size: {font_scale.SMALL}pt; font-weight: bold; }}"
             f"QPushButton:hover {{ background: {color}; color: #ffffff; }}"
         )
 
@@ -364,16 +365,16 @@ class ConfigEditorScreen(QWidget):
         layout.setSpacing(20)
 
         title = QLabel("Config Editor")
-        title.setFont(QFont("", 24, QFont.Weight.Bold))
+        title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
         layout.addWidget(title)
 
         subtitle = QLabel("Manage sector, script, column name, and column order mappings")
-        subtitle.setFont(QFont("", 12))
+        subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         layout.addWidget(subtitle)
 
         tabs = QTabWidget()
-        tabs.setFont(QFont("", 12))
+        tabs.setFont(font_scale.font(font_scale.MEDIUM, False))
 
         tabs.addTab(
             ConfigTabWidget(["Sector", "Stock"], SECTOR_STOCK_DATA, t),

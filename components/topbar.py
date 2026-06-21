@@ -1,3 +1,4 @@
+import font_scale
 import re
 import os
 import sys
@@ -87,14 +88,14 @@ class TopBar(QWidget):
         for menu_name, items in menus:
             btn = QPushButton(menu_name)
             btn.setFlat(True)
-            btn.setFont(QFont("", 11))
+            btn.setFont(font_scale.font(font_scale.SMALL, False))
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             btn.setStyleSheet(
                 f"color: {self._theme.get('text_secondary')};"
                 "background: transparent; border: none; padding: 0 6px;"
             )
             menu = QMenu(self)
-            menu.setFont(QFont("", 11))
+            menu.setFont(font_scale.font(font_scale.SMALL, False))
             for item in items:
                 if item[0] == "---":
                     menu.addSeparator()

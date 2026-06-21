@@ -1,3 +1,4 @@
+import font_scale
 import re
 import os
 from PySide6.QtWidgets import (
@@ -93,7 +94,7 @@ class ChannelCard(QFrame):
         icon_lbl.setFixedSize(20, 20)
         icon_lbl.setPixmap(_svg_icon(icon_file, t.get("accent")).pixmap(QSize(20, 20)))
         name_lbl = QLabel(title)
-        name_lbl.setFont(QFont("", 13, QFont.Weight.Bold))
+        name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
         header.addWidget(icon_lbl)
         header.addSpacing(8)
         header.addWidget(name_lbl)
@@ -110,13 +111,13 @@ class ChannelCard(QFrame):
         # Input fields
         for label_text, placeholder in fields:
             lbl = QLabel(label_text.upper())
-            lbl.setFont(QFont("", 9))
+            lbl.setFont(font_scale.font(font_scale.SMALL, False))
             lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
             layout.addWidget(lbl)
 
             inp = QLineEdit()
             inp.setPlaceholderText(placeholder)
-            inp.setFont(QFont("", 12))
+            inp.setFont(font_scale.font(font_scale.MEDIUM, False))
             inp.setFixedHeight(38)
             self._inputs.append(inp)
             layout.addWidget(inp)
@@ -126,7 +127,7 @@ class ChannelCard(QFrame):
         # Send test button
         send_btn = QPushButton(f"  {send_label}")
         send_btn.setFixedHeight(36)
-        send_btn.setFont(QFont("", 11))
+        send_btn.setFont(font_scale.font(font_scale.SMALL, False))
         send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         send_btn.setIcon(_svg_icon("import.svg", t.get("text_secondary")))
         send_btn.setIconSize(QSize(16, 16))
@@ -178,11 +179,11 @@ class NotificationsScreen(QWidget):
 
         # Title
         title = QLabel("Notification Management")
-        title.setFont(QFont("", 24, QFont.Weight.Bold))
+        title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
         layout.addWidget(title)
 
         subtitle = QLabel("Receive alerts via SMS or Telegram when files are imported or processing completes")
-        subtitle.setFont(QFont("", 12))
+        subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         layout.addWidget(subtitle)
 
@@ -217,7 +218,7 @@ class NotificationsScreen(QWidget):
         tp_layout.setSpacing(12)
 
         triggers_title = QLabel("NOTIFICATION TRIGGERS")
-        triggers_title.setFont(QFont("", 10, QFont.Weight.Bold))
+        triggers_title.setFont(font_scale.font(font_scale.SMALL, True))
         triggers_title.setStyleSheet(f"color: {t.get('text_secondary')};")
         tp_layout.addWidget(triggers_title)
 
@@ -262,9 +263,9 @@ class NotificationsScreen(QWidget):
             text_col = QVBoxLayout()
             text_col.setSpacing(3)
             t_title = QLabel(title_text)
-            t_title.setFont(QFont("", 12, QFont.Weight.Bold))
+            t_title.setFont(font_scale.font(font_scale.MEDIUM, True))
             t_desc = QLabel(desc)
-            t_desc.setFont(QFont("", 10))
+            t_desc.setFont(font_scale.font(font_scale.SMALL, False))
             t_desc.setStyleSheet(f"color: {t.get('text_secondary')};")
             text_col.addWidget(t_title)
             text_col.addWidget(t_desc)
@@ -308,7 +309,7 @@ class NotificationsScreen(QWidget):
         sb_layout.addStretch()
 
         self._triggers_status_lbl = QLabel("")
-        self._triggers_status_lbl.setFont(QFont("", 11))
+        self._triggers_status_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         sb_layout.addWidget(self._triggers_status_lbl)
 
         layout.addWidget(status_bar)
@@ -323,7 +324,7 @@ class NotificationsScreen(QWidget):
 
     def _make_status_dot(self, text: str, color: str) -> QLabel:
         lbl = QLabel(f"● {text}")
-        lbl.setFont(QFont("", 11))
+        lbl.setFont(font_scale.font(font_scale.SMALL, False))
         lbl.setStyleSheet(f"color: {color};")
         return lbl
 

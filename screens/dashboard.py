@@ -1,3 +1,4 @@
+import font_scale
 import re
 import os
 from PySide6.QtWidgets import (
@@ -47,7 +48,7 @@ class StatCard(QFrame):
 
         top_row = QHBoxLayout()
         lbl = QLabel(label)
-        lbl.setFont(QFont("", 9))
+        lbl.setFont(font_scale.font(font_scale.SMALL, False))
         lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
 
         icon_lbl = QLabel()
@@ -60,7 +61,7 @@ class StatCard(QFrame):
         layout.addLayout(top_row)
 
         self._val_lbl = QLabel(value)
-        self._val_lbl.setStyleSheet("font-size: 35px; font-weight: bold;")
+        self._val_lbl.setStyleSheet("font-size: 36pt; font-weight: bold;")
         layout.addWidget(self._val_lbl)
 
     def set_value(self, value: str):
@@ -99,11 +100,11 @@ class DashboardScreen(QWidget):
 
         # Header
         title = QLabel("Dashboard")
-        title.setFont(QFont("", 24, QFont.Weight.Bold))
+        title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
         layout.addWidget(title)
 
         subtitle = QLabel("File import overview and processing activity")
-        subtitle.setFont(QFont("", 12))
+        subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         layout.addWidget(subtitle)
 
@@ -134,7 +135,7 @@ class DashboardScreen(QWidget):
         bp_layout.setSpacing(12)
 
         bp_title = QLabel("BROKER SOURCES")
-        bp_title.setFont(QFont("", 10, QFont.Weight.Bold))
+        bp_title.setFont(font_scale.font(font_scale.SMALL, True))
         bp_title.setStyleSheet(f"color: {t.get('text_secondary')};")
         bp_layout.addWidget(bp_title)
 
@@ -150,20 +151,20 @@ class DashboardScreen(QWidget):
 
             dot = QLabel("●")
             dot.setFixedWidth(14)
-            dot.setStyleSheet(f"color: {color}; font-size: 10px;")
+            dot.setStyleSheet(f"color: {color}; font-size: 12pt;")
 
             info = QVBoxLayout()
             info.setSpacing(2)
             name_lbl = QLabel(name)
-            name_lbl.setFont(QFont("", 12, QFont.Weight.Bold))
+            name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
             stats_lbl = QLabel("0 files – 0 imported")
-            stats_lbl.setFont(QFont("", 10))
+            stats_lbl.setFont(font_scale.font(font_scale.SMALL, False))
             stats_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
             info.addWidget(name_lbl)
             info.addWidget(stats_lbl)
 
             status_lbl = QLabel("Awaiting")
-            status_lbl.setFont(QFont("", 11))
+            status_lbl.setFont(font_scale.font(font_scale.SMALL, False))
             status_lbl.setStyleSheet(
                 f"color: {t.get('text_secondary')}; border: 1px solid {t.get('text_secondary')};"
                 "border-radius: 4px; padding: 2px 8px;"
@@ -191,9 +192,9 @@ class DashboardScreen(QWidget):
 
         ap_header = QHBoxLayout()
         ap_title = QLabel("RECENT FILE ACTIVITY")
-        ap_title.setFont(QFont("", 11, QFont.Weight.Bold))
+        ap_title.setFont(font_scale.font(font_scale.SMALL, True))
         self._total_lbl = QLabel("0 total")
-        self._total_lbl.setFont(QFont("", 10))
+        self._total_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._total_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         ap_header.addWidget(ap_title)
         ap_header.addStretch()
@@ -209,7 +210,7 @@ class DashboardScreen(QWidget):
         ap_layout.addWidget(folder_icon, alignment=Qt.AlignmentFlag.AlignCenter)
 
         empty_msg = QLabel("No files imported yet.\nGo to Data Import to upload broker files.")
-        empty_msg.setFont(QFont("", 12))
+        empty_msg.setFont(font_scale.font(font_scale.MEDIUM, False))
         empty_msg.setAlignment(Qt.AlignmentFlag.AlignCenter)
         empty_msg.setStyleSheet(f"color: {t.get('text_secondary')};")
         empty_msg.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -229,19 +230,19 @@ class DashboardScreen(QWidget):
         wb_layout.setSpacing(12)
 
         self._watcher_dot = QLabel("●")
-        self._watcher_dot.setFont(QFont("", 13))
+        self._watcher_dot.setFont(font_scale.font(font_scale.MEDIUM, False))
         self._watcher_dot.setFixedWidth(18)
 
         self._watcher_info = QLabel()
-        self._watcher_info.setFont(QFont("", 11))
+        self._watcher_info.setFont(font_scale.font(font_scale.SMALL, False))
 
         self._watcher_sync_lbl = QLabel()
-        self._watcher_sync_lbl.setFont(QFont("", 10))
+        self._watcher_sync_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._watcher_sync_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
 
         stop_btn = QPushButton("Stop Watcher")
         stop_btn.setFixedHeight(30)
-        stop_btn.setFont(QFont("", 10))
+        stop_btn.setFont(font_scale.font(font_scale.SMALL, False))
         stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         stop_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {t.get('status_red')};"
@@ -277,7 +278,7 @@ class DashboardScreen(QWidget):
             "<b>Config Editor → Column Name Mapping</b> and script names in "
             "<b>Script Name Mapping</b>."
         )
-        banner_text.setFont(QFont("", 11))
+        banner_text.setFont(font_scale.font(font_scale.SMALL, False))
         banner_text.setObjectName("bannerText")
         banner_text.setWordWrap(True)
         banner_layout.addWidget(info_icon)

@@ -1,3 +1,4 @@
+import font_scale
 import re
 import os
 import sys
@@ -107,12 +108,12 @@ class BrokerImportCard(QFrame):
         # Header row: dot + name + status badge
         header = QHBoxLayout()
         dot = QLabel("●")
-        dot.setStyleSheet(f"color: {t.get(color_token)}; font-size: 11px;")
+        dot.setStyleSheet(f"color: {t.get(color_token)}; font-size: 12pt;")
         dot.setFixedWidth(16)
         name_lbl = QLabel(self._broker)
-        name_lbl.setFont(QFont("", 13, QFont.Weight.Bold))
+        name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
         self._status_lbl = QLabel("Awaiting")
-        self._status_lbl.setFont(QFont("", 11))
+        self._status_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._status_lbl.setStyleSheet(
             f"color: {t.get('text_secondary')}; border: 1px solid {t.get('text_secondary')};"
             "border-radius: 4px; padding: 1px 8px;"
@@ -135,12 +136,12 @@ class BrokerImportCard(QFrame):
         upload_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         drop_main = QLabel("Drop file or click to browse")
-        drop_main.setFont(QFont("", 12))
+        drop_main.setFont(font_scale.font(font_scale.MEDIUM, False))
         drop_main.setStyleSheet(f"color: {t.get('text_secondary')};")
         drop_main.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         drop_hint = QLabel(hint)
-        drop_hint.setFont(QFont("", 10))
+        drop_hint.setFont(font_scale.font(font_scale.SMALL, False))
         drop_hint.setStyleSheet(f"color: {t.get('text_secondary')};")
         drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -161,7 +162,7 @@ class BrokerImportCard(QFrame):
         self._progress.setVisible(False)
         self._pct_lbl = QLabel("")
         self._pct_lbl.setFixedWidth(36)
-        self._pct_lbl.setFont(QFont("", 10))
+        self._pct_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._pct_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         self._pct_lbl.setVisible(False)
         progress_row.addWidget(self._progress)
@@ -171,12 +172,12 @@ class BrokerImportCard(QFrame):
         # Bottom row: file label + delete button
         bottom_row = QHBoxLayout()
         self._file_lbl = QLabel("No files imported yet")
-        self._file_lbl.setFont(QFont("", 10))
+        self._file_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._file_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         self._file_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
         self._delete_btn = QPushButton("✕ Remove")
-        self._delete_btn.setFont(QFont("", 10))
+        self._delete_btn.setFont(font_scale.font(font_scale.SMALL, False))
         self._delete_btn.setFixedHeight(24)
         self._delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._delete_btn.setStyleSheet(
@@ -294,11 +295,11 @@ class DataImportScreen(QWidget):
         layout.setSpacing(20)
 
         title = QLabel("Data Import")
-        title.setFont(QFont("", 24, QFont.Weight.Bold))
+        title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
         layout.addWidget(title)
 
         subtitle = QLabel("Upload Excel exports from your broker platforms. Multiple files per broker are supported.")
-        subtitle.setFont(QFont("", 12))
+        subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
@@ -323,7 +324,7 @@ class DataImportScreen(QWidget):
 
         self._watcher_btn = QPushButton("  Run Watcher")
         self._watcher_btn.setFixedHeight(40)
-        self._watcher_btn.setFont(QFont("", 12, QFont.Weight.Bold))
+        self._watcher_btn.setFont(font_scale.font(font_scale.MEDIUM, True))
         self._watcher_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._watcher_btn.setEnabled(False)
         self._watcher_btn.clicked.connect(self._run_watcher)

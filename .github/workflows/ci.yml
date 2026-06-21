@@ -67,6 +67,7 @@ jobs:
             --add-data "screens:screens" \
             --add-data "services:services" \
             --add-data "components:components" \
+            --add-data "font_scale.py:." \
             --collect-data openpyxl \
             main.py
 
@@ -109,7 +110,9 @@ jobs:
             --add-data "screens;screens" `
             --add-data "services;services" `
             --add-data "components;components" `
+            --add-data "font_scale.py;." `
             --collect-data openpyxl `
+            --manifest "windows_dpi.manifest" `
             main.py
 
       - name: Zip Windows build

@@ -1,3 +1,4 @@
+import font_scale
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QFrame, QSizePolicy
@@ -24,7 +25,7 @@ class LoginScreen(QWidget):
         h.addStretch()
 
         card = QFrame()
-        card.setFixedWidth(420)
+        card.setFixedWidth(480)
         card.setObjectName("loginCard")
         t = self._controller.theme
         card.setStyleSheet(
@@ -37,12 +38,12 @@ class LoginScreen(QWidget):
         card_layout.setSpacing(16)
 
         title = QLabel("BROKER FILE SYNC")
-        title.setFont(QFont("", 28, QFont.Weight.Bold))
+        title.setFont(font_scale.font(font_scale.DISPLAY_LG, True))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(title)
 
         subtitle = QLabel("Excel Processing Software")
-        subtitle.setFont(QFont("", 11))
+        subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         card_layout.addWidget(subtitle)
@@ -50,31 +51,33 @@ class LoginScreen(QWidget):
         card_layout.addSpacing(16)
 
         email_label = QLabel("EMAIL")
-        email_label.setFont(QFont("", 10))
+        email_label.setFont(font_scale.font(font_scale.MEDIUM, False))
         email_label.setStyleSheet(f"color: {t.get('text_secondary')};")
         card_layout.addWidget(email_label)
 
         self._email = QLineEdit()
         self._email.setPlaceholderText("Enter your email")
-        self._email.setFixedHeight(38)
+        self._email.setFixedHeight(44)
+        self._email.setFont(font_scale.font(font_scale.MEDIUM, False))
         card_layout.addWidget(self._email)
 
         pwd_label = QLabel("PASSWORD")
-        pwd_label.setFont(QFont("", 10))
+        pwd_label.setFont(font_scale.font(font_scale.MEDIUM, False))
         pwd_label.setStyleSheet(f"color: {t.get('text_secondary')};")
         card_layout.addWidget(pwd_label)
 
         self._password = QLineEdit()
         self._password.setPlaceholderText("Enter your password")
         self._password.setEchoMode(QLineEdit.EchoMode.Password)
-        self._password.setFixedHeight(38)
+        self._password.setFixedHeight(44)
+        self._password.setFont(font_scale.font(font_scale.MEDIUM, False))
         card_layout.addWidget(self._password)
 
         card_layout.addSpacing(8)
 
         login_btn = QPushButton("Login")
-        login_btn.setFixedHeight(42)
-        login_btn.setFont(QFont("", 13, QFont.Weight.Bold))
+        login_btn.setFixedHeight(48)
+        login_btn.setFont(font_scale.font(font_scale.LARGE, True))
         login_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         login_btn.setStyleSheet(
             f"background: {t.get('accent')}; color: {t.get('background')};"
@@ -86,7 +89,7 @@ class LoginScreen(QWidget):
         signup_link = QPushButton("Don't have an account? Sign Up")
         signup_link.setFlat(True)
         signup_link.setCursor(Qt.CursorShape.PointingHandCursor)
-        signup_link.setFont(QFont("", 11))
+        signup_link.setFont(font_scale.font(font_scale.MEDIUM, False))
         signup_link.setStyleSheet(
             f"color: {t.get('status_blue')}; background: transparent; border: none;"
         )

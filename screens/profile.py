@@ -1,3 +1,4 @@
+import font_scale
 import re
 import os
 from PySide6.QtWidgets import (
@@ -35,14 +36,14 @@ def _svg_icon(filename: str, color: str) -> QIcon:
 
 def _section_label(text: str, theme) -> QLabel:
     lbl = QLabel(text)
-    lbl.setFont(QFont("", 10, QFont.Weight.Bold))
+    lbl.setFont(font_scale.font(font_scale.SMALL, True))
     lbl.setStyleSheet(f"color: {theme.get('text_secondary')};")
     return lbl
 
 
 def _field_label(text: str, theme) -> QLabel:
     lbl = QLabel(text)
-    lbl.setFont(QFont("", 9))
+    lbl.setFont(font_scale.font(font_scale.SMALL, False))
     lbl.setStyleSheet(f"color: {theme.get('text_secondary')};")
     return lbl
 
@@ -70,16 +71,16 @@ class ProfileScreen(QWidget):
         title_col = QVBoxLayout()
         title_col.setSpacing(4)
         title = QLabel("My Profile")
-        title.setFont(QFont("", 24, QFont.Weight.Bold))
+        title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
         subtitle = QLabel("Manage account details and application preferences")
-        subtitle.setFont(QFont("", 12))
+        subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         title_col.addWidget(title)
         title_col.addWidget(subtitle)
 
         save_btn = QPushButton("  Save Changes")
         save_btn.setFixedHeight(38)
-        save_btn.setFont(QFont("", 12, QFont.Weight.Bold))
+        save_btn.setFont(font_scale.font(font_scale.MEDIUM, True))
         save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         save_btn.setIcon(_svg_icon("save.svg", t.get("background")))
         save_btn.setIconSize(QSize(16, 16))
@@ -112,7 +113,7 @@ class ProfileScreen(QWidget):
         avatar = QLabel("SP")
         avatar.setFixedSize(72, 72)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        avatar.setFont(QFont("", 22, QFont.Weight.Bold))
+        avatar.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
         avatar.setStyleSheet(
             f"background: {t.get('accent')}; color: {t.get('background')};"
             "border-radius: 8px;"
@@ -120,12 +121,12 @@ class ProfileScreen(QWidget):
         left_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignHCenter)
 
         name_lbl = QLabel("Sunder P.")
-        name_lbl.setFont(QFont("", 14, QFont.Weight.Bold))
+        name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
         name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         left_layout.addWidget(name_lbl)
 
         email_lbl = QLabel("sunder@gmail.com")
-        email_lbl.setFont(QFont("", 11))
+        email_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         email_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         email_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         left_layout.addWidget(email_lbl)
@@ -144,10 +145,10 @@ class ProfileScreen(QWidget):
         ]:
             row = QHBoxLayout()
             sl = QLabel(stat_label)
-            sl.setFont(QFont("", 10))
+            sl.setFont(font_scale.font(font_scale.SMALL, False))
             sl.setStyleSheet(f"color: {t.get('text_secondary')};")
             sv = QLabel(stat_value)
-            sv.setFont(QFont("", 10))
+            sv.setFont(font_scale.font(font_scale.SMALL, False))
             sv.setAlignment(Qt.AlignmentFlag.AlignRight)
             row.addWidget(sl)
             row.addStretch()
@@ -159,7 +160,7 @@ class ProfileScreen(QWidget):
         # Sign Out
         signout_btn = QPushButton("  Sign Out")
         signout_btn.setFixedHeight(38)
-        signout_btn.setFont(QFont("", 12))
+        signout_btn.setFont(font_scale.font(font_scale.MEDIUM, False))
         signout_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         signout_btn.setIconSize(QSize(16, 16))
         signout_btn.setStyleSheet(
@@ -256,7 +257,7 @@ class ProfileScreen(QWidget):
 
         upd_btn = QPushButton("  Update Password")
         upd_btn.setFixedHeight(36)
-        upd_btn.setFont(QFont("", 11))
+        upd_btn.setFont(font_scale.font(font_scale.SMALL, False))
         upd_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         upd_btn.setIcon(_svg_icon("password.svg", t.get("text_primary")))
         upd_btn.setIconSize(QSize(16, 16))

@@ -1,4 +1,5 @@
 from PySide6.QtWidgets import QApplication
+import font_scale
 
 DARK = {
     "background":    "#0d1117",
@@ -62,34 +63,18 @@ class ThemeManager:
     def get(self, token: str) -> str:
         return PALETTES[self._mode][token]
 
-    def _get_dpi_scale(self) -> float:
-        """Get DPI scale factor for font sizes"""
-        if self._app.primaryScreen():
-            dpi = self._app.primaryScreen().logicalDotsPerInch()
-            return dpi / 96.0
-        return 1.0
-
-    def _scale_font(self, size: int) -> int:
-        """Scale font size based on DPI"""
-        return int(size * self._get_dpi_scale())
-
     def toggle(self):
         self._mode = "light" if self._mode == "dark" else "dark"
         self.apply()
 
     def apply(self):
         p = PALETTES[self._mode]
-        
-        # Scale font sizes based on DPI for Windows high-DPI support
-        base_size = self._scale_font(13)
-        menu_size = self._scale_font(12)
-        header_size = self._scale_font(11)
-        
+
         self._app.setStyleSheet(f"""
             QWidget {{
                 background-color: {p['background']};
                 color: {p['text_primary']};
-                font-size: {base_size}px;
+                font-size: {font_scale.MEDIUM}pt;
             }}
             QLabel {{
                 background-color: transparent;
@@ -157,12 +142,12 @@ class ThemeManager:
                 color: {p['text_secondary']};
                 border: 1px solid {p['border']};
                 padding: 4px 8px;
-                font-size: {header_size}px;
+                font-size: {font_scale.SMALL}pt;
             }}
             QMenuBar {{
                 background-color: {p['sidebar_bg']};
                 color: {p['text_primary']};
-                font-size: {menu_size}px;
+                font-size: {font_scale.MEDIUM}pt;
             }}
             QMenuBar::item:selected {{
                 background: {p['button_bg']};
