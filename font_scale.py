@@ -1,16 +1,13 @@
-from PySide6.QtGui import QFont
-
-SMALL  = 10
-MEDIUM = 12
-LARGE  = 16
-
-# Display sizes (titles, headings) — proportionally scaled
-DISPLAY_SM = 22   # section headings
-DISPLAY_MD = 28   # screen titles  (was ~27)
-DISPLAY_LG = 36   # login/signup title (was ~33-35)
+SMALL      = 14
+MEDIUM     = 16
+LARGE      = 18
+DISPLAY_SM = 22
+DISPLAY_MD = 28
+DISPLAY_LG = 36
 
 
-def font(size: int, bold: bool = False) -> QFont:
+def font(size: int, bold: bool = False):
+    from PySide6.QtGui import QFont
     w = QFont.Weight.Bold if bold else QFont.Weight.Normal
     return QFont("", size, w)
 
