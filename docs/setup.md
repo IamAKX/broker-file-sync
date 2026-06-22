@@ -1,6 +1,14 @@
 # 🚀 Setup & Installation
 
-## Prerequisites
+## Just Want to Run the App?
+
+Download a pre-built executable from the [Releases page](https://github.com/IamAKX/broker-file-sync/releases) — no Python installation required.
+
+→ See [Building Executables](building.md) for download and first-run instructions.
+
+---
+
+## Prerequisites (Source / Developer Setup)
 
 | Requirement | Version |
 |-------------|---------|

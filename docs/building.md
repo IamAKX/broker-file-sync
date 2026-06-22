@@ -4,12 +4,39 @@ Broker File Sync uses **PyInstaller** to produce standalone executables. Builds 
 
 ---
 
-## Automated Builds (Recommended)
+## Download & Run (No Python Required)
+
+If you just want to run the app without installing Python or building anything yourself:
+
+### Windows
+
+1. Go to the [Releases page](https://github.com/IamAKX/broker-file-sync/releases)
+2. Download `BrokerFileSync-windows.zip` from the latest release
+3. Unzip it — you'll get a `BrokerFileSync/` folder
+4. Open the folder and double-click **`BrokerFileSync.exe`**
+
+> ⚠️ Windows may show a SmartScreen warning ("Windows protected your PC") because the exe is unsigned. Click **More info → Run anyway** to proceed.
+
+> 💡 Keep the entire `BrokerFileSync/` folder intact — the `.exe` depends on files alongside it. Do not move the `.exe` out of the folder.
+
+### macOS
+
+1. Go to the [Releases page](https://github.com/IamAKX/broker-file-sync/releases)
+2. Download `BrokerFileSync-mac.zip` from the latest release
+3. Unzip it — you'll get `BrokerFileSync.app`
+4. Drag it to your **Applications** folder (optional but recommended)
+5. Double-click to launch
+
+> ⚠️ On first launch macOS will block the app. Go to **System Settings → Privacy & Security** and click **Open Anyway**.
+
+---
+
+## Automated Builds (CI)
 
 Every push to `main` triggers the CI pipeline which:
-1. Runs all 44 tests
+1. Runs all tests
 2. Builds a macOS `.app` bundle
-3. Builds a Windows `.exe`
+3. Builds a Windows `.exe` (with `pywin32` bundled for live TradeTiger data)
 4. Creates a GitHub Release with both as downloadable `.zip` files
 
 → Download the latest build from the [Releases page](https://github.com/IamAKX/broker-file-sync/releases)
@@ -48,6 +75,11 @@ pyinstaller --windowed --onedir --name "BrokerFileSync" ^
   --add-data "components;components" ^
   --add-data "font_scale.py;." ^
   --collect-data openpyxl ^
+  --collect-all pywin32 ^
+  --hidden-import win32com.client ^
+  --hidden-import win32com ^
+  --hidden-import pythoncom ^
+  --hidden-import pywintypes ^
   --manifest "windows_dpi.manifest" ^
   main.py
 ```
