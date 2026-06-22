@@ -7,7 +7,6 @@ import font_scale
 
 
 def main():
-    # Must be set before QApplication is created for Windows DPI awareness
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 
@@ -16,7 +15,7 @@ def main():
     )
 
     app = QApplication(sys.argv)
-    app.setFont(font_scale.F_MEDIUM())
+    app.setFont(font_scale.F_MEDIUM())   # now uses Segoe UI + scaled size on Windows
 
     controller = AppController(app)
     controller.start()

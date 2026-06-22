@@ -1,15 +1,32 @@
-SMALL      = 14
-MEDIUM     = 16
-LARGE      = 18
-DISPLAY_SM = 22
-DISPLAY_MD = 28
-DISPLAY_LG = 36
+import sys
+from PySide6.QtGui import QFont
+
+# Windows renders pt sizes larger due to 96 DPI baseline vs macOS 72 DPI.
+# Segoe UI is the correct modern Windows font; San Francisco is default on Mac.
+if sys.platform == "win32":
+    _FAMILY   = "Segoe UI"
+    _SCALE    = 0.80          # scale down all sizes on Windows
+else:
+    _FAMILY   = ""            # use system default (SF on Mac)
+    _SCALE    = 1.0
+
+def _s(size: int) -> int:
+    return max(8, round(size * _SCALE))
+
+SMALL      = _s(14)
+MEDIUM     = _s(16)
+LARGE      = _s(18)
+DISPLAY_SM = _s(22)
+DISPLAY_MD = _s(28)
+DISPLAY_LG = _s(36)
 
 
-def font(size: int, bold: bool = False):
-    from PySide6.QtGui import QFont
+def font(size: int, bold: bool = False) -> QFont:
     w = QFont.Weight.Bold if bold else QFont.Weight.Normal
-    return QFont("", size, w)
+    f = QFont(_FAMILY, size, w)
+    if sys.platform == "win32":
+        f.setHintingPreference(QFont.HintingPreference.PreferFullHinting)
+    return f
 
 
 F_SMALL      = lambda bold=False: font(SMALL,      bold)
