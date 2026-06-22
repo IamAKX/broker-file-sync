@@ -14,6 +14,7 @@ class AppController:
         self.watcher = FileWatcher()
 
     def start(self):
+        self.theme.apply()   # re-apply now that primaryScreen() is available
         from screens.login import LoginScreen
         self._login = LoginScreen(self)
         self._login.show()

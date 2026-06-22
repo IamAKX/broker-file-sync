@@ -70,6 +70,9 @@ class ThemeManager:
     def apply(self):
         p = PALETTES[self._mode]
 
+        if not self._app.primaryScreen():
+            return
+
         self._app.setStyleSheet(f"""
             QWidget {{
                 background-color: {p['background']};
