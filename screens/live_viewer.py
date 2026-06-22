@@ -668,12 +668,13 @@ class LiveViewerWindow(QWidget):
         popup.show()
 
     def _on_strategies_applied(self, updated: list):
-        self._strategies = updated
-        # Persist toggle state back to store
+        # Merge updated strategies back by ID so strategies outside the current
+        # category filter are not overwritten.
+        updated_by_id = {s["id"]: s for s in updated}
+        self._strategies = [updated_by_id.get(s["id"], s) for s in self._strategies]
         from services import strategy_store as store
         for s in updated:
             store.save_strategy(s)
-        # Reset visible_cols to base headers so new strategy cols get added
         self._visible_cols = set(range(len(self._headers)))
         self._populate_table(self._data, set())
 

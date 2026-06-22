@@ -116,6 +116,34 @@ def test_filtered_strategies_all(qapp, tmp_path, monkeypatch):
     assert len(lmv._filtered_strategies()) == 3
 
 
+def test_strategies_applied_merges_not_replaces(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    strats = [
+        {"id": "1", "name": "A", "active": True,  "category": "Daily",  "columns": []},
+        {"id": "2", "name": "B", "active": True,  "category": "Weekly", "columns": []},
+        {"id": "3", "name": "C", "active": False, "category": "Weekly", "columns": []},
+    ]
+    lmv.set_strategies(strats)
+    lmv._cat_combo.setCurrentText("Weekly")
+    # Simulate picker returning only the Weekly subset with B toggled off
+    weekly_updated = [
+        {"id": "2", "name": "B", "active": False, "category": "Weekly", "columns": []},
+        {"id": "3", "name": "C", "active": True,  "category": "Weekly", "columns": []},
+    ]
+    lmv._on_strategies_applied(weekly_updated)
+    # All 3 strategies must still be present
+    assert len(lmv._strategies) == 3
+    # B and C should reflect the updated active state
+    by_id = {s["id"]: s for s in lmv._strategies}
+    assert by_id["2"]["active"] is False
+    assert by_id["3"]["active"] is True
+    # A (Daily) must be untouched
+    assert by_id["1"]["active"] is True
+
+
 def test_filtered_strategies_by_category(qapp, tmp_path, monkeypatch):
     from services import strategy_store as store
     monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
