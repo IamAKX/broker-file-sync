@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QFrame,
-    QLineEdit, QScrollArea, QCheckBox, QSizePolicy
+    QLineEdit, QScrollArea, QCheckBox, QSizePolicy, QComboBox
 )
 from PySide6.QtCore import Qt, QTimer, QFileSystemWatcher, Signal
 from PySide6.QtGui import QFont, QColor, QBrush
@@ -315,6 +315,7 @@ class LiveViewerWindow(QWidget):
         self._dot_state          = True
         self._visible_cols: set  = set()   # populated after first load
         self._strategies: list   = []      # injected by DataImportScreen
+        self._selected_category: str = "All"
 
         self.setWindowTitle("Live Master View")
         self.resize(1300, 700)
@@ -373,6 +374,14 @@ class LiveViewerWindow(QWidget):
         )
         self._strat_btn.clicked.connect(self._show_strategy_picker)
 
+        self._cat_combo = QComboBox()
+        self._cat_combo.addItems(["All", "Daily", "Weekly", "Monthly"])
+        self._cat_combo.setCurrentText("All")
+        self._cat_combo.setFixedHeight(30)
+        self._cat_combo.setFont(font_scale.font(font_scale.SMALL, False))
+        self._cat_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cat_combo.currentTextChanged.connect(self._on_category_changed)
+
         stop_btn = QPushButton("Stop")
         stop_btn.setFixedHeight(30)
         stop_btn.setFont(font_scale.font(font_scale.SMALL, False))
@@ -390,6 +399,8 @@ class LiveViewerWindow(QWidget):
         top.addSpacing(12)
         top.addWidget(self._col_btn)
         top.addSpacing(8)
+        top.addWidget(self._cat_combo)
+        top.addSpacing(4)
         top.addWidget(self._strat_btn)
         top.addSpacing(8)
         top.addWidget(stop_btn)
@@ -544,7 +555,7 @@ class LiveViewerWindow(QWidget):
         from services.strategy_engine import apply_strategies, get_cell_color
 
         # Apply active strategies — may extend headers and data
-        active_strategies = [s for s in self._strategies if s.get("active")]
+        active_strategies = [s for s in self._filtered_strategies() if s.get("active")]
         if active_strategies:
             disp_headers, disp_data = apply_strategies(
                 active_strategies, self._headers, data
@@ -637,8 +648,19 @@ class LiveViewerWindow(QWidget):
         self._update_strat_btn_label()
         self._populate_table(self._data, set())
 
+    def _filtered_strategies(self) -> list:
+        if self._selected_category == "All":
+            return self._strategies
+        return [s for s in self._strategies if s.get("category", "Daily") == self._selected_category]
+
+    def _on_category_changed(self, text: str):
+        self._selected_category = text
+        self._update_strat_btn_label()
+        self._visible_cols = set(range(len(self._headers)))
+        self._populate_table(self._data, set())
+
     def _show_strategy_picker(self):
-        popup = StrategyPickerPopup(self._strategies, self._theme, self)
+        popup = StrategyPickerPopup(self._filtered_strategies(), self._theme, self)
         popup.applied.connect(self._on_strategies_applied)
         btn_pos = self._strat_btn.mapToGlobal(self._strat_btn.rect().bottomLeft())
         popup.adjustSize()
@@ -656,8 +678,9 @@ class LiveViewerWindow(QWidget):
         self._populate_table(self._data, set())
 
     def _update_strat_btn_label(self):
-        active = sum(1 for s in self._strategies if s.get("active"))
-        total  = len(self._strategies)
+        filtered = self._filtered_strategies()
+        active = sum(1 for s in filtered if s.get("active"))
+        total  = len(filtered)
         if total == 0:
             self._strat_btn.setText("⚡  Strategies")
         elif active == 0:
