@@ -51,3 +51,36 @@ def test_load_all_backfills_category(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "_STORE_FILE", str(store_file))
     result = store.load_all()
     assert result[0]["category"] == "Daily"
+
+
+def test_strategy_editor_has_category_combo(qapp):
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyEditor
+    s = new_strategy("T")
+    editor = StrategyEditor(s, [], None)
+    assert hasattr(editor, "_category_combo")
+    assert editor._category_combo.currentText() == "Daily"
+
+
+def test_strategy_editor_save_writes_category(qapp):
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyEditor
+    s = new_strategy("T")
+    s["category"] = "Weekly"
+    editor = StrategyEditor(s, [], None)
+    saved = {}
+    editor.saved.connect(lambda d: saved.update(d))
+    editor._category_combo.setCurrentText("Monthly")
+    editor._save()
+    assert saved["category"] == "Monthly"
+
+
+def test_strategy_card_shows_category_badge(qapp):
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyCard
+    from PySide6.QtWidgets import QLabel
+    s = new_strategy("T")
+    s["category"] = "Weekly"
+    card = StrategyCard(s, None)
+    labels = [lbl.text() for lbl in card.findChildren(QLabel)]
+    assert "Weekly" in labels

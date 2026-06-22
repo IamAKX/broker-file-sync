@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QLineEdit, QSizePolicy, QDialog,
-    QColorDialog, QMessageBox, QApplication
+    QColorDialog, QMessageBox, QApplication, QComboBox
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QColor
@@ -752,7 +752,16 @@ class StrategyCard(QFrame):
         toggle.clicked.connect(self._on_toggle)
         self._toggle_btn = toggle
 
+        cat = self._strategy.get("category", "Daily")
+        cat_badge = QLabel(cat)
+        cat_badge.setFont(font_scale.font(font_scale.SMALL, False))
+        cat_badge.setStyleSheet(
+            f"color:{txts};background:transparent;"
+            f"border:1px solid {txts}55;border-radius:3px;padding:1px 6px;"
+        )
+
         top.addWidget(name_lbl)
+        top.addWidget(cat_badge)
         top.addStretch()
         top.addWidget(toggle)
         lay.addLayout(top)
@@ -815,6 +824,17 @@ class StrategyEditor(QWidget):
         name_row.addWidget(lbl)
         name_row.addWidget(self._name_edit)
         root.addLayout(name_row)
+
+        cat_row = QHBoxLayout()
+        cat_lbl = QLabel("Category:")
+        cat_lbl.setFixedWidth(130)
+        self._category_combo = QComboBox()
+        self._category_combo.addItems(["Daily", "Weekly", "Monthly"])
+        self._category_combo.setCurrentText(self._strategy.get("category", "Daily"))
+        self._category_combo.setFixedHeight(36)
+        cat_row.addWidget(cat_lbl)
+        cat_row.addWidget(self._category_combo)
+        root.addLayout(cat_row)
 
         root.addWidget(_sep(t))
 
@@ -953,7 +973,8 @@ class StrategyEditor(QWidget):
             self._col_layout.insertWidget(self._col_layout.count() - 1, row_frame)
 
     def _save(self):
-        self._strategy["name"] = self._name_edit.text().strip() or "Untitled"
+        self._strategy["name"]     = self._name_edit.text().strip() or "Untitled"
+        self._strategy["category"] = self._category_combo.currentText()
         self.saved.emit(copy.deepcopy(self._strategy))
 
 
