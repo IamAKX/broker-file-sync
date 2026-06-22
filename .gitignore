@@ -67,3 +67,6 @@ temp/
 *.bak
 strategies.json
 
+# Superpowers internal docs
+docs/superpowers/
+
