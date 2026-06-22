@@ -38,7 +38,8 @@ Output: `dist/BrokerFileSync.app`
 ## Manual Build — Windows
 
 ```cmd
-pip install pyinstaller
+pip install pyinstaller pywin32
+python -m pywin32_postinstall -install
 
 pyinstaller --windowed --onedir --name "BrokerFileSync" ^
   --add-data "assets;assets" ^

@@ -14,7 +14,8 @@ from PySide6.QtCore import Qt, QTimer, QFileSystemWatcher, Signal
 from PySide6.QtGui import QFont, QColor, QBrush
 
 
-_DEBOUNCE_MS = 300   # ms to wait after file event before re-reading
+_DEBOUNCE_MS  = 300    # ms to wait after file event before re-reading
+_COM_POLL_MS  = 1000   # COM polling interval — 1s for live trading data
 
 
 # ── Strategy selector popup ────────────────────────────────────────────────
@@ -418,18 +419,32 @@ class LiveViewerWindow(QWidget):
         self._pulse_timer.timeout.connect(self._pulse)
         self._pulse_timer.start()
 
-    # ── File watching ─────────────────────────────────────────────────────────
+    # ── File watching / COM polling ───────────────────────────────────────────
 
     def _setup_watcher(self):
-        self._fs_watcher = QFileSystemWatcher(self)
-        self._fs_watcher.addPath(self._sharekhan_path)
-        self._fs_watcher.fileChanged.connect(self._on_file_changed)
+        from services.com_reader import is_available as com_available
+        self._use_com = com_available()
 
-        # Debounce: collapse rapid successive events into one refresh
-        self._debounce = QTimer(self)
-        self._debounce.setSingleShot(True)
-        self._debounce.setInterval(_DEBOUNCE_MS)
-        self._debounce.timeout.connect(self._refresh)
+        if self._use_com:
+            # Windows + pywin32: poll Excel COM object directly.
+            # TradeTiger updates Excel via DDE (in-memory) so the file on
+            # disk never changes — QFileSystemWatcher would never fire.
+            self._com_timer = QTimer(self)
+            self._com_timer.setInterval(_COM_POLL_MS)
+            self._com_timer.timeout.connect(self._refresh)
+            self._com_timer.start()
+            # Keep fs_watcher as a no-op fallback so _stop() doesn't error
+            self._fs_watcher = QFileSystemWatcher(self)
+            self._debounce   = QTimer(self)
+        else:
+            # macOS / Linux: fall back to QFileSystemWatcher + debounce
+            self._fs_watcher = QFileSystemWatcher(self)
+            self._fs_watcher.addPath(self._sharekhan_path)
+            self._fs_watcher.fileChanged.connect(self._on_file_changed)
+            self._debounce = QTimer(self)
+            self._debounce.setSingleShot(True)
+            self._debounce.setInterval(_DEBOUNCE_MS)
+            self._debounce.timeout.connect(self._refresh)
 
     def _on_file_changed(self, path: str):
         # Re-add watch if the app briefly removed the file on save
@@ -498,19 +513,28 @@ class LiveViewerWindow(QWidget):
         self._update_col_btn_label()
 
     def _refresh(self):
-        # Brief wait so the writing app has fully flushed the file
-        time.sleep(0.2)
-        try:
-            headers, new_data = self._merge()
-        except Exception as exc:
-            self._status_lbl.setText(f"Read error: {str(exc)[:80]}")
-            return
+        from datetime import datetime
+
+        if getattr(self, "_use_com", False):
+            # Windows: read live data directly from open Excel via COM
+            from services.com_reader import read_snap_sheet
+            result = read_snap_sheet()
+            if result is None:
+                self._status_lbl.setText("Waiting for Snap.xls in Excel…")
+                return
+            headers, new_data = result
+        else:
+            # macOS / Linux: re-read and merge from disk files
+            time.sleep(0.2)
+            try:
+                headers, new_data = self._merge()
+            except Exception as exc:
+                self._status_lbl.setText(f"Read error: {str(exc)[:80]}")
+                return
 
         self._data    = new_data
         self._headers = headers
         self._populate_table(new_data, set())
-
-        from datetime import datetime
         self._status_lbl.setText(f"Updated: {datetime.now().strftime('%H:%M:%S')}")
 
 
@@ -677,6 +701,8 @@ class LiveViewerWindow(QWidget):
     def _stop(self):
         self._fs_watcher.removePaths(self._fs_watcher.files())
         self._debounce.stop()
+        if hasattr(self, "_com_timer"):
+            self._com_timer.stop()
         self._pulse_timer.stop()
         t   = self._theme
         red = t.get("status_red") if t else "#f85149"

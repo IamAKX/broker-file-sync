@@ -10,76 +10,117 @@
 
 ---
 
-## 1️⃣ Clone the Repository
+## 🍎 macOS Setup
+
+### 1. Clone the Repository
 
 ```bash
 git clone https://github.com/IamAKX/broker-file-sync.git
 cd broker-file-sync
 ```
 
----
+### 2. Create a Virtual Environment
 
-## 2️⃣ Create a Virtual Environment
-
-**macOS / Linux**
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 ```
 
-**Windows**
-```cmd
-python -m venv .venv
-.venv\Scripts\activate
-```
-
----
-
-## 3️⃣ Install Dependencies
+### 3. Install Dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### Dependencies
-
-| Package | Purpose |
-|---------|---------|
-| `PySide6 >= 6.6` | Qt6 GUI framework |
-| `openpyxl` | Read/write `.xlsx` files |
-| `xlrd` | Read legacy `.xls` files |
-
----
-
-## 4️⃣ Run the App
+### 4. Run the App
 
 ```bash
 python main.py
 ```
 
-The app opens on the **Login** screen. Click **Login** to enter (no credentials required in the prototype).
+---
+
+## 🪟 Windows Setup
+
+### 1. Clone the Repository
+
+```cmd
+git clone https://github.com/IamAKX/broker-file-sync.git
+cd broker-file-sync
+```
+
+### 2. Create a Virtual Environment
+
+```cmd
+python -m venv .venv
+.venv\Scripts\activate
+```
+
+### 3. Install Core Dependencies
+
+```cmd
+pip install -r requirements.txt
+```
+
+### 4. Install pywin32 (Required for Live TradeTiger Data)
+
+TradeTiger pushes live prices into Excel via **DDE** — the file on disk never updates continuously. `pywin32` lets the app read directly from the open Excel instance via COM automation.
+
+```cmd
+pip install pywin32
+python -m pywin32_postinstall -install
+```
+
+> ⚠️ The `pywin32_postinstall` step is **mandatory** — without it, the COM runtime won't initialise correctly and live data won't work.
+
+### 5. Run the App
+
+```cmd
+python main.py
+```
 
 ---
 
-## 🗂️ First-Time Setup
+## 🔴 Setting Up TradeTiger Live Data (Windows)
 
-1. Go to **Data Import**
-2. Drop your broker Excel files onto each broker card
-3. Click **Run Watcher** — the Live Master View opens
-4. Go to **Strategy Builder** to create formula columns
-5. Go to **My Profile** → Preferences to set your output directory
+For the Live Master View to update in real time, TradeTiger must push data to Excel first:
+
+1. Open **TradeTiger**
+2. Open your **Market Watch**
+3. Right-click → **Snap to Excel**
+4. Excel opens with a `Snap.xls` workbook — prices will start updating live
+5. **Keep this Excel window open** — do not save or close it
+6. Now open **Broker File Sync** → **Data Import** → drop your broker files → click **Run Watcher**
+7. The Live Master View will poll the open `Snap.xls` every **1 second** and reflect live prices
+
+> 💡 The `Snap.xls` workbook must remain open in Excel while the Live Master View is running. If you close it, the status will show **"Waiting for Snap.xls in Excel…"** until you reopen it.
 
 ---
 
-## 🪟 Windows Notes
+## 📦 Dependencies
 
-The app is DPI-aware on Windows. If text appears blurry, right-click the `.exe` → Properties → Compatibility → Override high DPI scaling → set to **Application**.
+| Package | Purpose | Platform |
+|---------|---------|----------|
+| `PySide6 >= 6.6` | Qt6 GUI framework | All |
+| `openpyxl` | Read/write `.xlsx` files | All |
+| `xlrd` | Read legacy `.xls` files | All |
+| `pywin32` | COM automation for live TradeTiger data | Windows only |
 
 ---
 
 ## 🍎 macOS Notes
 
 On first launch macOS may show a security warning. Go to **System Settings → Privacy & Security** and click **Open Anyway**.
+
+On macOS, the Live Master View uses `QFileSystemWatcher` to detect file changes — this works for manually saved files but **not** for TradeTiger's live DDE updates (which are Windows-only).
+
+---
+
+## 🪟 Windows Notes
+
+- The app is DPI-aware on Windows. If text appears blurry, right-click the `.exe` → Properties → Compatibility → Override high DPI scaling → set to **Application**
+- `pywin32` must be installed for Live Master View to work with TradeTiger
+- Run the app from the same virtual environment where `pywin32` was installed
 
 ---
 
