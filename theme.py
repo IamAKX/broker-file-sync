@@ -54,7 +54,8 @@ class ThemeManager:
     def __init__(self, app: QApplication):
         self._app = app
         self._mode = "dark"
-        self.apply()
+        # apply() is deferred — called explicitly from AppController.start()
+        # so that setStyleSheet runs only after the event loop is ready
 
     @property
     def current_mode(self) -> str:
@@ -69,9 +70,6 @@ class ThemeManager:
 
     def apply(self):
         p = PALETTES[self._mode]
-
-        if not self._app.primaryScreen():
-            return
 
         self._app.setStyleSheet(f"""
             QWidget {{
