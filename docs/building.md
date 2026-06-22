@@ -75,11 +75,15 @@ pyinstaller --windowed --onedir --name "BrokerFileSync" ^
   --add-data "components;components" ^
   --add-data "font_scale.py;." ^
   --collect-data openpyxl ^
-  --collect-all pywin32 ^
-  --hidden-import win32com.client ^
+  --collect-all win32com ^
+  --collect-all pythoncom ^
   --hidden-import win32com ^
+  --hidden-import win32com.client ^
+  --hidden-import win32com.server ^
   --hidden-import pythoncom ^
   --hidden-import pywintypes ^
+  --hidden-import win32api ^
+  --hidden-import win32con ^
   --manifest "windows_dpi.manifest" ^
   main.py
 ```
