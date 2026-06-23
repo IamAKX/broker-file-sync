@@ -469,10 +469,35 @@ class LiveViewerWindow(QWidget):
             _RS_DATA_INDICES, _NI_DATA_INDICES,
             _SK_PK_IDX, _RS_FK_IDX, _NI_FK_IDX,
         )
-        from services.file_reader import read_sharekhan, read_reliable_software, read_nifty_invest
+        from services.file_reader import (
+            read_sharekhan, read_reliable_software, read_nifty_invest,
+            _SHAREKHAN_COLS, _SHAREKHAN_HEADER_ROW,
+            _RELIABLE_COLS, _RELIABLE_HEADER_ROW,
+        )
 
-        sk_headers, sk_rows = read_sharekhan(self._sharekhan_path)
-        rs_headers, rs_rows = read_reliable_software(self._reliable_path)
+        # On Windows, prefer reading directly from the open Excel instance so
+        # we capture live DDE values that Sharekhan never flushes back to disk.
+        sk_headers, sk_rows = None, None
+        rs_headers, rs_rows = None, None
+        if getattr(self, "_use_com", False):
+            from services.com_reader import read_workbook_sheet
+            result = read_workbook_sheet(
+                self._sharekhan_path, _SHAREKHAN_COLS, _SHAREKHAN_HEADER_ROW
+            )
+            if result is not None:
+                sk_headers, sk_rows = result
+            result = read_workbook_sheet(
+                self._reliable_path, _RELIABLE_COLS, _RELIABLE_HEADER_ROW
+            )
+            if result is not None:
+                rs_headers, rs_rows = result
+
+        # Fallback to disk for any source not found in the open Excel instance.
+        if sk_headers is None:
+            sk_headers, sk_rows = read_sharekhan(self._sharekhan_path)
+        if rs_headers is None:
+            rs_headers, rs_rows = read_reliable_software(self._reliable_path)
+
         ni_headers, ni_rows = read_nifty_invest(self._nifty_path)
 
         name_to_symbol = _build_script_name_lookup(self._script_name_data)
