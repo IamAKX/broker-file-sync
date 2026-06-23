@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QFrame,
-    QLineEdit, QScrollArea, QCheckBox, QSizePolicy
+    QLineEdit, QScrollArea, QCheckBox, QSizePolicy, QComboBox
 )
 from PySide6.QtCore import Qt, QTimer, QFileSystemWatcher, Signal
 from PySide6.QtGui import QFont, QColor, QBrush
@@ -315,6 +315,7 @@ class LiveViewerWindow(QWidget):
         self._dot_state          = True
         self._visible_cols: set  = set()   # populated after first load
         self._strategies: list   = []      # injected by DataImportScreen
+        self._selected_category: str = "All"
 
         self.setWindowTitle("Live Master View")
         self.resize(1300, 700)
@@ -373,6 +374,14 @@ class LiveViewerWindow(QWidget):
         )
         self._strat_btn.clicked.connect(self._show_strategy_picker)
 
+        self._cat_combo = QComboBox()
+        self._cat_combo.addItems(["All", "Daily", "Weekly", "Monthly"])
+        self._cat_combo.setCurrentText("All")
+        self._cat_combo.setFixedHeight(30)
+        self._cat_combo.setFont(font_scale.font(font_scale.SMALL, False))
+        self._cat_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._cat_combo.currentTextChanged.connect(self._on_category_changed)
+
         stop_btn = QPushButton("Stop")
         stop_btn.setFixedHeight(30)
         stop_btn.setFont(font_scale.font(font_scale.SMALL, False))
@@ -390,6 +399,8 @@ class LiveViewerWindow(QWidget):
         top.addSpacing(12)
         top.addWidget(self._col_btn)
         top.addSpacing(8)
+        top.addWidget(self._cat_combo)
+        top.addSpacing(4)
         top.addWidget(self._strat_btn)
         top.addSpacing(8)
         top.addWidget(stop_btn)
@@ -425,26 +436,23 @@ class LiveViewerWindow(QWidget):
         from services.com_reader import is_available as com_available
         self._use_com = com_available()
 
+        # Always watch the Sharekhan file on disk — covers saves from any broker software.
+        self._fs_watcher = QFileSystemWatcher(self)
+        self._fs_watcher.addPath(self._sharekhan_path)
+        self._fs_watcher.fileChanged.connect(self._on_file_changed)
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(_DEBOUNCE_MS)
+        self._debounce.timeout.connect(self._refresh)
+
         if self._use_com:
-            # Windows + pywin32: poll Excel COM object directly.
-            # TradeTiger updates Excel via DDE (in-memory) so the file on
-            # disk never changes — QFileSystemWatcher would never fire.
+            # Windows + pywin32: also poll COM for TradeTiger's Snap (DDE in-memory
+            # updates that never hit disk).  File watcher above handles Sharekhan's
+            # disk-based exports; COM timer handles the in-memory Snap case.
             self._com_timer = QTimer(self)
             self._com_timer.setInterval(_COM_POLL_MS)
             self._com_timer.timeout.connect(self._refresh)
             self._com_timer.start()
-            # Keep fs_watcher as a no-op fallback so _stop() doesn't error
-            self._fs_watcher = QFileSystemWatcher(self)
-            self._debounce   = QTimer(self)
-        else:
-            # macOS / Linux: fall back to QFileSystemWatcher + debounce
-            self._fs_watcher = QFileSystemWatcher(self)
-            self._fs_watcher.addPath(self._sharekhan_path)
-            self._fs_watcher.fileChanged.connect(self._on_file_changed)
-            self._debounce = QTimer(self)
-            self._debounce.setSingleShot(True)
-            self._debounce.setInterval(_DEBOUNCE_MS)
-            self._debounce.timeout.connect(self._refresh)
 
     def _on_file_changed(self, path: str):
         # Re-add watch if the app briefly removed the file on save
@@ -461,10 +469,35 @@ class LiveViewerWindow(QWidget):
             _RS_DATA_INDICES, _NI_DATA_INDICES,
             _SK_PK_IDX, _RS_FK_IDX, _NI_FK_IDX,
         )
-        from services.file_reader import read_sharekhan, read_reliable_software, read_nifty_invest
+        from services.file_reader import (
+            read_sharekhan, read_reliable_software, read_nifty_invest,
+            _SHAREKHAN_COLS, _SHAREKHAN_HEADER_ROW,
+            _RELIABLE_COLS, _RELIABLE_HEADER_ROW,
+        )
 
-        sk_headers, sk_rows = read_sharekhan(self._sharekhan_path)
-        rs_headers, rs_rows = read_reliable_software(self._reliable_path)
+        # On Windows, prefer reading directly from the open Excel instance so
+        # we capture live DDE values that Sharekhan never flushes back to disk.
+        sk_headers, sk_rows = None, None
+        rs_headers, rs_rows = None, None
+        if getattr(self, "_use_com", False):
+            from services.com_reader import read_workbook_sheet
+            result = read_workbook_sheet(
+                self._sharekhan_path, _SHAREKHAN_COLS, _SHAREKHAN_HEADER_ROW
+            )
+            if result is not None:
+                sk_headers, sk_rows = result
+            result = read_workbook_sheet(
+                self._reliable_path, _RELIABLE_COLS, _RELIABLE_HEADER_ROW
+            )
+            if result is not None:
+                rs_headers, rs_rows = result
+
+        # Fallback to disk for any source not found in the open Excel instance.
+        if sk_headers is None:
+            sk_headers, sk_rows = read_sharekhan(self._sharekhan_path)
+        if rs_headers is None:
+            rs_headers, rs_rows = read_reliable_software(self._reliable_path)
+
         ni_headers, ni_rows = read_nifty_invest(self._nifty_path)
 
         name_to_symbol = _build_script_name_lookup(self._script_name_data)
@@ -515,22 +548,13 @@ class LiveViewerWindow(QWidget):
     def _refresh(self):
         from datetime import datetime
 
-        if getattr(self, "_use_com", False):
-            # Windows: read live data directly from open Excel via COM
-            from services.com_reader import read_snap_sheet
-            result = read_snap_sheet()
-            if result is None:
-                self._status_lbl.setText("Waiting for Snap.xls in Excel…")
-                return
-            headers, new_data = result
-        else:
-            # macOS / Linux: re-read and merge from disk files
-            time.sleep(0.2)
-            try:
-                headers, new_data = self._merge()
-            except Exception as exc:
-                self._status_lbl.setText(f"Read error: {str(exc)[:80]}")
-                return
+        # Re-read and merge from disk files (covers Sharekhan saves on all platforms).
+        time.sleep(0.2)
+        try:
+            headers, new_data = self._merge()
+        except Exception as exc:
+            self._status_lbl.setText(f"Read error: {str(exc)[:80]}")
+            return
 
         self._data    = new_data
         self._headers = headers
@@ -544,7 +568,7 @@ class LiveViewerWindow(QWidget):
         from services.strategy_engine import apply_strategies, get_cell_color
 
         # Apply active strategies — may extend headers and data
-        active_strategies = [s for s in self._strategies if s.get("active")]
+        active_strategies = [s for s in self._filtered_strategies() if s.get("active")]
         if active_strategies:
             disp_headers, disp_data = apply_strategies(
                 active_strategies, self._headers, data
@@ -637,8 +661,19 @@ class LiveViewerWindow(QWidget):
         self._update_strat_btn_label()
         self._populate_table(self._data, set())
 
+    def _filtered_strategies(self) -> list:
+        if self._selected_category == "All":
+            return self._strategies
+        return [s for s in self._strategies if s.get("category", "Daily") == self._selected_category]
+
+    def _on_category_changed(self, text: str):
+        self._selected_category = text
+        self._update_strat_btn_label()
+        self._visible_cols = set(range(len(self._headers)))
+        self._populate_table(self._data, set())
+
     def _show_strategy_picker(self):
-        popup = StrategyPickerPopup(self._strategies, self._theme, self)
+        popup = StrategyPickerPopup(self._filtered_strategies(), self._theme, self)
         popup.applied.connect(self._on_strategies_applied)
         btn_pos = self._strat_btn.mapToGlobal(self._strat_btn.rect().bottomLeft())
         popup.adjustSize()
@@ -646,18 +681,20 @@ class LiveViewerWindow(QWidget):
         popup.show()
 
     def _on_strategies_applied(self, updated: list):
-        self._strategies = updated
-        # Persist toggle state back to store
+        # Merge updated strategies back by ID so strategies outside the current
+        # category filter are not overwritten.
+        updated_by_id = {s["id"]: s for s in updated}
+        self._strategies = [updated_by_id.get(s["id"], s) for s in self._strategies]
         from services import strategy_store as store
         for s in updated:
             store.save_strategy(s)
-        # Reset visible_cols to base headers so new strategy cols get added
         self._visible_cols = set(range(len(self._headers)))
         self._populate_table(self._data, set())
 
     def _update_strat_btn_label(self):
-        active = sum(1 for s in self._strategies if s.get("active"))
-        total  = len(self._strategies)
+        filtered = self._filtered_strategies()
+        active = sum(1 for s in filtered if s.get("active"))
+        total  = len(filtered)
         if total == 0:
             self._strat_btn.setText("⚡  Strategies")
         elif active == 0:

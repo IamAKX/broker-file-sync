@@ -32,25 +32,113 @@ def is_available() -> bool:
     return _WIN32COM_AVAILABLE
 
 
-def read_snap_sheet() -> tuple[list, list[list]] | None:
-    """
-    Connect to the open Excel instance and read TradeTiger's Snap sheet.
+def _get_excel() -> object | None:
+    """Return the running Excel.Application COM object, or None."""
+    if not _WIN32COM_AVAILABLE:
+        return None
+    try:
+        pythoncom.CoInitialize()
+        return win32com.client.GetActiveObject("Excel.Application")
+    except Exception:
+        return None
 
-    Returns (headers, rows) where headers is a list of column names and
-    rows is a list of lists of cell values. Returns None if Excel is not
-    running, the Snap workbook is not open, or COM fails.
+
+def _read_sheet_cells(sheet, col_indices: list,
+                      header_row_idx: int) -> tuple[list, list[list]] | None:
+    """
+    Read a worksheet via COM using absolute row/col indices matching the
+    same conventions as file_reader.py.
+
+    Reads from cell A1 so that header_row_idx and col_indices are the
+    same 0-based values used when reading from disk.
+    """
+    try:
+        used = sheet.UsedRange
+        last_row = used.Row + used.Rows.Count - 1
+        last_col = max(used.Column + used.Columns.Count - 1,
+                       max(col_indices) + 1)
+        rng  = sheet.Range(sheet.Cells(1, 1), sheet.Cells(last_row, last_col))
+        raw  = rng.Value
+        if not raw:
+            return None
+        # COM returns a tuple-of-tuples; normalise to list-of-lists.
+        if not isinstance(raw[0], (tuple, list)):
+            raw = (raw,)
+        rows = [list(r) for r in raw]
+        if len(rows) <= header_row_idx:
+            return None
+        ncols = len(rows[header_row_idx])
+        headers = [
+            str(rows[header_row_idx][i]) if i < ncols and rows[header_row_idx][i] is not None else ""
+            for i in col_indices
+        ]
+        data = [
+            [row[i] if i < len(row) else None for i in col_indices]
+            for row in rows[header_row_idx + 1:]
+        ]
+        return headers, data
+    except Exception:
+        return None
+
+
+def read_workbook_sheet(workbook_path: str, col_indices: list,
+                        header_row_idx: int) -> tuple[list, list[list]] | None:
+    """
+    Read the specified workbook from the running Excel instance.
+
+    Matches by filename so Sharekhan's live DDE data (which is never
+    flushed back to disk) is read directly from Excel's memory.
+    Returns (headers, rows) on success, None if Excel is not running or
+    the workbook is not open.
     """
     if not _WIN32COM_AVAILABLE:
         return None
 
-    try:
-        pythoncom.CoInitialize()
-        excel = win32com.client.GetActiveObject("Excel.Application")
-    except Exception:
+    import os
+    target_name = os.path.basename(workbook_path).lower()
+
+    excel = _get_excel()
+    if excel is None:
         return None
 
     try:
-        # Find the Snap workbook
+        wb = None
+        for w in excel.Workbooks:
+            if os.path.basename(w.FullName).lower() == target_name:
+                wb = w
+                break
+        if wb is None:
+            return None
+
+        try:
+            sheet = wb.Sheets(1)
+        except Exception:
+            return None
+
+        return _read_sheet_cells(sheet, col_indices, header_row_idx)
+
+    except Exception:
+        return None
+    finally:
+        try:
+            pythoncom.CoUninitialize()
+        except Exception:
+            pass
+
+
+def read_snap_sheet() -> tuple[list, list[list]] | None:
+    """
+    Read TradeTiger's Snap sheet from the running Excel instance.
+    Returns (headers, rows), or None if not found.
+    """
+    if not _WIN32COM_AVAILABLE:
+        return None
+
+    excel = _get_excel()
+    if excel is None:
+        return None
+
+    try:
         snap_wb = None
         for wb in excel.Workbooks:
             if _SNAP_WB.lower() in wb.Name.lower():
@@ -59,20 +147,16 @@ def read_snap_sheet() -> tuple[list, list[list]] | None:
         if snap_wb is None:
             return None
 
-        # Find the sheet — try exact name first, then first sheet
-        sheet = None
         try:
             sheet = snap_wb.Sheets(_SNAP_SHEET)
         except Exception:
-            # Fall back to first sheet if sheet name differs by version
             try:
                 sheet = snap_wb.Sheets(1)
             except Exception:
                 return None
 
-        # Read all used cells
         used = sheet.UsedRange
-        raw = used.Value
+        raw  = used.Value
         if not raw:
             return None
 
@@ -80,13 +164,8 @@ def read_snap_sheet() -> tuple[list, list[list]] | None:
         if not rows:
             return None
 
-        # First row is headers — convert None to empty string
         headers = [str(h) if h is not None else "" for h in rows[0]]
-        data = []
-        for row in rows[1:]:
-            data.append([c for c in row])
-
-        return headers, data
+        return headers, [list(r) for r in rows[1:]]
 
     except Exception:
         return None

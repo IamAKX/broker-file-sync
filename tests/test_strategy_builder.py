@@ -34,3 +34,128 @@ def test_set_lmv_headers(screen):
 def test_get_active_strategies_returns_list(screen):
     result = screen.get_active_strategies()
     assert isinstance(result, list)
+
+
+def test_new_strategy_has_category():
+    from services.strategy_store import new_strategy
+    s = new_strategy("Test")
+    assert s["category"] == "Daily"
+
+
+def test_load_all_backfills_category(tmp_path, monkeypatch):
+    import json
+    from services import strategy_store as store
+    legacy = [{"id": "abc", "name": "Old", "active": True, "columns": []}]
+    store_file = tmp_path / "strategies.json"
+    store_file.write_text(json.dumps(legacy))
+    monkeypatch.setattr(store, "_STORE_FILE", str(store_file))
+    result = store.load_all()
+    assert result[0]["category"] == "Daily"
+
+
+def test_strategy_editor_has_category_combo(qapp):
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyEditor
+    s = new_strategy("T")
+    editor = StrategyEditor(s, [], None)
+    assert hasattr(editor, "_category_combo")
+    assert editor._category_combo.currentText() == "Daily"
+
+
+def test_strategy_editor_save_writes_category(qapp):
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyEditor
+    s = new_strategy("T")
+    s["category"] = "Weekly"
+    editor = StrategyEditor(s, [], None)
+    saved = {}
+    editor.saved.connect(lambda d: saved.update(d))
+    editor._category_combo.setCurrentText("Monthly")
+    editor._save()
+    assert saved["category"] == "Monthly"
+
+
+def test_strategy_card_shows_category_badge(qapp):
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyCard
+    from PySide6.QtWidgets import QLabel
+    s = new_strategy("T")
+    s["category"] = "Weekly"
+    card = StrategyCard(s, None)
+    labels = [lbl.text() for lbl in card.findChildren(QLabel)]
+    assert "Weekly" in labels
+
+
+def test_live_viewer_has_category_combo(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    from PySide6.QtWidgets import QComboBox
+    lmv = LiveViewerWindow("", "", "", [])
+    combo_items = []
+    for c in lmv.findChildren(QComboBox):
+        combo_items += [c.itemText(i) for i in range(c.count())]
+    assert "All" in combo_items
+    assert "Daily" in combo_items
+    assert "Weekly" in combo_items
+    assert "Monthly" in combo_items
+
+
+def test_filtered_strategies_all(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    strats = [
+        {"id": "1", "name": "A", "active": True, "category": "Daily",   "columns": []},
+        {"id": "2", "name": "B", "active": True, "category": "Weekly",  "columns": []},
+        {"id": "3", "name": "C", "active": True, "category": "Monthly", "columns": []},
+    ]
+    lmv.set_strategies(strats)
+    lmv._cat_combo.setCurrentText("All")
+    assert len(lmv._filtered_strategies()) == 3
+
+
+def test_strategies_applied_merges_not_replaces(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    strats = [
+        {"id": "1", "name": "A", "active": True,  "category": "Daily",  "columns": []},
+        {"id": "2", "name": "B", "active": True,  "category": "Weekly", "columns": []},
+        {"id": "3", "name": "C", "active": False, "category": "Weekly", "columns": []},
+    ]
+    lmv.set_strategies(strats)
+    lmv._cat_combo.setCurrentText("Weekly")
+    # Simulate picker returning only the Weekly subset with B toggled off
+    weekly_updated = [
+        {"id": "2", "name": "B", "active": False, "category": "Weekly", "columns": []},
+        {"id": "3", "name": "C", "active": True,  "category": "Weekly", "columns": []},
+    ]
+    lmv._on_strategies_applied(weekly_updated)
+    # All 3 strategies must still be present
+    assert len(lmv._strategies) == 3
+    # B and C should reflect the updated active state
+    by_id = {s["id"]: s for s in lmv._strategies}
+    assert by_id["2"]["active"] is False
+    assert by_id["3"]["active"] is True
+    # A (Daily) must be untouched
+    assert by_id["1"]["active"] is True
+
+
+def test_filtered_strategies_by_category(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    strats = [
+        {"id": "1", "name": "A", "active": True, "category": "Daily",   "columns": []},
+        {"id": "2", "name": "B", "active": True, "category": "Weekly",  "columns": []},
+        {"id": "3", "name": "C", "active": True, "category": "Monthly", "columns": []},
+    ]
+    lmv.set_strategies(strats)
+    lmv._cat_combo.setCurrentText("Weekly")
+    result = lmv._filtered_strategies()
+    assert len(result) == 1
+    assert result[0]["name"] == "B"

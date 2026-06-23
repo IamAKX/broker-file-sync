@@ -48,7 +48,10 @@ def _save_raw(data: list):
 
 
 def load_all() -> list:
-    return _load_raw()
+    strategies = _load_raw()
+    for s in strategies:
+        s.setdefault("category", "Daily")
+    return strategies
 
 
 def save_strategy(strategy: dict):
@@ -68,7 +71,7 @@ def delete_strategy(strategy_id: str):
 
 
 def new_strategy(name: str) -> dict:
-    return {"id": str(uuid.uuid4()), "name": name, "active": True, "columns": []}
+    return {"id": str(uuid.uuid4()), "name": name, "active": True, "category": "Daily", "columns": []}
 
 
 def new_column(name: str) -> dict:
