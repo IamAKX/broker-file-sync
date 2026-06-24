@@ -10,12 +10,62 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QFrame,
     QLineEdit, QScrollArea, QCheckBox, QSizePolicy, QComboBox
 )
-from PySide6.QtCore import Qt, QTimer, QFileSystemWatcher, Signal
-from PySide6.QtGui import QFont, QColor, QBrush
+from PySide6.QtCore import (
+    Qt, QTimer, QFileSystemWatcher, Signal, QObject, QThread
+)
+from PySide6.QtGui import QColor, QBrush
 
 
-_DEBOUNCE_MS  = 300    # ms to wait after file event before re-reading
-_COM_POLL_MS  = 1000   # COM polling interval — 1s for live trading data
+_DEBOUNCE_MS   = 300    # ms to wait after file event before re-reading
+_COM_POLL_MS   = 200    # active COM polling interval — near-real-time live sync
+_COM_IDLE_MS   = 1000   # relaxed interval after a quiet spell (adaptive backoff)
+_IDLE_TICKS    = 15     # consecutive no-change ticks before backing off (~3s)
+_HIGHLIGHT_MS  = 4000   # how long a changed cell stays amber
+_SWEEP_MS      = 500    # how often expired highlights are cleared
+_FILE_SETTLE_S = 0.2    # brief wait so disk writes finish before re-reading
+
+
+# ── Off-thread reader worker ────────────────────────────────────────────────
+
+class _LiveDataWorker(QObject):
+    """
+    Runs the read+merge on a worker thread so a slow COM/disk read never
+    freezes the UI.  Owns a :class:`services.live_merge.LiveDataReader`; the
+    reader's COM handles are created and used entirely on this thread.
+    """
+
+    result = Signal(list, list)   # headers, data
+    failed = Signal(str)          # error message
+
+    def __init__(self, reader):
+        super().__init__()
+        self._reader  = reader
+        self._started = False
+
+    def do_read(self, force_slow: bool, settle_s: float) -> None:
+        if not self._started:
+            try:
+                self._reader.start()
+            except Exception:
+                pass
+            self._started = True
+        # Settle delay runs here on the worker thread, never blocking the UI.
+        if settle_s > 0:
+            time.sleep(settle_s)
+        try:
+            headers, data = self._reader.read_merged(force_slow=force_slow)
+        except Exception as exc:
+            self.failed.emit(str(exc)[:120])
+            return
+        self.result.emit(headers, data)
+
+    def shutdown(self) -> None:
+        if self._started:
+            try:
+                self._reader.stop()
+            except Exception:
+                pass
+            self._started = False
 
 
 # ── Strategy selector popup ────────────────────────────────────────────────
@@ -294,9 +344,19 @@ class ColumnFilterPopup(QWidget):
 class LiveViewerWindow(QWidget):
     """
     Standalone window showing the merged master table in real-time.
-    Uses QFileSystemWatcher (OS-level events) — no polling interval.
-    Changed rows are highlighted amber for 4 seconds.
+
+    Two update drivers:
+      * QFileSystemWatcher (OS-level events) for disk-based broker exports.
+      * On Windows, a fast COM poll for the in-memory DDE values Sharekhan
+        never flushes to disk (the only driver for its live prices).
+
+    Reads/merges run on a worker thread so a slow read never freezes the UI.
+    Changed cells are highlighted amber for ~4 seconds.
     """
+
+    # Emitted from the GUI thread to drive work on the worker thread.
+    _request_read     = Signal(bool, float)   # force_slow, settle_seconds
+    _request_shutdown = Signal()              # release COM on the worker thread
 
     def __init__(self, sharekhan_path: str, reliable_path: str,
                  nifty_path: str, script_name_data: list,
@@ -318,6 +378,15 @@ class LiveViewerWindow(QWidget):
         self._visible_cols: set  = set()   # populated after first load
         self._strategies: list   = []      # injected by DataImportScreen
         self._selected_category: str = "All"
+
+        # Live-update bookkeeping
+        self._render_sig         = None    # signature of last full rebuild
+        self._sized_cols         = set()   # columns already auto-sized once
+        self._prev_disp: list[list] = []   # last displayed values (for diffing)
+        self._highlights: dict   = {}      # (r, c) → expiry tick count
+        self._idle_count         = 0       # consecutive no-change ticks
+        self._worker             = None
+        self._worker_thread      = None
 
         self.setWindowTitle("Live Master View")
         self.resize(1300, 700)
@@ -436,7 +505,39 @@ class LiveViewerWindow(QWidget):
 
     def _setup_watcher(self):
         from services.com_reader import is_available as com_available
-        self._use_com = com_available()
+        from services.live_merge import LiveDataReader
+
+        self._use_com    = com_available()
+        self._refreshing = False   # re-entrancy guard so fast ticks don't pile up
+
+        # Stateful reader: caches COM handles + slow sources (Reliable/Nifty).
+        # Shared by the synchronous initial load and the worker thread; only
+        # one of them touches it at a time (initial load completes before the
+        # worker thread starts polling).
+        self._reader = LiveDataReader(
+            self._sharekhan_path, self._reliable_path, self._nifty_path,
+            self._script_name_data, expiry_date=self._expiry_date,
+            use_com=self._use_com,
+        )
+
+        # Worker thread: all polled reads/merges run here so a slow read never
+        # blocks the UI.  Requests go out via _request_read; results come back
+        # via queued signals (thread-safe).
+        self._worker_thread = QThread(self)
+        self._worker        = _LiveDataWorker(self._reader)
+        self._worker.moveToThread(self._worker_thread)
+        self._request_read.connect(self._worker.do_read)
+        self._request_shutdown.connect(self._worker.shutdown)
+        self._worker.result.connect(self._on_data_ready)
+        self._worker.failed.connect(self._on_read_failed)
+        self._worker_thread.start()
+
+        # Safety net for teardown that bypasses closeEvent (e.g. the widget is
+        # garbage-collected directly).  Qt emits destroyed() before deleting
+        # child objects, so the thread is still alive here and can be stopped.
+        # Capture the thread only — never self, which is mid-destruction.
+        _t = self._worker_thread
+        self.destroyed.connect(lambda: (_t.quit(), _t.wait(2000)))
 
         # Always watch the Sharekhan file on disk — covers saves from any broker software.
         self._fs_watcher = QFileSystemWatcher(self)
@@ -445,16 +546,25 @@ class LiveViewerWindow(QWidget):
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
         self._debounce.setInterval(_DEBOUNCE_MS)
-        self._debounce.timeout.connect(self._refresh)
+        # Disk path: data may still be mid-write, so let it settle first.
+        self._debounce.timeout.connect(self._refresh_from_disk)
 
         if self._use_com:
-            # Windows + pywin32: also poll COM for TradeTiger's Snap (DDE in-memory
-            # updates that never hit disk).  File watcher above handles Sharekhan's
-            # disk-based exports; COM timer handles the in-memory Snap case.
+            # Windows + pywin32: poll COM for the in-memory DDE values (Sharekhan
+            # live prices + TradeTiger Snap) that are never flushed to disk.  This
+            # is the only driver for Sharekhan's live updates, so it polls fast.
+            # COM reads Excel's in-memory state, which is always consistent — no
+            # settle delay needed, keeping the LMV in lock-step with the sheet.
             self._com_timer = QTimer(self)
             self._com_timer.setInterval(_COM_POLL_MS)
-            self._com_timer.timeout.connect(self._refresh)
+            self._com_timer.timeout.connect(self._refresh_live)
             self._com_timer.start()
+
+        # Highlight sweep: revert expired amber cells back to normal.
+        self._sweep_timer = QTimer(self)
+        self._sweep_timer.setInterval(_SWEEP_MS)
+        self._sweep_timer.timeout.connect(self._sweep_highlights)
+        self._sweep_timer.start()
 
     def _on_file_changed(self, path: str):
         # Re-add watch if the app briefly removed the file on save
@@ -465,86 +575,14 @@ class LiveViewerWindow(QWidget):
 
     # ── Data ─────────────────────────────────────────────────────────────────
 
-    def _merge(self) -> tuple[list, list[list]]:
-        from services.master_generator import (
-            _build_script_name_lookup, _normalise,
-            _RS_DATA_INDICES, _NI_DATA_INDICES,
-            _SK_PK_IDX, _RS_FK_IDX, _NI_FK_IDX,
-        )
-        from services.file_reader import (
-            read_sharekhan, read_reliable_software, read_nifty_invest,
-            _SHAREKHAN_COLS, _SHAREKHAN_HEADER_ROW,
-            _RELIABLE_COLS, _RELIABLE_HEADER_ROW,
-        )
-
-        # On Windows, prefer reading directly from the open Excel instance so
-        # we capture live DDE values that Sharekhan never flushes back to disk.
-        sk_headers, sk_rows = None, None
-        rs_headers, rs_rows = None, None
-        if getattr(self, "_use_com", False):
-            from services.com_reader import read_workbook_sheet
-            result = read_workbook_sheet(
-                self._sharekhan_path, _SHAREKHAN_COLS, _SHAREKHAN_HEADER_ROW
-            )
-            if result is not None:
-                sk_headers, sk_rows = result
-            result = read_workbook_sheet(
-                self._reliable_path, _RELIABLE_COLS, _RELIABLE_HEADER_ROW
-            )
-            if result is not None:
-                rs_headers, rs_rows = result
-
-        # Fallback to disk for any source not found in the open Excel instance.
-        if sk_headers is None:
-            sk_headers, sk_rows = read_sharekhan(self._sharekhan_path)
-        if rs_headers is None:
-            rs_headers, rs_rows = read_reliable_software(self._reliable_path)
-
-        ni_headers, ni_rows = read_nifty_invest(self._nifty_path)
-
-        # Strip expiry date suffix from Sharekhan Scrip Names
-        if self._expiry_date is not None:
-            expiry_str = self._expiry_date.strftime("%d-%b-%Y").upper()
-            for sk_row in sk_rows:
-                scrip = _normalise(sk_row[_SK_PK_IDX])
-                if scrip.upper().endswith(expiry_str):
-                    sk_row[_SK_PK_IDX] = scrip[:-len(expiry_str)].strip()
-
-        name_to_symbol = _build_script_name_lookup(self._script_name_data)
-
-        rs_lookup = {}
-        for row in rs_rows:
-            sym = name_to_symbol.get(_normalise(row[_RS_FK_IDX]).lower())
-            if sym:
-                rs_lookup[_normalise(sym).upper()] = row
-
-        ni_lookup = {}
-        for row in ni_rows:
-            ni_lookup[_normalise(row[_NI_FK_IDX]).upper()] = row
-
-        out_headers = list(sk_headers)
-        for i in _RS_DATA_INDICES:
-            out_headers.append(rs_headers[i] if i < len(rs_headers) else "")
-        for i in _NI_DATA_INDICES:
-            out_headers.append(ni_headers[i] if i < len(ni_headers) else "")
-
-        merged = []
-        for sk_row in sk_rows:
-            pk = _normalise(sk_row[_SK_PK_IDX]).upper()
-            out_row = list(sk_row)
-            rs_row = rs_lookup.get(pk)
-            for i in _RS_DATA_INDICES:
-                out_row.append(rs_row[i] if rs_row and i < len(rs_row) else None)
-            ni_row = ni_lookup.get(pk)
-            for i in _NI_DATA_INDICES:
-                out_row.append(ni_row[i] if ni_row and i < len(ni_row) else None)
-            merged.append(out_row)
-
-        return out_headers, merged
-
     def _load_initial(self):
+        # Synchronous first read so callers (DataImportScreen) can read
+        # _headers immediately after construction.  Runs on the GUI thread,
+        # so it does NOT start COM here — COM is initialised and used solely on
+        # the worker thread (COM apartment affinity).  This first read therefore
+        # uses the disk fallback; the worker's COM reads take over thereafter.
         try:
-            headers, data = self._merge()
+            headers, data = self._reader.read_merged(force_slow=True)
         except Exception as exc:
             self._status_lbl.setText(f"Error loading: {exc}")
             return
@@ -555,27 +593,81 @@ class LiveViewerWindow(QWidget):
         self._populate_table(data, changed_keys=set())
         self._update_col_btn_label()
 
-    def _refresh(self):
-        from datetime import datetime
+    def _refresh_from_disk(self):
+        # Disk-based saves (e.g. Sharekhan export on macOS) may still be
+        # flushing — let the worker settle briefly before reading.
+        self._request_refresh(settle=_FILE_SETTLE_S)
 
-        # Re-read and merge from disk files (covers Sharekhan saves on all platforms).
-        time.sleep(0.2)
-        try:
-            headers, new_data = self._merge()
-        except Exception as exc:
-            self._status_lbl.setText(f"Read error: {str(exc)[:80]}")
+    def _refresh_live(self):
+        # COM reads Excel's in-memory state, which is always consistent — no
+        # settle delay, keeping the LMV in lock-step with the sheet.
+        self._request_refresh(settle=0.0)
+
+    def _request_refresh(self, settle: float):
+        # Skip if a previous read is still in flight, so fast ticks collapse
+        # instead of queueing up and lagging behind.
+        if self._refreshing or self._worker is None:
             return
+        self._refreshing = True
+        self._request_read.emit(False, settle)
 
-        self._data    = new_data
-        self._headers = headers
-        self._populate_table(new_data, set())
-        self._status_lbl.setText(f"Updated: {datetime.now().strftime('%H:%M:%S')}")
+    def _on_read_failed(self, msg: str):
+        self._refreshing = False
+        self._status_lbl.setText(f"Read error: {msg}")
+
+    def _on_data_ready(self, headers: list, new_data: list):
+        from datetime import datetime
+        try:
+            self._data    = new_data
+            self._headers = headers
+            self._populate_table(new_data, changed_keys=None)  # diff internally
+            self._status_lbl.setText(f"Updated: {datetime.now().strftime('%H:%M:%S')}")
+            self._adapt_poll_rate(getattr(self, "_last_change_count", 0))
+        finally:
+            self._refreshing = False
+
+    def _adapt_poll_rate(self, changed: int):
+        """
+        Back off the COM poll when the data is quiet, and snap back to the fast
+        rate the instant something changes.  Reduces idle COM load (e.g. when
+        the market is closed) without ever adding lag to live ticks.
+        """
+        if not hasattr(self, "_com_timer"):
+            return
+        if changed > 0:
+            self._idle_count = 0
+            if self._com_timer.interval() != _COM_POLL_MS:
+                self._com_timer.setInterval(_COM_POLL_MS)
+        else:
+            self._idle_count += 1
+            if (self._idle_count >= _IDLE_TICKS
+                    and self._com_timer.interval() != _COM_IDLE_MS):
+                self._com_timer.setInterval(_COM_IDLE_MS)
 
 
     # ── Table rendering ───────────────────────────────────────────────────────
 
-    def _populate_table(self, data: list[list], changed_keys: set):
+    @staticmethod
+    def _fmt_cell(val) -> str:
+        if isinstance(val, float):
+            return f"{val:.2f}"
+        if val is None:
+            return ""
+        return str(val)
+
+    def _populate_table(self, data: list[list], changed_keys=set()):
+        """
+        Render *data* into the table.
+
+        ``changed_keys=None`` marks a live-data tick: cells whose displayed
+        value changed are diffed against the table's current contents and
+        flashed amber.  A real set (incl. the empty set) marks a structural
+        re-render (theme/strategy/category change) where no highlight is wanted.
+        """
         from services.strategy_engine import apply_strategies, get_cell_color
+
+        highlight = changed_keys is None
+        self._last_change_count = 0
 
         # Apply active strategies — may extend headers and data
         active_strategies = [s for s in self._filtered_strategies() if s.get("active")]
@@ -595,6 +687,49 @@ class LiveViewerWindow(QWidget):
         win_bg   = t.get("background")           if t else "#0d1117"
         hdr_bg   = t.get("button_bg")            if t else "#21262d"
         strat_hdr = t.get("accent") + "22"       if t else "#39d35322"
+        # theme.get() raises KeyError on a missing token, so fall back rather
+        # than assume the key exists (covers older/partial palettes).
+        try:
+            amber = t.get("status_amber") if t else "#d29922"
+        except KeyError:
+            amber = "#d29922"
+        self._amber_bg  = QBrush(QColor(amber))
+        self._amber_txt = QBrush(QColor("#000000"))
+
+        # Build per-column info for strategy columns (for conditional formatting)
+        strat_col_defs = []   # list of col_def dicts for strategy cols in order
+        for s in active_strategies:
+            for col in s.get("columns", []):
+                strat_col_defs.append(col)
+
+        all_dicts = [dict(zip(disp_headers, row)) for row in disp_data]
+
+        # ── Fast path ───────────────────────────────────────────────────────
+        # When only cell values changed (same headers, same row count, same
+        # theme) — the common live-tick case — update existing items in place.
+        # This skips item recreation, header relabelling, stylesheet resets and
+        # the costly resizeColumnsToContents(), keeping the LMV in lock-step
+        # with the source sheet.
+        sig = (tuple(disp_headers), len(disp_data),
+               id(t), norm_bg.name(), norm_txt.name())
+        fast = (
+            getattr(self, "_render_sig", None) == sig
+            and self._table.rowCount() == len(disp_data)
+            and self._table.columnCount() == len(disp_headers)
+        )
+        if fast:
+            self._update_cells_in_place(
+                disp_data, all_dicts, strat_col_defs,
+                base_col_count, norm_bg, norm_txt, strat_hdr, get_cell_color,
+                highlight,
+            )
+            self._update_strat_btn_label()
+            return
+
+        # ── Full rebuild ────────────────────────────────────────────────────
+        # Items are recreated, so any pending highlights no longer map to live
+        # items — drop them.
+        self._highlights.clear()
 
         self.setStyleSheet(f"background: {win_bg};")
         self._table.setStyleSheet(
@@ -606,50 +741,19 @@ class LiveViewerWindow(QWidget):
         self._table.setHorizontalHeaderLabels(disp_headers)
         self._table.setRowCount(len(disp_data))
 
-        # Build per-column info for strategy columns (for conditional formatting)
-        strat_col_defs = []   # list of col_def dicts for strategy cols in order
-        for s in active_strategies:
-            for col in s.get("columns", []):
-                strat_col_defs.append(col)
-
-        all_dicts = [dict(zip(disp_headers, row)) for row in disp_data]
-
         bold_font = font_scale.font(font_scale.SMALL, True)
         for r, row in enumerate(disp_data):
-            row_dict = dict(zip(disp_headers, row))
+            row_dict = all_dicts[r]
             for c, val in enumerate(row):
-                if isinstance(val, float):
-                    display = f"{val:.2f}"
-                elif val is None:
-                    display = ""
-                else:
-                    display = str(val)
-                item = QTableWidgetItem(display)
-                item.setForeground(QBrush(norm_txt))
-                item.setBackground(QBrush(norm_bg))
+                item = QTableWidgetItem(self._fmt_cell(val))
                 item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
                 if c == 0:
                     item.setFont(bold_font)
-
-                # Strategy column: tinted background + conditional formatting
-                strat_idx = c - base_col_count
-                if strat_idx >= 0 and strat_idx < len(strat_col_defs):
-                    col_def = strat_col_defs[strat_idx]
-                    cell_color = get_cell_color(col_def, val, row_dict, all_dicts)
-                    if cell_color:
-                        item.setBackground(QBrush(QColor(cell_color)))
-                        # Choose readable text color based on background brightness
-                        qc = QColor(cell_color)
-                        lum = 0.299 * qc.red() + 0.587 * qc.green() + 0.114 * qc.blue()
-                        item.setForeground(QBrush(QColor("#000000" if lum > 128 else "#ffffff")))
-                    else:
-                        item.setBackground(QBrush(QColor(strat_hdr)))
-
+                self._apply_cell_style(
+                    item, c, val, row_dict, all_dicts, strat_col_defs,
+                    base_col_count, norm_bg, norm_txt, strat_hdr, get_cell_color,
+                )
                 self._table.setItem(r, c, item)
-
-        # Strategy header columns: tinted section header
-        for c in range(base_col_count, len(disp_headers)):
-            self._table.horizontalHeaderItem(c)
 
         # Ensure visible_cols covers strategy columns too
         if len(disp_headers) > len(self._headers):
@@ -660,8 +764,105 @@ class LiveViewerWindow(QWidget):
         for c in range(len(disp_headers)):
             self._table.setColumnHidden(c, c not in self._visible_cols)
 
-        self._table.resizeColumnsToContents()
+        # Auto-size columns only the first time we see this header layout, so
+        # user-adjusted widths survive theme/strategy/category re-renders.
+        if getattr(self, "_sized_headers", None) != tuple(disp_headers):
+            self._table.resizeColumnsToContents()
+            self._sized_headers = tuple(disp_headers)
+
+        self._render_sig = sig
         self._update_strat_btn_label()
+
+    def _apply_cell_style(self, item, c, val, row_dict, all_dicts,
+                          strat_col_defs, base_col_count,
+                          norm_bg, norm_txt, strat_hdr, get_cell_color):
+        """Set foreground/background for one cell, incl. strategy formatting."""
+        item.setForeground(QBrush(norm_txt))
+        item.setBackground(QBrush(norm_bg))
+        strat_idx = c - base_col_count
+        if 0 <= strat_idx < len(strat_col_defs):
+            col_def = strat_col_defs[strat_idx]
+            cell_color = get_cell_color(col_def, val, row_dict, all_dicts)
+            if cell_color:
+                item.setBackground(QBrush(QColor(cell_color)))
+                qc = QColor(cell_color)
+                lum = 0.299 * qc.red() + 0.587 * qc.green() + 0.114 * qc.blue()
+                item.setForeground(QBrush(QColor("#000000" if lum > 128 else "#ffffff")))
+            else:
+                item.setBackground(QBrush(QColor(strat_hdr)))
+
+    def _update_cells_in_place(self, disp_data, all_dicts,
+                               strat_col_defs, base_col_count,
+                               norm_bg, norm_txt, strat_hdr, get_cell_color,
+                               highlight):
+        """
+        Update existing QTableWidgetItems in place (no recreation).
+
+        When *highlight* is set, cells whose displayed value changed are
+        flashed amber; the steady-state brushes are stashed so the sweep timer
+        can restore them after the highlight window.
+        """
+        import time as _time
+        now = _time.monotonic()
+        changed = 0
+        for r, row in enumerate(disp_data):
+            row_dict = all_dicts[r]
+            for c, val in enumerate(row):
+                item = self._table.item(r, c)
+                if item is None:
+                    item = QTableWidgetItem()
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+                    self._table.setItem(r, c, item)
+                    old_text = None
+                else:
+                    old_text = item.text()
+                new_text = self._fmt_cell(val)
+                item.setText(new_text)
+
+                # Recompute the steady-state ("base") style every tick so the
+                # restored colour reflects current strategy formatting.
+                self._apply_cell_style(
+                    item, c, val, row_dict, all_dicts, strat_col_defs,
+                    base_col_count, norm_bg, norm_txt, strat_hdr, get_cell_color,
+                )
+
+                if not highlight:
+                    continue
+
+                key = (r, c)
+                cell_changed = old_text is not None and new_text != old_text
+                if cell_changed:
+                    changed += 1
+                    self._highlights[key] = (
+                        now + _HIGHLIGHT_MS / 1000.0,
+                        item.background(), item.foreground(),
+                    )
+                    item.setBackground(self._amber_bg)
+                    item.setForeground(self._amber_txt)
+                elif key in self._highlights:
+                    # Still within the highlight window: keep amber, but refresh
+                    # the stashed base brushes to the latest computed values.
+                    exp, _, _ = self._highlights[key]
+                    self._highlights[key] = (exp, item.background(), item.foreground())
+                    item.setBackground(self._amber_bg)
+                    item.setForeground(self._amber_txt)
+
+        self._last_change_count = changed
+
+    def _sweep_highlights(self):
+        """Revert amber cells whose highlight window has expired."""
+        if not self._highlights:
+            return
+        import time as _time
+        now = _time.monotonic()
+        expired = [k for k, (exp, _, _) in self._highlights.items() if now >= exp]
+        for key in expired:
+            _, base_bg, base_fg = self._highlights.pop(key)
+            r, c = key
+            item = self._table.item(r, c)
+            if item is not None:
+                item.setBackground(base_bg)
+                item.setForeground(base_fg)
 
     # ── Strategy picker ───────────────────────────────────────────────────────
 
@@ -750,11 +951,26 @@ class LiveViewerWindow(QWidget):
         self._debounce.stop()
         if hasattr(self, "_com_timer"):
             self._com_timer.stop()
+        if hasattr(self, "_sweep_timer"):
+            self._sweep_timer.stop()
         self._pulse_timer.stop()
+        self._shutdown_worker()
         t   = self._theme
         red = t.get("status_red") if t else "#f85149"
         self._dot.setStyleSheet(f"color: {red};")
         self._status_lbl.setText("Stopped")
+
+    def _shutdown_worker(self):
+        """Tear down the reader worker thread and release its COM handles."""
+        if self._worker_thread is None:
+            return
+        # Release COM on the worker thread (queued), then stop its event loop.
+        if self._worker is not None:
+            self._request_shutdown.emit()
+        self._worker_thread.quit()
+        self._worker_thread.wait(2000)
+        self._worker        = None
+        self._worker_thread = None
 
     def _pulse(self):
         t      = self._theme

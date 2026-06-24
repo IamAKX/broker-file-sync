@@ -8,6 +8,7 @@ open Excel instance's memory. This module reads it directly via COM.
 Windows only. On macOS/Linux returns None gracefully.
 """
 
+import os
 import platform
 
 _WIN32COM_AVAILABLE = False
@@ -41,6 +42,121 @@ def _get_excel() -> object | None:
         return win32com.client.GetActiveObject("Excel.Application")
     except Exception:
         return None
+
+
+class ExcelLiveReader:
+    """
+    Stateful COM reader that caches the running Excel.Application handle and
+    the per-workbook COM objects across reads.
+
+    Re-acquiring the Excel handle (GetActiveObject) and re-enumerating
+    Workbooks on every tick is the dominant cross-process COM cost.  Holding
+    the handles between ticks lets each read be a single marshalled
+    ``Range.Value`` call.  Any COM error invalidates the cache so the next
+    read transparently re-acquires — covering Excel restarts or workbook
+    close/reopen.
+
+    Intended to live on a worker thread: call :meth:`init_thread` once on that
+    thread before the first read and :meth:`close` when finished so COM is
+    initialised/uninitialised on the correct thread.
+    """
+
+    def __init__(self):
+        self._excel = None
+        self._wb_cache: dict[str, object] = {}   # basename(lower) → Workbook COM obj
+        self._com_inited = False
+
+    # ── Thread lifecycle ────────────────────────────────────────────────────
+
+    def init_thread(self) -> None:
+        """Initialise COM on the calling thread (idempotent)."""
+        if _WIN32COM_AVAILABLE and not self._com_inited:
+            try:
+                pythoncom.CoInitialize()
+                self._com_inited = True
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        """Release cached handles and uninitialise COM on the calling thread."""
+        self._invalidate()
+        if _WIN32COM_AVAILABLE and self._com_inited:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+            self._com_inited = False
+
+    # ── Internals ─────────────────────────────────────────────────────────────
+
+    def _invalidate(self) -> None:
+        self._excel = None
+        self._wb_cache.clear()
+
+    def _ensure_excel(self) -> object | None:
+        if self._excel is not None:
+            return self._excel
+        if not _WIN32COM_AVAILABLE:
+            return None
+        try:
+            self._excel = win32com.client.GetActiveObject("Excel.Application")
+        except Exception:
+            self._excel = None
+            self._wb_cache.clear()
+        return self._excel
+
+    def _get_workbook(self, target_name: str) -> object | None:
+        """Return the cached Workbook COM object for *target_name*, or find it."""
+        wb = self._wb_cache.get(target_name)
+        if wb is not None:
+            # Touch a cheap property to confirm the handle is still alive.
+            try:
+                _ = wb.Name
+                return wb
+            except Exception:
+                self._wb_cache.pop(target_name, None)
+
+        excel = self._ensure_excel()
+        if excel is None:
+            return None
+        try:
+            for w in excel.Workbooks:
+                if os.path.basename(w.FullName).lower() == target_name:
+                    self._wb_cache[target_name] = w
+                    return w
+        except Exception:
+            # Stale Excel handle — drop everything and let the next call retry.
+            self._invalidate()
+        return None
+
+    # ── Public read ───────────────────────────────────────────────────────────
+
+    def read_workbook_sheet(self, workbook_path: str, col_indices: list,
+                            header_row_idx: int) -> tuple[list, list[list]] | None:
+        """
+        Read the first sheet of *workbook_path* from the cached Excel instance.
+
+        Mirrors the module-level :func:`read_workbook_sheet` but reuses the
+        cached Excel/Workbook handles.  Returns (headers, rows) or None.
+        """
+        if not _WIN32COM_AVAILABLE:
+            return None
+        target_name = os.path.basename(workbook_path).lower()
+        wb = self._get_workbook(target_name)
+        if wb is None:
+            return None
+        try:
+            sheet = wb.Sheets(1)
+        except Exception:
+            # Workbook handle went stale between lookup and use.
+            self._wb_cache.pop(target_name, None)
+            self._excel = None
+            return None
+        try:
+            return _read_sheet_cells(sheet, col_indices, header_row_idx)
+        except Exception:
+            self._invalidate()
+            return None
 
 
 def _read_sheet_cells(sheet, col_indices: list,
