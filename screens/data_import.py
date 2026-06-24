@@ -5,9 +5,10 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QProgressBar, QFileDialog, QScrollArea, QSizePolicy
+    QFrame, QProgressBar, QFileDialog, QScrollArea, QSizePolicy,
+    QCalendarWidget
 )
-from PySide6.QtCore import Qt, QTimer, QByteArray, QSize, Signal
+from PySide6.QtCore import Qt, QTimer, QByteArray, QSize, Signal, QDate, QObject
 from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter
 from PySide6.QtSvg import QSvgRenderer
 from services.file_reader import (
@@ -25,9 +26,9 @@ _BROKER_ROW_COUNTERS = {
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
 
 BROKERS = [
-    ("Sharekhan",        "status_red",    "TradeBook export (.xlsx / .xls)",   (".xlsx", ".xls")),
-    ("ReliableSoftware", "status_blue",   "Transactions export (.xlsx / .xls)", (".xlsx", ".xls")),
-    ("NiftyInvest",      "status_orange", "Portfolio export (.csv)",            (".csv",)),
+    ("Sharekhan",        "status_red",    "TradeBook export (.xlsx / .xls)",   (".xlsx", ".xls"), True),
+    ("ReliableSoftware", "status_blue",   "Transactions export (.xlsx / .xls)", (".xlsx", ".xls"), False),
+    ("NiftyInvest",      "status_orange", "Portfolio export (.csv)",            (".csv",), False),
 ]
 
 
@@ -87,7 +88,8 @@ class BrokerImportCard(QFrame):
     import_reset = Signal(str)      # broker name when file is deleted
 
     def __init__(self, broker: str, color_token: str, hint: str, theme,
-                 exts: tuple = (".xlsx", ".xls"), parent=None):
+                 exts: tuple = (".xlsx", ".xls"), show_date_picker: bool = False,
+                 parent=None):
         super().__init__(parent)
         self._theme = theme
         self._broker = broker
@@ -95,6 +97,7 @@ class BrokerImportCard(QFrame):
         self._selected_file = None
         self._row_count = 0
         self._progress_value = 0
+        self._show_date_picker = show_date_picker
         self.setObjectName("brokerPanel")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._build(color_token, hint)
@@ -123,6 +126,45 @@ class BrokerImportCard(QFrame):
         header.addStretch()
         header.addWidget(self._status_lbl)
         layout.addLayout(header)
+
+        # Expiry date picker (only for Sharekhan)
+        if self._show_date_picker:
+            date_row = QHBoxLayout()
+            date_label = QLabel("Expiry Date:")
+            date_label.setFont(font_scale.font(font_scale.SMALL, False))
+            date_label.setStyleSheet(f"color: {t.get('text_secondary')};")
+
+            from services.master_generator import last_tuesday_of_month
+            default_date = last_tuesday_of_month()
+            self._expiry_date = default_date
+
+            self._date_btn = QPushButton(default_date.strftime("%d-%b-%Y"))
+            self._date_btn.setFixedHeight(32)
+            self._date_btn.setFont(font_scale.font(font_scale.SMALL, False))
+            self._date_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            bg = t.get('input_bg')
+            txt = t.get('text_primary')
+            bd = t.get('border')
+            accent = t.get('accent')
+            self._date_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {bg};
+                    color: {txt};
+                    border: 1px solid {bd};
+                    border-radius: 4px;
+                    padding: 4px 12px;
+                    text-align: left;
+                }}
+                QPushButton:hover {{
+                    border-color: {accent};
+                }}
+            """)
+            self._date_btn.clicked.connect(self._show_calendar)
+
+            date_row.addWidget(date_label)
+            date_row.addWidget(self._date_btn)
+            date_row.addStretch()
+            layout.addLayout(date_row)
 
         # Drop zone
         drop = DropZone(self._exts)
@@ -266,6 +308,156 @@ class BrokerImportCard(QFrame):
         self._file_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
         self.import_reset.emit(self._broker)
 
+    def get_expiry_date(self):
+        """Return the selected expiry date as a datetime.date object."""
+        if self._show_date_picker and hasattr(self, "_expiry_date"):
+            return self._expiry_date
+        return None
+
+    def refresh_theme(self):
+        """Re-apply styles to match current theme after a toggle."""
+        if self._show_date_picker and hasattr(self, "_date_btn"):
+            self._update_date_btn_style()
+
+    def _show_calendar(self):
+        """Show a themed calendar popup to pick the expiry date."""
+        t = self._theme
+        bg = t.get('card_bg')
+        txt = t.get('text_primary')
+        txt_s = t.get('text_secondary')
+        bd = t.get('border')
+        accent = t.get('accent')
+        btn_bg = t.get('button_bg')
+
+        cal = QCalendarWidget()
+        cal.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
+        cal.setFont(font_scale.font(font_scale.SMALL, False))
+        cal.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        cal.setStyleSheet(f"""
+            QCalendarWidget {{
+                background: {bg};
+                color: {txt};
+                border: 1px solid {bd};
+            }}
+            QCalendarWidget QWidget#qt_calendar_navigationbar {{
+                background: {btn_bg};
+                border-bottom: 1px solid {bd};
+            }}
+            QCalendarWidget QToolButton {{
+                color: {txt};
+                background: {btn_bg};
+                border: 1px solid {bd};
+                border-radius: 4px;
+                padding: 4px 8px;
+                min-width: 40px;
+            }}
+            QCalendarWidget QToolButton:hover {{
+                border-color: {accent};
+                color: {accent};
+            }}
+            QCalendarWidget QToolButton:pressed {{
+                background: {accent};
+                color: {bg};
+            }}
+            QCalendarWidget QSpinBox {{
+                background: {bg};
+                color: {txt};
+                border: 1px solid {bd};
+                border-radius: 4px;
+                padding: 2px 4px;
+            }}
+            QCalendarWidget QAbstractItemView {{
+                background: {bg};
+                color: {txt};
+                selection-background-color: {accent};
+                selection-color: {bg};
+                border: none;
+                outline: none;
+            }}
+            QCalendarWidget QAbstractItemView:enabled {{
+                color: {txt};
+            }}
+            QCalendarWidget QAbstractItemView:disabled {{
+                color: {txt_s};
+            }}
+            QCalendarWidget QWidget {{
+                alternate-background-color: {bg};
+            }}
+            QCalendarWidget QLabel {{
+                color: {txt};
+                background: transparent;
+            }}
+            QCalendarWidget QHeaderView {{
+                background: {btn_bg};
+            }}
+            QCalendarWidget QHeaderView::section {{
+                color: {txt_s};
+                background: {btn_bg};
+                border: none;
+            }}
+        """)
+
+        if self._expiry_date:
+            from PySide6.QtCore import QDate
+            qd = QDate(self._expiry_date.year, self._expiry_date.month, self._expiry_date.day)
+            cal.setSelectedDate(qd)
+            cal.setCurrentPage(qd.year(), qd.month())
+
+        def on_date_selected(date_obj):
+            from datetime import date
+            self._expiry_date = date(date_obj.year(), date_obj.month(), date_obj.day())
+            self._date_btn.setText(self._expiry_date.strftime("%d-%b-%Y"))
+            self._update_date_btn_style()
+            self._close_calendar()
+
+        cal.clicked.connect(on_date_selected)
+        cal.show()
+        self._calendar = cal
+        # Timer to detect outside clicks and close the calendar
+        self._cal_outside_timer = QTimer()
+        self._cal_outside_timer.setInterval(100)
+        self._cal_outside_timer.timeout.connect(self._check_calendar_outside_click)
+        self._cal_outside_timer.start()
+
+    def _close_calendar(self):
+        if hasattr(self, "_cal_outside_timer"):
+            self._cal_outside_timer.stop()
+        if hasattr(self, "_calendar") and self._calendar is not None:
+            self._calendar.close()
+
+    def _check_calendar_outside_click(self):
+        from PySide6.QtGui import QCursor
+        from PySide6.QtWidgets import QApplication
+        if not hasattr(self, "_calendar") or self._calendar is None or not self._calendar.isVisible():
+            if hasattr(self, "_cal_outside_timer"):
+                self._cal_outside_timer.stop()
+            return
+        # Check if any mouse button is pressed
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            if not self._calendar.geometry().contains(QCursor.pos()):
+                self._close_calendar()
+
+    def _update_date_btn_style(self):
+        """Re-apply date button style to match current theme."""
+        t = self._theme
+        bg = t.get('input_bg')
+        txt = t.get('text_primary')
+        bd = t.get('border')
+        accent = t.get('accent')
+        self._date_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: {bg};
+                color: {txt};
+                border: 1px solid {bd};
+                border-radius: 4px;
+                padding: 4px 12px;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                border-color: {accent};
+            }}
+        """)
+
 
 class DataImportScreen(QWidget):
     broker_imported    = Signal(str, int)   # broker name, row count
@@ -308,8 +500,8 @@ class DataImportScreen(QWidget):
         cards_row = QHBoxLayout()
         cards_row.setSpacing(16)
         self._cards: dict[str, BrokerImportCard] = {}
-        for broker, color_token, hint, exts in BROKERS:
-            card = BrokerImportCard(broker, color_token, hint, t, exts)
+        for broker, color_token, hint, exts, show_date in BROKERS:
+            card = BrokerImportCard(broker, color_token, hint, t, exts, show_date)
             card.import_done.connect(self.broker_imported)
             card.import_reset.connect(self.broker_reset)
             card.import_done.connect(self._on_card_imported)
@@ -397,6 +589,7 @@ class DataImportScreen(QWidget):
         sharekhan_path = self._cards["Sharekhan"]._selected_file
         reliable_path  = self._cards["ReliableSoftware"]._selected_file
         nifty_path     = self._cards["NiftyInvest"]._selected_file
+        expiry_date    = self._cards["Sharekhan"].get_expiry_date()
         # Reuse existing window if already open
         if self._live_viewer is not None and not self._live_viewer.isHidden():
             self._live_viewer.raise_()
@@ -406,6 +599,7 @@ class DataImportScreen(QWidget):
         self._live_viewer = LiveViewerWindow(
             sharekhan_path, reliable_path, nifty_path,
             SCRIPT_NAME_DATA,
+            expiry_date=expiry_date,
             theme=self._controller.theme,
             controller=self._controller,
         )
@@ -415,4 +609,9 @@ class DataImportScreen(QWidget):
             self.lmv_headers_ready.emit(list(self._live_viewer._headers))
         # Notify the rest of the UI that the watcher is now active
         self._controller.watcher.started.emit()
+
+    def refresh_theme(self):
+        """Re-apply styles on all child cards after a theme toggle."""
+        for card in self._cards.values():
+            card.refresh_theme()
 
