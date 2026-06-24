@@ -117,6 +117,7 @@ class MainWindow(QMainWindow):
         self._sidebar.refresh_theme()
         data_import = self._screens.get("data_import")
         if data_import is not None:
+            data_import.refresh_theme()
             viewer = getattr(data_import, "_live_viewer", None)
             if viewer is not None and viewer.isVisible():
                 viewer.refresh_theme()

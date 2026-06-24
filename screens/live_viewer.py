@@ -300,12 +300,14 @@ class LiveViewerWindow(QWidget):
 
     def __init__(self, sharekhan_path: str, reliable_path: str,
                  nifty_path: str, script_name_data: list,
+                 expiry_date=None,
                  theme=None, controller=None, parent=None):
         super().__init__(parent)
         self._sharekhan_path   = sharekhan_path
         self._reliable_path    = reliable_path
         self._nifty_path       = nifty_path
         self._script_name_data = script_name_data
+        self._expiry_date      = expiry_date
         self._theme            = theme
         self._controller       = controller
 
@@ -499,6 +501,14 @@ class LiveViewerWindow(QWidget):
             rs_headers, rs_rows = read_reliable_software(self._reliable_path)
 
         ni_headers, ni_rows = read_nifty_invest(self._nifty_path)
+
+        # Strip expiry date suffix from Sharekhan Scrip Names
+        if self._expiry_date is not None:
+            expiry_str = self._expiry_date.strftime("%d-%b-%Y").upper()
+            for sk_row in sk_rows:
+                scrip = _normalise(sk_row[_SK_PK_IDX])
+                if scrip.upper().endswith(expiry_str):
+                    sk_row[_SK_PK_IDX] = scrip[:-len(expiry_str)].strip()
 
         name_to_symbol = _build_script_name_lookup(self._script_name_data)
 

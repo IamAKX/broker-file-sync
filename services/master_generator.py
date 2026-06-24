@@ -20,7 +20,23 @@ Column positions within each read result (0-based within the extracted cols):
 """
 
 import os
+from datetime import date, timedelta
 from services.file_reader import read_sharekhan, read_reliable_software, read_nifty_invest
+
+
+def last_tuesday_of_month(ref_date: date = None) -> date:
+    """Return the last Tuesday of the month for the given date."""
+    if ref_date is None:
+        ref_date = date.today()
+    year, month = ref_date.year, ref_date.month
+    if month == 12:
+        last_day = date(year + 1, 1, 1) - timedelta(days=1)
+    else:
+        last_day = date(year, month + 1, 1) - timedelta(days=1)
+    d = last_day
+    while d.weekday() != 1:  # 1 = Tuesday
+        d -= timedelta(days=1)
+    return d
 
 
 # Indices within extracted result rows for each broker's primary/foreign key
@@ -53,11 +69,20 @@ def generate_master(
     nifty_path: str,
     output_path: str,
     script_name_data: list,   # [(full_name, symbol), ...] from config tab 2
+    expiry_date: date = None,  # expiry date to strip from Sharekhan Scrip Names
 ) -> None:
     # --- Read all three sources ---
     sk_headers, sk_rows = read_sharekhan(sharekhan_path)
     rs_headers, rs_rows = read_reliable_software(reliable_path)
     ni_headers, ni_rows = read_nifty_invest(nifty_path)
+
+    # --- Strip expiry date suffix from Sharekhan Scrip Names ---
+    if expiry_date is not None:
+        expiry_str = expiry_date.strftime("%d-%b-%Y").upper()
+        for sk_row in sk_rows:
+            scrip = _normalise(sk_row[_SK_PK_IDX])
+            if scrip.upper().endswith(expiry_str):
+                sk_row[_SK_PK_IDX] = scrip[:-len(expiry_str)].strip()
 
     # --- Build Script Name lookup: full_name_lower → symbol ---
     name_to_symbol = _build_script_name_lookup(script_name_data)
