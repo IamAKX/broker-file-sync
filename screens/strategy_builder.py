@@ -528,11 +528,14 @@ class _AggColDialog(QDialog):
 # ── Column editor dialog ───────────────────────────────────────────────────
 
 class ColumnEditorDialog(QDialog):
-    def __init__(self, col_def: dict, lmv_headers: list, theme=None, parent=None):
+    def __init__(self, col_def: dict, lmv_headers: list, theme=None,
+                 lmv_first_row: dict = None, all_lmv_data: list = None, parent=None):
         super().__init__(parent)
-        self._col   = copy.deepcopy(col_def)
-        self._lmv   = lmv_headers
-        self._theme = theme
+        self._col           = copy.deepcopy(col_def)
+        self._lmv           = lmv_headers
+        self._theme         = theme
+        self._lmv_first_row = lmv_first_row or {}
+        self._all_lmv_data  = all_lmv_data or []
         self.setWindowTitle("Edit Column")
         self.resize(720, 640)
         _apply_dialog_bg(self, theme)
@@ -561,17 +564,24 @@ class ColumnEditorDialog(QDialog):
         root.addWidget(_sep(t))
 
         # Formula
+        formula_row = QHBoxLayout()
         flbl = QLabel("Formula (value):")
         flbl.setFont(font_scale.font(font_scale.SMALL, True))
-        root.addWidget(flbl)
+        flbl.setFixedWidth(130)
 
-        self._formula_builder = FormulaBuilder(
-            self._col.get("formula", []), self._lmv, t, mode="value", parent=self
+        self._formula_preview = QLabel(_tokens_to_display(self._col.get("formula", [])) or "—")
+        self._formula_preview.setFont(QFont("Menlo,Consolas,monospace", 9))
+        self._formula_preview.setStyleSheet(
+            f"color:{_t(t,'accent')};background:transparent;border:none;"
         )
-        self._formula_builder.changed.connect(
-            lambda: self._col.update({"formula": self._formula_builder.get_tokens()})
-        )
-        root.addWidget(self._formula_builder)
+        self._formula_preview.setWordWrap(True)
+
+        edit_formula_btn = _btn("Edit Formula…", outlined=True, theme=t, small=True)
+        edit_formula_btn.clicked.connect(self._open_formula_editor)
+        formula_row.addWidget(flbl)
+        formula_row.addWidget(self._formula_preview, 1)
+        formula_row.addWidget(edit_formula_btn)
+        root.addLayout(formula_row)
 
         root.addWidget(_sep(t))
 
@@ -616,6 +626,24 @@ class ColumnEditorDialog(QDialog):
         btn_row.addWidget(can)
         btn_row.addWidget(ok)
         root.addLayout(btn_row)
+
+    def _open_formula_editor(self):
+        from screens.formula_editor import ExpressionEditorDialog
+        dlg = ExpressionEditorDialog(
+            tokens=list(self._col.get("formula", [])),
+            lmv_headers=self._lmv,
+            strategy_col_headers=[],
+            lmv_first_row=self._lmv_first_row,
+            all_lmv_data=self._all_lmv_data,
+            theme=self._theme,
+            mode="value",
+            parent=self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._col["formula"] = dlg.get_tokens()
+            self._formula_preview.setText(
+                _tokens_to_display(self._col["formula"]) or "—"
+            )
 
     def _add_fmt_rule(self):
         self._col["fmt_rules"].append(store.new_fmt_rule())
@@ -703,8 +731,8 @@ class ColumnEditorDialog(QDialog):
             )
 
     def result_col(self) -> dict:
-        self._col["name"]    = self._name_edit.text().strip()
-        self._col["formula"] = self._formula_builder.get_tokens()
+        self._col["name"] = self._name_edit.text().strip()
+        # formula is already updated in-place by _open_formula_editor
         return self._col
 
 
@@ -802,9 +830,11 @@ class StrategyEditor(QWidget):
 
     def __init__(self, strategy: dict, lmv_headers: list, theme=None, parent=None):
         super().__init__(parent)
-        self._strategy    = copy.deepcopy(strategy)
-        self._lmv_headers = lmv_headers
-        self._theme       = theme
+        self._strategy      = copy.deepcopy(strategy)
+        self._lmv_headers   = lmv_headers
+        self._theme         = theme
+        self._lmv_first_row: dict = {}
+        self._all_lmv_data: list  = []
         self._build()
 
     def _build(self):
@@ -882,7 +912,9 @@ class StrategyEditor(QWidget):
 
     def _add_column(self):
         col = store.new_column(f"Col{len(self._strategy['columns']) + 1}")
-        dlg = ColumnEditorDialog(col, self._lmv_headers, self._theme, self)
+        dlg = ColumnEditorDialog(col, self._lmv_headers, self._theme,
+                                 lmv_first_row=self._lmv_first_row,
+                                 all_lmv_data=self._all_lmv_data, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["columns"].append(dlg.result_col())
             self._refresh_columns()
@@ -900,9 +932,15 @@ class StrategyEditor(QWidget):
         )
         self._warn_lbl.setVisible(not self._lmv_headers)
 
+    def update_lmv_data(self, first_row: dict, all_data: list):
+        self._lmv_first_row = first_row
+        self._all_lmv_data  = all_data
+
     def _edit_column(self, idx: int):
         col = self._strategy["columns"][idx]
-        dlg = ColumnEditorDialog(col, self._lmv_headers, self._theme, self)
+        dlg = ColumnEditorDialog(col, self._lmv_headers, self._theme,
+                                 lmv_first_row=self._lmv_first_row,
+                                 all_lmv_data=self._all_lmv_data, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["columns"][idx] = dlg.result_col()
             self._refresh_columns()

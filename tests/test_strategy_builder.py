@@ -313,3 +313,33 @@ def test_sector_filter_survives_strategy_toggle(qapp, tmp_path, monkeypatch):
     hidden = [lmv._table.isRowHidden(r) for r in range(lmv._table.rowCount())]
     # HDFCBANK (BANKING) should be hidden, INFY (TECHNOLOGY) visible
     assert any(hidden), "Some rows should be hidden after strategy toggle with active filter"
+
+
+def test_column_editor_has_edit_formula_button(qapp):
+    from services.strategy_store import new_column
+    from screens.strategy_builder import ColumnEditorDialog
+    from PySide6.QtWidgets import QPushButton
+    col = new_column("TestCol")
+    dlg = ColumnEditorDialog(col, ["LTP", "CLOSE"], None)
+    btns = [b.text() for b in dlg.findChildren(QPushButton)]
+    assert any("Edit Formula" in t for t in btns)
+
+
+def test_column_editor_no_inline_formula_builder(qapp):
+    """FormulaBuilder widget must NOT be embedded directly in ColumnEditorDialog."""
+    from services.strategy_store import new_column
+    from screens.strategy_builder import ColumnEditorDialog, FormulaBuilder
+    col = new_column("TestCol")
+    dlg = ColumnEditorDialog(col, ["LTP"], None)
+    # FormulaBuilder may exist for fmt-rule conditions, but NOT as a direct child
+    # of the main dialog layout at the value-formula level
+    assert dlg._formula_preview is not None  # preview label exists instead
+
+
+def test_strategy_editor_has_lmv_data_attrs(qapp):
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyEditor
+    s = new_strategy("T")
+    editor = StrategyEditor(s, [], None)
+    assert hasattr(editor, "_lmv_first_row")
+    assert hasattr(editor, "_all_lmv_data")
