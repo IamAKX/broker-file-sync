@@ -24,6 +24,7 @@ BROKERS = [
     ("Sharekhan",       "status_red"),
     ("ReliableSoftware","status_blue"),
     ("NiftyInvest",     "status_orange"),
+    ("ExternalImport",  "status_purple"),
 ]
 
 

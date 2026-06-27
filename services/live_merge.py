@@ -112,7 +112,7 @@ class LiveDataReader:
         unless ``force_slow`` is set or the slow interval has elapsed.
         """
         from services.master_generator import (
-            _build_script_name_lookup, _normalise,
+            _build_script_name_lookup, _normalise, _strip_date_suffix,
             _RS_DATA_INDICES, _NI_DATA_INDICES,
             _SK_PK_IDX, _RS_FK_IDX, _NI_FK_IDX,
         )
@@ -150,7 +150,7 @@ class LiveDataReader:
         ext_lookup: dict = {}
         if ext_rows and ext_headers:
             for row in ext_rows:
-                key = _normalise(row[0]).upper() if row else ""
+                key = _strip_date_suffix(_normalise(row[0])).upper() if row else ""
                 if key:
                     ext_lookup[key] = row
 

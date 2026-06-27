@@ -172,24 +172,24 @@ def test_external_import_card_present(qapp):
     assert "ExternalImport" in screen._cards
 
 
-def test_watcher_btn_enabled_without_external(qapp):
-    """Watcher must be enabled when only the 3 required brokers are imported."""
+def test_watcher_btn_enabled_with_all_four(qapp):
+    """Watcher must be enabled only when all four files are imported."""
     from app import AppController
     from screens.data_import import DataImportScreen
     screen = DataImportScreen(AppController(qapp))
-    # Simulate the three required brokers imported
-    for broker in ["Sharekhan", "ReliableSoftware", "NiftyInvest"]:
+    for broker in ["Sharekhan", "ReliableSoftware", "NiftyInvest", "ExternalImport"]:
         screen._imported_brokers.add(broker)
     screen._update_watcher_btn()
     assert screen._watcher_btn.isEnabled()
 
 
-def test_watcher_btn_disabled_when_only_external(qapp):
-    """External alone must not enable the watcher."""
+def test_watcher_btn_disabled_without_external(qapp):
+    """Watcher must NOT be enabled when ExternalImport is missing."""
     from app import AppController
     from screens.data_import import DataImportScreen
     screen = DataImportScreen(AppController(qapp))
-    screen._imported_brokers.add("ExternalImport")
+    for broker in ["Sharekhan", "ReliableSoftware", "NiftyInvest"]:
+        screen._imported_brokers.add(broker)
     screen._update_watcher_btn()
     assert not screen._watcher_btn.isEnabled()
 

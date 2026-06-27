@@ -31,7 +31,7 @@ BROKERS = [
     ("Sharekhan",        "status_red",    "TradeBook export (.xlsx / .xls)",        (".xlsx", ".xls"),        True),
     ("ReliableSoftware", "status_blue",   "Transactions export (.xlsx / .xls)",     (".xlsx", ".xls"),        False),
     ("NiftyInvest",      "status_orange", "Portfolio export (.csv)",                (".csv",),                False),
-    ("ExternalImport",   "status_amber",  "Any file — columns auto-detected",       (".xlsx", ".xls", ".csv"), False),
+    ("ExternalImport",   "status_purple", "Any file — columns auto-detected",       (".xlsx", ".xls", ".csv"), False),
 ]
 
 
@@ -466,8 +466,7 @@ class DataImportScreen(QWidget):
     broker_imported    = Signal(str, int)   # broker name, row count
     broker_reset       = Signal(str)
     lmv_headers_ready  = Signal(list)       # emitted when LMV loads headers
-    # Required brokers to enable watcher (ExternalImport is optional)
-    _REQUIRED_BROKERS = {"Sharekhan", "ReliableSoftware", "NiftyInvest"}
+    _REQUIRED_BROKERS = {"Sharekhan", "ReliableSoftware", "NiftyInvest", "ExternalImport"}
 
     def __init__(self, controller):
         super().__init__()
@@ -496,8 +495,8 @@ class DataImportScreen(QWidget):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Upload broker exports and optional external data. "
-            "Watcher starts once the three broker files are loaded."
+            "Upload all four files to start the watcher. "
+            "Sharekhan, ReliableSoftware, NiftyInvest, and ExternalImport are all required."
         )
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")

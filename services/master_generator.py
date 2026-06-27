@@ -63,6 +63,15 @@ def _normalise(value) -> str:
     return str(value).strip() if value is not None else ""
 
 
+import re as _re
+_DATE_SUFFIX_RE = _re.compile(r"\s+\d{1,2}-[A-Za-z]{3}-\d{4}$")
+
+
+def _strip_date_suffix(name: str) -> str:
+    """Strip trailing ' DD-Mon-YYYY' from stock names (e.g. external-import col-0)."""
+    return _DATE_SUFFIX_RE.sub("", name).strip()
+
+
 def generate_master(
     sharekhan_path: str,
     reliable_path: str,
@@ -113,7 +122,7 @@ def generate_master(
     ext_lookup: dict = {}
     if ext_rows and ext_headers:
         for row in ext_rows:
-            key = _normalise(row[0]).upper() if row else ""
+            key = _strip_date_suffix(_normalise(row[0])).upper() if row else ""
             if key:
                 ext_lookup[key] = row
 
