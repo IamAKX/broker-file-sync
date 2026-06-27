@@ -343,3 +343,14 @@ def test_strategy_editor_has_lmv_data_attrs(qapp):
     editor = StrategyEditor(s, [], None)
     assert hasattr(editor, "_lmv_first_row")
     assert hasattr(editor, "_all_lmv_data")
+
+
+def test_fmt_rule_condition_has_edit_button(qapp):
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+    from PySide6.QtWidgets import QPushButton
+    col = new_column("TestCol")
+    col["fmt_rules"].append(new_fmt_rule())
+    dlg = ColumnEditorDialog(col, ["LTP"], None)
+    btns = [b.text() for b in dlg.findChildren(QPushButton)]
+    assert any("Edit Condition" in t for t in btns)

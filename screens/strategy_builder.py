@@ -700,25 +700,54 @@ class ColumnEditorDialog(QDialog):
             hdr.addWidget(del_btn)
             rlay.addLayout(hdr)
 
-            cond_lbl = QLabel("Condition (evaluates to true/false):")
+            cond_row = QHBoxLayout()
+            cond_lbl = QLabel("Condition:")
             cond_lbl.setFont(font_scale.font(font_scale.SMALL, False))
             cond_lbl.setStyleSheet("background:transparent;")
-            rlay.addWidget(cond_lbl)
+            cond_lbl.setFixedWidth(80)
 
-            cond_builder = FormulaBuilder(
-                rule.get("condition", []), self._lmv, t,
-                mode="condition", parent=self
+            cond_preview = QLabel(
+                _tokens_to_display(rule.get("condition", [])) or "—"
             )
-            cond_builder.changed.connect(
-                lambda _, i=idx, cb=cond_builder:
-                self._update_condition(i, cb.get_tokens())
+            cond_preview.setFont(QFont("Menlo,Consolas,monospace", 9))
+            cond_preview.setStyleSheet(
+                f"color:{_t(t,'accent')};background:transparent;border:none;"
             )
-            rlay.addWidget(cond_builder)
+            cond_preview.setWordWrap(True)
+
+            edit_cond_btn = _btn("Edit Condition…", outlined=True, theme=t, small=True)
+            edit_cond_btn.clicked.connect(
+                lambda _, i=idx, lbl=cond_preview: self._open_condition_editor(i, lbl)
+            )
+            cond_row.addWidget(cond_lbl)
+            cond_row.addWidget(cond_preview, 1)
+            cond_row.addWidget(edit_cond_btn)
+            rlay.addLayout(cond_row)
             self._fmt_layout.insertWidget(self._fmt_layout.count() - 1, rule_frame)
 
     def _update_condition(self, idx: int, tokens: list):
         if idx < len(self._col["fmt_rules"]):
             self._col["fmt_rules"][idx]["condition"] = tokens
+
+    def _open_condition_editor(self, idx: int, preview_label: QLabel):
+        from screens.formula_editor import ExpressionEditorDialog
+        from PySide6.QtWidgets import QDialog as _QD
+        rule = self._col["fmt_rules"][idx]
+        dlg = ExpressionEditorDialog(
+            tokens=list(rule.get("condition", [])),
+            lmv_headers=self._lmv,
+            strategy_col_headers=[],
+            lmv_first_row=self._lmv_first_row,
+            all_lmv_data=self._all_lmv_data,
+            theme=self._theme,
+            mode="condition",
+            parent=self,
+        )
+        if dlg.exec() == _QD.DialogCode.Accepted:
+            self._col["fmt_rules"][idx]["condition"] = dlg.get_tokens()
+            preview_label.setText(
+                _tokens_to_display(self._col["fmt_rules"][idx]["condition"]) or "—"
+            )
 
     def _pick_color(self, idx: int, btn: QPushButton):
         current = QColor(self._col["fmt_rules"][idx]["color"])
