@@ -291,3 +291,25 @@ def test_sector_filter_all_shows_all_rows(qapp, tmp_path, monkeypatch):
     lmv._sector_combo.setCurrentText("All")
     hidden = sum(1 for r in range(lmv._table.rowCount()) if lmv._table.isRowHidden(r))
     assert hidden == 0
+
+
+def test_sector_filter_survives_strategy_toggle(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    headers = ["Scrip Name", "% Change"]
+    data    = [["INFY", 1.5], ["HDFCBANK", -0.5]]
+    h2, d2  = lmv._inject_sector(headers, data)
+    lmv._headers      = h2
+    lmv._data         = d2
+    lmv._visible_cols = set(range(len(h2)))
+    lmv._populate_table(d2, changed_keys=set())
+    # Apply sector filter
+    lmv._sector_combo.setCurrentText("TECHNOLOGY")
+    # Trigger strategy toggle (re-render)
+    lmv.set_strategies([])
+    # Sector filter must still be active
+    hidden = [lmv._table.isRowHidden(r) for r in range(lmv._table.rowCount())]
+    # HDFCBANK (BANKING) should be hidden, INFY (TECHNOLOGY) visible
+    assert any(hidden), "Some rows should be hidden after strategy toggle with active filter"

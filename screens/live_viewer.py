@@ -904,6 +904,7 @@ class LiveViewerWindow(QWidget):
         self._strategies = [dict(s) for s in strategies]
         self._update_strat_btn_label()
         self._populate_table(self._data, set())
+        self._apply_sector_filter()
 
     def _filtered_strategies(self) -> list:
         if self._selected_category == "All":
@@ -935,6 +936,7 @@ class LiveViewerWindow(QWidget):
             store.save_strategy(s)
         self._visible_cols = set(range(len(self._headers)))
         self._populate_table(self._data, set())
+        self._apply_sector_filter()
 
     def _update_strat_btn_label(self):
         filtered = self._filtered_strategies()
@@ -1041,6 +1043,7 @@ class LiveViewerWindow(QWidget):
     def refresh_theme(self):
         """Re-render table and window chrome with the current theme."""
         self._populate_table(self._data, set())
+        self._apply_sector_filter()
 
     def closeEvent(self, event):
         self._stop()
