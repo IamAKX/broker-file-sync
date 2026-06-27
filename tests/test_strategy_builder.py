@@ -216,3 +216,22 @@ def test_scrip_name_col_is_bold_not_sector(qapp, tmp_path, monkeypatch):
     scrip_item  = lmv._table.item(0, 1)
     assert scrip_item is not None and scrip_item.font().bold(), "Scrip Name must be bold"
     assert sector_item is not None and not sector_item.font().bold(), "Sector must not be bold"
+
+
+def test_apply_col_filter_keeps_scrip_name_visible(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    headers = ["Scrip Name", "% Change"]
+    data    = [["INFY", 1.5]]
+    h2, d2  = lmv._inject_sector(headers, data)
+    lmv._headers      = h2
+    lmv._data         = d2
+    lmv._visible_cols = set(range(len(h2)))
+    lmv._populate_table(d2, changed_keys=set())
+    # Ask to hide everything — Scrip Name (index 1) must stay visible
+    lmv._apply_col_filter(set())
+    scrip_idx = h2.index("Scrip Name")
+    assert scrip_idx in lmv._visible_cols, "Scrip Name must always remain in _visible_cols"
+    assert not lmv._table.isColumnHidden(scrip_idx), "Scrip Name column must not be hidden"

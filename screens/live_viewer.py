@@ -945,8 +945,9 @@ class LiveViewerWindow(QWidget):
         popup.show()
 
     def _apply_col_filter(self, visible: set):
-        # Always keep column 0 (Scrip Name) visible
-        visible.add(0)
+        # Always keep Scrip Name visible regardless of user selection
+        if "Scrip Name" in self._headers:
+            visible.add(self._headers.index("Scrip Name"))
         self._visible_cols = visible
         for c in range(len(self._headers)):
             self._table.setColumnHidden(c, c not in self._visible_cols)
