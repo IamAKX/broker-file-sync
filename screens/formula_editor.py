@@ -186,7 +186,7 @@ class ExpressionEditorDialog(QDialog):
         self._mode  = mode
         self._compiled_ok = False
         self.setWindowTitle("Expression Editor")
-        self.resize(900, 620)
+        self.setFixedSize(900, 620)
         self._build()
         self._refresh_preview()
 
@@ -539,15 +539,13 @@ class ExpressionEditorDialog(QDialog):
 
     def _compile_and_test(self):
         from services.strategy_engine import compile_check
-        acc = _t(self._theme, "accent")
-        red = _t(self._theme, "destructive")
-
         ok, msg = compile_check(self._tokens, self._lmv_first_row, self._all_lmv_data)
         if ok:
             self._compiled_ok = True
             self._save_btn.setEnabled(True)
             self._preview_edit.setStyleSheet(
-                self._preview_edit.styleSheet().replace(acc, "#39d353")
+                f"QTextEdit{{background:#0d2116;color:#39d353;border:none;"
+                f"border-bottom:1px solid {_t(self._theme,'border')};border-radius:0;padding:8px 12px;}}"
             )
             QMessageBox.information(self, "Compile OK",
                                     f"Formula compiled successfully.\n\nResult on first row: {msg}")
