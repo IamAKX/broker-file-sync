@@ -1,0 +1,211 @@
+"""Tests for the External Import feature."""
+import csv
+import io
+import sys
+import os
+import pytest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication(sys.argv)
+
+
+# ── file_reader ───────────────────────────────────────────────────────────────
+
+def test_read_external_import_csv(tmp_path):
+    from services.file_reader import read_external_import
+    f = tmp_path / "ext.csv"
+    f.write_text("Symbol,MyCol1,MyCol2\nINFY,100,200\nTCS,300,400\n")
+    headers, data = read_external_import(str(f))
+    assert headers == ["Symbol", "MyCol1", "MyCol2"]
+    assert len(data) == 2
+    assert data[0] == ["INFY", "100", "200"]
+
+
+def test_read_external_import_xlsx(tmp_path):
+    import openpyxl
+    from services.file_reader import read_external_import
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Symbol", "Score"])
+    ws.append(["INFY", 42])
+    ws.append(["TCS", 99])
+    path = str(tmp_path / "ext.xlsx")
+    wb.save(path)
+    headers, data = read_external_import(path)
+    assert headers == ["Symbol", "Score"]
+    assert len(data) == 2
+    assert data[0][0] == "INFY"
+    assert data[0][1] == 42
+
+
+def test_read_external_import_empty_csv(tmp_path):
+    from services.file_reader import read_external_import
+    f = tmp_path / "empty.csv"
+    f.write_text("")
+    headers, data = read_external_import(str(f))
+    assert headers == []
+    assert data == []
+
+
+def test_count_rows_external(tmp_path):
+    from services.file_reader import count_rows_external
+    f = tmp_path / "ext.csv"
+    f.write_text("Symbol,Col\nINFY,1\nTCS,2\nHDFCBANK,3\n")
+    assert count_rows_external(str(f)) == 3
+
+
+# ── live_merge ────────────────────────────────────────────────────────────────
+
+def _make_csv(tmp_path, name, rows):
+    f = tmp_path / name
+    with open(f, "w", newline="") as fh:
+        w = csv.writer(fh)
+        for r in rows:
+            w.writerow(r)
+    return str(f)
+
+
+def test_live_merge_includes_external_columns(tmp_path, monkeypatch):
+    from services.live_merge import LiveDataReader
+
+    # Stub out the three broker readers so we don't need real files
+    monkeypatch.setattr(
+        "services.live_merge.LiveDataReader._read_sharekhan",
+        lambda self: (["Scrip Name", "Current"], [["INFY", 1800.0], ["TCS", 3500.0]]),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_reliable_software",
+        lambda path: (["ScripName", "callstrikehighestoi"], []),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_nifty_invest",
+        lambda path: (["Symbol", "Max Pain"], []),
+    )
+
+    ext_file = _make_csv(tmp_path, "ext.csv", [
+        ["Symbol", "MyScore"],
+        ["INFY", "99"],
+        ["TCS", "88"],
+    ])
+
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [],
+                            external_path=ext_file)
+    # Trigger slow-source read manually
+    reader._read_slow_sources(force=True)
+    headers, data = reader.read_merged(force_slow=False)
+
+    assert "MyScore" in headers
+    score_idx = headers.index("MyScore")
+    rows_by_scrip = {r[0]: r for r in data}
+    assert rows_by_scrip["INFY"][score_idx] == "99"
+    assert rows_by_scrip["TCS"][score_idx] == "88"
+
+
+def test_live_merge_without_external_is_unchanged(tmp_path, monkeypatch):
+    from services.live_merge import LiveDataReader
+
+    monkeypatch.setattr(
+        "services.live_merge.LiveDataReader._read_sharekhan",
+        lambda self: (["Scrip Name", "Current"], [["INFY", 1800.0]]),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_reliable_software",
+        lambda path: (["ScripName", "callstrikehighestoi"], []),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_nifty_invest",
+        lambda path: (["Symbol", "Max Pain"], []),
+    )
+
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [])
+    reader._read_slow_sources(force=True)
+    headers, data = reader.read_merged(force_slow=False)
+
+    assert "MyScore" not in headers
+    assert len(data) == 1
+
+
+def test_live_merge_external_missing_scrip_fills_none(tmp_path, monkeypatch):
+    from services.live_merge import LiveDataReader
+
+    monkeypatch.setattr(
+        "services.live_merge.LiveDataReader._read_sharekhan",
+        lambda self: (["Scrip Name", "Current"], [["INFY", 1800.0], ["TCS", 3500.0]]),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_reliable_software",
+        lambda path: (["ScripName", "callstrikehighestoi"], []),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_nifty_invest",
+        lambda path: (["Symbol", "Max Pain"], []),
+    )
+
+    # Only INFY in external — TCS should get None
+    ext_file = _make_csv(tmp_path, "partial.csv", [
+        ["Symbol", "MyScore"],
+        ["INFY", "99"],
+    ])
+
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [],
+                            external_path=ext_file)
+    reader._read_slow_sources(force=True)
+    headers, data = reader.read_merged(force_slow=False)
+
+    score_idx = headers.index("MyScore")
+    rows_by_scrip = {r[0]: r for r in data}
+    assert rows_by_scrip["INFY"][score_idx] == "99"
+    assert rows_by_scrip["TCS"][score_idx] is None
+
+
+# ── data_import UI ────────────────────────────────────────────────────────────
+
+def test_external_import_card_present(qapp):
+    from app import AppController
+    from screens.data_import import DataImportScreen
+    screen = DataImportScreen(AppController(qapp))
+    assert "ExternalImport" in screen._cards
+
+
+def test_watcher_btn_enabled_without_external(qapp):
+    """Watcher must be enabled when only the 3 required brokers are imported."""
+    from app import AppController
+    from screens.data_import import DataImportScreen
+    screen = DataImportScreen(AppController(qapp))
+    # Simulate the three required brokers imported
+    for broker in ["Sharekhan", "ReliableSoftware", "NiftyInvest"]:
+        screen._imported_brokers.add(broker)
+    screen._update_watcher_btn()
+    assert screen._watcher_btn.isEnabled()
+
+
+def test_watcher_btn_disabled_when_only_external(qapp):
+    """External alone must not enable the watcher."""
+    from app import AppController
+    from screens.data_import import DataImportScreen
+    screen = DataImportScreen(AppController(qapp))
+    screen._imported_brokers.add("ExternalImport")
+    screen._update_watcher_btn()
+    assert not screen._watcher_btn.isEnabled()
+
+
+def test_external_import_accepts_csv_and_xlsx(qapp):
+    from screens.data_import import BROKERS
+    ext = next(b for b in BROKERS if b[0] == "ExternalImport")
+    assert ".csv" in ext[3]
+    assert ".xlsx" in ext[3]
+
+
+# ── live_viewer accepts external_path ────────────────────────────────────────
+
+def test_live_viewer_accepts_external_path(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [], external_path=str(tmp_path / "ext.csv"))
+    assert lmv._external_path is not None

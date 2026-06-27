@@ -127,3 +127,39 @@ def read_reliable_software(path: str) -> tuple[list, list]:
 
 def read_nifty_invest(path: str) -> tuple[list, list]:
     return _read_file(path, _NIFTY_COLS, _NIFTY_HEADER_ROW)
+
+
+def read_external_import(path: str) -> tuple[list, list]:
+    """Read all columns from an external file (xlsx/xls/csv). Header at row 1."""
+    if path.lower().endswith(".xlsx"):
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+        if not rows:
+            return [], []
+        headers = [str(h) if h is not None else "" for h in rows[0]]
+        data = [list(r) for r in rows[1:]]
+        return headers, data
+    elif path.lower().endswith(".xls"):
+        import xlrd
+        wb = xlrd.open_workbook(path)
+        ws = wb.sheet_by_index(0)
+        if ws.nrows == 0:
+            return [], []
+        headers = [str(ws.cell_value(0, c)) for c in range(ws.ncols)]
+        data = [[ws.cell_value(r, c) for c in range(ws.ncols)] for r in range(1, ws.nrows)]
+        return headers, data
+    elif path.lower().endswith(".csv"):
+        import csv
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            rows = list(csv.reader(f))
+        if not rows:
+            return [], []
+        return rows[0], [list(r) for r in rows[1:]]
+    raise ValueError(f"Unsupported file type: {path}")
+
+
+def count_rows_external(path: str) -> int:
+    return count_rows(path, data_start_row=1)

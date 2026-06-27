@@ -21,7 +21,7 @@ Column positions within each read result (0-based within the extracted cols):
 
 import os
 from datetime import date, timedelta
-from services.file_reader import read_sharekhan, read_reliable_software, read_nifty_invest
+from services.file_reader import read_sharekhan, read_reliable_software, read_nifty_invest, read_external_import
 
 
 def last_tuesday_of_month(ref_date: date = None) -> date:
@@ -70,11 +70,16 @@ def generate_master(
     output_path: str,
     script_name_data: list,   # [(full_name, symbol), ...] from config tab 2
     expiry_date: date = None,  # expiry date to strip from Sharekhan Scrip Names
+    external_path: str = None,
 ) -> None:
-    # --- Read all three sources ---
+    # --- Read all sources ---
     sk_headers, sk_rows = read_sharekhan(sharekhan_path)
     rs_headers, rs_rows = read_reliable_software(reliable_path)
     ni_headers, ni_rows = read_nifty_invest(nifty_path)
+    if external_path:
+        ext_headers, ext_rows = read_external_import(external_path)
+    else:
+        ext_headers, ext_rows = [], []
 
     # --- Strip expiry date suffix from Sharekhan Scrip Names ---
     if expiry_date is not None:
@@ -103,33 +108,42 @@ def generate_master(
         key = _normalise(row[_NI_FK_IDX]).upper()
         ni_lookup[key] = row
 
+    # External import: join on first column (symbol / scrip name)
+    ext_data_indices = list(range(1, len(ext_headers))) if len(ext_headers) > 1 else []
+    ext_lookup: dict = {}
+    if ext_rows and ext_headers:
+        for row in ext_rows:
+            key = _normalise(row[0]).upper() if row else ""
+            if key:
+                ext_lookup[key] = row
+
     # --- Build merged headers ---
-    # Sharekhan: all headers (primary key included — it's the Scrip Name column)
     out_headers = list(sk_headers)
-    # ReliableSoftware: data cols only (skip FK col)
     for i in _RS_DATA_INDICES:
         out_headers.append(rs_headers[i] if i < len(rs_headers) else "")
-    # NiftyInvest: data cols only (skip FK col)
     for i in _NI_DATA_INDICES:
         out_headers.append(ni_headers[i] if i < len(ni_headers) else "")
+    for i in ext_data_indices:
+        out_headers.append(ext_headers[i] if i < len(ext_headers) else "")
 
     # --- Build merged rows ---
     merged_rows = []
     for sk_row in sk_rows:
         pk = _normalise(sk_row[_SK_PK_IDX]).upper()
 
-        # Sharekhan data (all columns)
         out_row = list(sk_row)
 
-        # ReliableSoftware data columns
         rs_row = rs_lookup.get(pk)
         for i in _RS_DATA_INDICES:
             out_row.append(rs_row[i] if rs_row and i < len(rs_row) else None)
 
-        # NiftyInvest data columns
         ni_row = ni_lookup.get(pk)
         for i in _NI_DATA_INDICES:
             out_row.append(ni_row[i] if ni_row and i < len(ni_row) else None)
+
+        ext_row = ext_lookup.get(pk)
+        for i in ext_data_indices:
+            out_row.append(ext_row[i] if ext_row and i < len(ext_row) else None)
 
         merged_rows.append(out_row)
 

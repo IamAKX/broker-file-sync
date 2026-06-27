@@ -23,10 +23,11 @@ class LiveDataReader:
     def __init__(self, sharekhan_path, reliable_path, nifty_path,
                  script_name_data, expiry_date=None,
                  use_com=False, slow_interval_s: float = 1.0,
-                 clock=time.monotonic):
+                 clock=time.monotonic, external_path=None):
         self._sharekhan_path   = sharekhan_path
         self._reliable_path    = reliable_path
         self._nifty_path       = nifty_path
+        self._external_path    = external_path
         self._script_name_data = script_name_data
         self._expiry_date      = expiry_date
         self._use_com          = use_com
@@ -36,6 +37,7 @@ class LiveDataReader:
         # Cached slow-source results: (headers, rows)
         self._rs_cache = None
         self._ni_cache = None
+        self._ext_cache = None
         self._slow_stamp = None   # monotonic time of last slow refresh
 
         # Cached symbol-resolution map (rebuilt only when script data changes).
@@ -86,8 +88,8 @@ class LiveDataReader:
         return read_reliable_software(self._reliable_path)
 
     def _read_slow_sources(self, force: bool = False):
-        """Refresh Reliable + Nifty if the slow interval has elapsed."""
-        from services.file_reader import read_nifty_invest
+        """Refresh Reliable + Nifty + External if the slow interval has elapsed."""
+        from services.file_reader import read_nifty_invest, read_external_import
 
         now = self._clock()
         due = (
@@ -96,8 +98,10 @@ class LiveDataReader:
             or (now - self._slow_stamp) >= self._slow_interval_s
         )
         if due:
-            self._rs_cache = self._read_reliable()
-            self._ni_cache = read_nifty_invest(self._nifty_path)
+            self._rs_cache  = self._read_reliable()
+            self._ni_cache  = read_nifty_invest(self._nifty_path)
+            self._ext_cache = (read_external_import(self._external_path)
+                               if self._external_path else ([], []))
             self._slow_stamp = now
 
     def read_merged(self, force_slow: bool = False) -> tuple[list, list[list]]:
@@ -117,6 +121,7 @@ class LiveDataReader:
         self._read_slow_sources(force=force_slow)
         rs_headers, rs_rows = self._rs_cache
         ni_headers, ni_rows = self._ni_cache
+        ext_headers, ext_rows = self._ext_cache if self._ext_cache else ([], [])
 
         # Strip expiry date suffix from Sharekhan Scrip Names
         if self._expiry_date is not None:
@@ -140,11 +145,22 @@ class LiveDataReader:
         for row in ni_rows:
             ni_lookup[_normalise(row[_NI_FK_IDX]).upper()] = row
 
+        # External import: join on first column (must be symbol / scrip name)
+        ext_data_indices = list(range(1, len(ext_headers))) if len(ext_headers) > 1 else []
+        ext_lookup: dict = {}
+        if ext_rows and ext_headers:
+            for row in ext_rows:
+                key = _normalise(row[0]).upper() if row else ""
+                if key:
+                    ext_lookup[key] = row
+
         out_headers = list(sk_headers)
         for i in _RS_DATA_INDICES:
             out_headers.append(rs_headers[i] if i < len(rs_headers) else "")
         for i in _NI_DATA_INDICES:
             out_headers.append(ni_headers[i] if i < len(ni_headers) else "")
+        for i in ext_data_indices:
+            out_headers.append(ext_headers[i] if i < len(ext_headers) else "")
 
         merged = []
         for sk_row in sk_rows:
@@ -156,6 +172,9 @@ class LiveDataReader:
             ni_row = ni_lookup.get(pk)
             for i in _NI_DATA_INDICES:
                 out_row.append(ni_row[i] if ni_row and i < len(ni_row) else None)
+            ext_row = ext_lookup.get(pk)
+            for i in ext_data_indices:
+                out_row.append(ext_row[i] if ext_row and i < len(ext_row) else None)
             merged.append(out_row)
 
         return out_headers, merged
