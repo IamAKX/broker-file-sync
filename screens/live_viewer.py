@@ -758,13 +758,14 @@ class LiveViewerWindow(QWidget):
         self._table.setHorizontalHeaderLabels(disp_headers)
         self._table.setRowCount(len(disp_data))
 
-        bold_font = font_scale.font(font_scale.SMALL, True)
+        bold_font   = font_scale.font(font_scale.SMALL, True)
+        scrip_col   = disp_headers.index("Scrip Name") if "Scrip Name" in disp_headers else -1
         for r, row in enumerate(disp_data):
             row_dict = all_dicts[r]
             for c, val in enumerate(row):
                 item = QTableWidgetItem(self._fmt_cell(val))
                 item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-                if c == 0:
+                if c == scrip_col:
                     item.setFont(bold_font)
                 self._apply_cell_style(
                     item, c, val, row_dict, all_dicts, strat_col_defs,

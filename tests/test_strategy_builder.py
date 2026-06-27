@@ -195,3 +195,24 @@ def test_inject_sector_idempotent_on_empty(qapp, tmp_path, monkeypatch):
     new_headers, new_data = lmv._inject_sector([], [])
     assert new_headers == ["Sector"]
     assert new_data == []
+
+
+def test_scrip_name_col_is_bold_not_sector(qapp, tmp_path, monkeypatch):
+    """After sector injection, Scrip Name (col 1) must be bold, not Sector (col 0)."""
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    headers = ["Scrip Name", "% Change"]
+    data    = [["INFY", 1.5]]
+    h2, d2  = lmv._inject_sector(headers, data)
+    # h2 = ["Sector", "Scrip Name", "% Change"]
+    lmv._headers      = h2
+    lmv._data         = d2
+    lmv._visible_cols = set(range(len(h2)))
+    lmv._populate_table(d2, changed_keys=set())
+    from PySide6.QtGui import QFont
+    sector_item = lmv._table.item(0, 0)
+    scrip_item  = lmv._table.item(0, 1)
+    assert scrip_item is not None and scrip_item.font().bold(), "Scrip Name must be bold"
+    assert sector_item is not None and not sector_item.font().bold(), "Sector must not be bold"
