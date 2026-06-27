@@ -235,3 +235,59 @@ def test_apply_col_filter_keeps_scrip_name_visible(qapp, tmp_path, monkeypatch):
     scrip_idx = h2.index("Scrip Name")
     assert scrip_idx in lmv._visible_cols, "Scrip Name must always remain in _visible_cols"
     assert not lmv._table.isColumnHidden(scrip_idx), "Scrip Name column must not be hidden"
+
+
+def test_live_viewer_has_sector_combo(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    from PySide6.QtWidgets import QComboBox
+    lmv = LiveViewerWindow("", "", "", [])
+    assert hasattr(lmv, "_sector_combo"), "_sector_combo must exist"
+    assert isinstance(lmv._sector_combo, QComboBox)
+    items = [lmv._sector_combo.itemText(i) for i in range(lmv._sector_combo.count())]
+    assert "All" in items
+    assert "TECHNOLOGY" in items
+    assert "BANKING" in items
+
+
+def test_sector_filter_hides_non_matching_rows(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    headers = ["Scrip Name", "% Change"]
+    data    = [["INFY", 1.5], ["HDFCBANK", -0.5], ["TCS", 0.2]]
+    h2, d2  = lmv._inject_sector(headers, data)
+    lmv._headers      = h2
+    lmv._data         = d2
+    lmv._visible_cols = set(range(len(h2)))
+    lmv._populate_table(d2, changed_keys=set())
+    # Filter to TECHNOLOGY — only INFY and TCS rows visible
+    lmv._sector_combo.setCurrentText("TECHNOLOGY")
+    visible_sectors = []
+    for r in range(lmv._table.rowCount()):
+        if not lmv._table.isRowHidden(r):
+            item = lmv._table.item(r, 0)
+            if item:
+                visible_sectors.append(item.text())
+    assert all(s == "TECHNOLOGY" for s in visible_sectors)
+    assert len(visible_sectors) == 2   # INFY and TCS
+
+
+def test_sector_filter_all_shows_all_rows(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    headers = ["Scrip Name", "% Change"]
+    data    = [["INFY", 1.5], ["HDFCBANK", -0.5]]
+    h2, d2  = lmv._inject_sector(headers, data)
+    lmv._headers      = h2
+    lmv._data         = d2
+    lmv._visible_cols = set(range(len(h2)))
+    lmv._populate_table(d2, changed_keys=set())
+    lmv._sector_combo.setCurrentText("TECHNOLOGY")
+    lmv._sector_combo.setCurrentText("All")
+    hidden = sum(1 for r in range(lmv._table.rowCount()) if lmv._table.isRowHidden(r))
+    assert hidden == 0

@@ -457,6 +457,17 @@ class LiveViewerWindow(QWidget):
         self._cat_combo.setCursor(Qt.CursorShape.PointingHandCursor)
         self._cat_combo.currentTextChanged.connect(self._on_category_changed)
 
+        self._sector_combo = QComboBox()
+        self._sector_combo.addItem("All")
+        sectors = sorted(set(self._sector_map.values()))
+        for s in sectors:
+            self._sector_combo.addItem(s)
+        self._sector_combo.setCurrentText("All")
+        self._sector_combo.setFixedHeight(30)
+        self._sector_combo.setFont(font_scale.font(font_scale.SMALL, False))
+        self._sector_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._sector_combo.currentTextChanged.connect(self._apply_sector_filter)
+
         stop_btn = QPushButton("Stop")
         stop_btn.setFixedHeight(30)
         stop_btn.setFont(font_scale.font(font_scale.SMALL, False))
@@ -475,6 +486,8 @@ class LiveViewerWindow(QWidget):
         top.addWidget(self._col_btn)
         top.addSpacing(8)
         top.addWidget(self._cat_combo)
+        top.addSpacing(4)
+        top.addWidget(self._sector_combo)
         top.addSpacing(4)
         top.addWidget(self._strat_btn)
         top.addSpacing(8)
@@ -596,6 +609,7 @@ class LiveViewerWindow(QWidget):
         # All columns visible by default
         self._visible_cols = set(range(len(headers)))
         self._populate_table(data, changed_keys=set())
+        self._apply_sector_filter()
         self._update_col_btn_label()
 
     def _inject_sector(self, headers: list, data: list) -> tuple:
@@ -638,6 +652,7 @@ class LiveViewerWindow(QWidget):
             self._data    = new_data
             self._headers = headers
             self._populate_table(new_data, changed_keys=None)  # diff internally
+            self._apply_sector_filter()
             self._status_lbl.setText(f"Updated: {datetime.now().strftime('%H:%M:%S')}")
             self._adapt_poll_rate(getattr(self, "_last_change_count", 0))
         finally:
@@ -900,6 +915,7 @@ class LiveViewerWindow(QWidget):
         self._update_strat_btn_label()
         self._visible_cols = set(range(len(self._headers)))
         self._populate_table(self._data, set())
+        self._apply_sector_filter()
 
     def _show_strategy_picker(self):
         popup = StrategyPickerPopup(self._filtered_strategies(), self._theme, self)
@@ -962,6 +978,30 @@ class LiveViewerWindow(QWidget):
             self._col_btn.setText("⊞  Columns")
         else:
             self._col_btn.setText(f"⊞  Columns  {visible}/{total}")
+
+    def _repopulate_sector_combo(self):
+        """Rebuild sector combo items from the current sector map."""
+        sectors = sorted(set(self._sector_map.values()))
+        self._sector_combo.blockSignals(True)
+        current = self._sector_combo.currentText()
+        self._sector_combo.clear()
+        self._sector_combo.addItem("All")
+        for s in sectors:
+            self._sector_combo.addItem(s)
+        # Restore previous selection if still valid
+        idx = self._sector_combo.findText(current)
+        self._sector_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._sector_combo.blockSignals(False)
+
+    def _apply_sector_filter(self):
+        """Show/hide rows based on the selected sector. No table re-render."""
+        selected = self._sector_combo.currentText()
+        for r in range(self._table.rowCount()):
+            if selected == "All":
+                self._table.setRowHidden(r, False)
+            else:
+                item = self._table.item(r, 0)   # Sector is always col 0
+                self._table.setRowHidden(r, item is None or item.text() != selected)
 
     # ── Controls ─────────────────────────────────────────────────────────────
 
