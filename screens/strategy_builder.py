@@ -725,10 +725,6 @@ class ColumnEditorDialog(QDialog):
             rlay.addLayout(cond_row)
             self._fmt_layout.insertWidget(self._fmt_layout.count() - 1, rule_frame)
 
-    def _update_condition(self, idx: int, tokens: list):
-        if idx < len(self._col["fmt_rules"]):
-            self._col["fmt_rules"][idx]["condition"] = tokens
-
     def _open_condition_editor(self, idx: int, preview_label: QLabel):
         from screens.formula_editor import ExpressionEditorDialog
         from PySide6.QtWidgets import QDialog as _QD

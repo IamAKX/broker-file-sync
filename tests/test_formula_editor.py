@@ -104,3 +104,83 @@ def test_expression_editor_get_tokens_empty(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     dlg = ExpressionEditorDialog([], ["LTP"], [], {})
     assert dlg.get_tokens() == []
+
+
+def test_editor_add_token_via_operator_updates_preview(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    dlg = ExpressionEditorDialog([], ["LTP"], [], {})
+    dlg._add_token({"type": "op", "value": "+"})
+    assert "+" in dlg._preview_edit.toPlainText()
+
+
+def test_editor_backspace_removes_last_token(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    tokens = [{"type": "col", "value": "LTP"}, {"type": "op", "value": "+"}]
+    dlg = ExpressionEditorDialog(tokens, ["LTP"], [], {})
+    assert len(dlg._tokens) == 2
+    dlg._backspace()
+    assert len(dlg._tokens) == 1
+    assert dlg._tokens[0]["type"] == "col"
+
+
+def test_editor_clear_empties_tokens(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    tokens = [{"type": "col", "value": "LTP"}]
+    dlg = ExpressionEditorDialog(tokens, ["LTP"], [], {})
+    dlg._clear()
+    assert dlg.get_tokens() == []
+
+
+def test_editor_save_disabled_before_compile(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    dlg = ExpressionEditorDialog([], ["LTP"], [], {})
+    assert not dlg._save_btn.isEnabled()
+
+
+def test_editor_search_filters_functions(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    dlg = ExpressionEditorDialog([], ["LTP"], [], {})
+    # Select Functions nav item (row 0)
+    dlg._nav_list.setCurrentRow(0)
+    count_all = dlg._item_list.count()
+    dlg._search_box.setText("round")
+    count_filtered = dlg._item_list.count()
+    assert count_filtered < count_all
+    assert count_filtered >= 1
+
+
+def test_editor_field_catalogue_includes_lmv_headers(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    dlg = ExpressionEditorDialog([], ["LTP", "CLOSE", "OPEN"], [], {})
+    dlg._nav_list.setCurrentRow(2)  # Fields
+    items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
+    assert "[LTP]" in items
+    assert "[CLOSE]" in items
+
+
+def test_editor_constants_include_true_false(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    dlg = ExpressionEditorDialog([], [], [], {})
+    dlg._nav_list.setCurrentRow(3)  # Constants
+    items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
+    assert "True" in items
+    assert "False" in items
+
+
+def test_compile_check_true_false_constants():
+    from services.strategy_engine import compile_check
+    tokens = [{"type": "num", "value": "True"}]
+    ok, msg = compile_check(tokens, {}, [])
+    assert ok is True
+
+
+def test_tokens_round_trip_through_dialog(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    original = [
+        {"type": "col", "value": "LTP"},
+        {"type": "op",  "value": "*"},
+        {"type": "num", "value": "1.05"},
+    ]
+    dlg = ExpressionEditorDialog(original, ["LTP"], [], {"LTP": 100.0})
+    result = dlg.get_tokens()
+    assert result == original

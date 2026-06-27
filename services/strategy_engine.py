@@ -98,6 +98,8 @@ def evaluate(tokens: list, row_data: dict, all_data: list,
             "min": min, "max": max, "abs": abs, "round": round,
             "_floor": _floor, "_ceil": _ceil,
             "_sum": _sum, "_if": _if,
+            "True": True, "False": False, "None": None,
+            "IIf": _if,
         })
         return result
     except Exception:
