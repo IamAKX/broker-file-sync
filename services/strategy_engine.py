@@ -157,3 +157,19 @@ def get_cell_color(col_def: dict, value, row_dict: dict,
                               self_value=value):
             return rule.get("color")
     return None
+
+
+def compile_check(tokens: list, row_data: dict, all_data: list) -> tuple:
+    """
+    Attempt to evaluate tokens against row_data.
+    Returns (True, result_str) on success, (False, error_message) on failure.
+    """
+    if not tokens:
+        return False, "Formula is empty."
+    try:
+        result = evaluate(tokens, row_data, all_data)
+        if result is None:
+            return False, "Formula evaluated to None — check column names and syntax."
+        return True, str(result)
+    except Exception as exc:
+        return False, str(exc)

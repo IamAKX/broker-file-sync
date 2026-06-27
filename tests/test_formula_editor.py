@@ -44,3 +44,33 @@ def test_constants_catalogue_has_true_false():
     names = [c["name"] for c in CONSTANTS_CATALOGUE]
     assert "True" in names
     assert "False" in names
+
+
+def test_compile_check_valid_formula():
+    from services.strategy_engine import compile_check
+    tokens = [
+        {"type": "col", "value": "LTP"},
+        {"type": "op",  "value": "*"},
+        {"type": "num", "value": "1.05"},
+    ]
+    ok, msg = compile_check(tokens, {"LTP": 100.0}, [{"LTP": 100.0}])
+    assert ok is True
+    assert "105" in msg
+
+
+def test_compile_check_division_by_zero():
+    from services.strategy_engine import compile_check
+    tokens = [
+        {"type": "num", "value": "1"},
+        {"type": "op",  "value": "/"},
+        {"type": "num", "value": "0"},
+    ]
+    ok, msg = compile_check(tokens, {}, [])
+    assert ok is False
+
+
+def test_compile_check_empty_tokens():
+    from services.strategy_engine import compile_check
+    ok, msg = compile_check([], {}, [])
+    assert ok is False
+    assert "empty" in msg.lower()
