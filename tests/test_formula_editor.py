@@ -1,4 +1,5 @@
 import sys, os
+import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 
@@ -74,3 +75,32 @@ def test_compile_check_empty_tokens():
     ok, msg = compile_check([], {}, [])
     assert ok is False
     assert "empty" in msg.lower()
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+    import sys
+    return QApplication.instance() or QApplication(sys.argv)
+
+
+def test_expression_editor_dialog_creates(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    dlg = ExpressionEditorDialog([], ["LTP", "CLOSE"], [], {})
+    assert dlg is not None
+
+
+def test_expression_editor_has_four_nav_items(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QListWidget
+    dlg = ExpressionEditorDialog([], ["LTP"], [], {})
+    # The nav list is the leftmost QListWidget
+    nav = dlg._nav_list
+    texts = [nav.item(i).text() for i in range(nav.count())]
+    assert texts == ["Functions", "Operators", "Fields", "Constants"]
+
+
+def test_expression_editor_get_tokens_empty(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    dlg = ExpressionEditorDialog([], ["LTP"], [], {})
+    assert dlg.get_tokens() == []
