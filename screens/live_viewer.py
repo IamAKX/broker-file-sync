@@ -341,6 +341,149 @@ class ColumnFilterPopup(QWidget):
         self.close()
 
 
+class FilterPanelPopup(QWidget):
+    """Unified floating filter panel — columns, category, and sector in one place."""
+
+    columns_requested = Signal()
+    category_changed  = Signal(str)
+    sector_changed    = Signal(str)
+    cleared           = Signal()
+
+    def __init__(self, current_category: str, current_sector: str,
+                 sectors: list, col_visible: int, col_total: int,
+                 theme=None, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self._current_category = current_category
+        self._current_sector   = current_sector
+        self._sectors          = sectors
+        self._col_visible      = col_visible
+        self._col_total        = col_total
+        self._theme            = theme
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._build()
+
+    def _build(self):
+        t      = self._theme
+        bg     = t.get("card_bg")        if t else "#1c2128"
+        border = t.get("border")         if t else "#30363d"
+        txt    = t.get("text_primary")   if t else "#e6edf3"
+        txt_s  = t.get("text_secondary") if t else "#8b949e"
+        accent = t.get("accent")         if t else "#39d353"
+        inp_bg = t.get("input_bg")       if t else "#0d1117"
+        red    = t.get("status_red")     if t else "#f85149"
+
+        any_active = (self._current_category != "All"
+                      or self._current_sector != "All"
+                      or self._col_visible < self._col_total)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        card = QFrame()
+        card.setFixedWidth(300)
+        card.setStyleSheet(
+            f"QFrame {{ background: {bg}; border: 1px solid {border}; border-radius: 10px; }}"
+        )
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(16, 14, 16, 14)
+        lay.setSpacing(8)
+
+        # ── Header ───────────────────────────────────────────────────────────
+        hdr = QHBoxLayout()
+        title = QLabel("Filters")
+        title.setFont(font_scale.font(font_scale.MEDIUM, True))
+        title.setStyleSheet(f"color: {txt}; border: none;")
+        hdr.addWidget(title)
+        hdr.addStretch()
+        if any_active:
+            clear_btn = QPushButton("Clear all")
+            clear_btn.setFixedHeight(24)
+            clear_btn.setFont(font_scale.font(font_scale.SMALL, False))
+            clear_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            clear_btn.setStyleSheet(
+                f"QPushButton {{ background: transparent; color: {txt_s};"
+                f"border: 1px solid {border}; border-radius: 4px; padding: 0 8px; }}"
+                f"QPushButton:hover {{ color: {red}; border-color: {red}; }}"
+            )
+            clear_btn.clicked.connect(self._on_clear)
+            hdr.addWidget(clear_btn)
+        lay.addLayout(hdr)
+
+        # ── Divider ───────────────────────────────────────────────────────────
+        div = QFrame()
+        div.setFixedHeight(1)
+        div.setStyleSheet(f"background: {border}; border: none;")
+        lay.addWidget(div)
+
+        combo_ss = (
+            f"QComboBox {{ background: {inp_bg}; color: {txt};"
+            f"border: 1px solid {border}; border-radius: 6px; padding: 0 10px; }}"
+            f"QComboBox:hover {{ border-color: {accent}; }}"
+            f"QComboBox::drop-down {{ border: none; width: 24px; }}"
+        )
+
+        def _row(label_text, widget):
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            lbl = QLabel(label_text)
+            lbl.setFixedWidth(72)
+            lbl.setFont(font_scale.font(font_scale.SMALL, False))
+            lbl.setStyleSheet(f"color: {txt_s}; border: none;")
+            row.addWidget(lbl)
+            row.addWidget(widget, 1)
+            return row
+
+        # ── Columns row ───────────────────────────────────────────────────────
+        col_label = ("All visible" if self._col_visible == self._col_total
+                     else f"{self._col_visible} / {self._col_total} visible")
+        col_btn = QPushButton(f"⊞  {col_label}")
+        col_btn.setFixedHeight(32)
+        col_btn.setFont(font_scale.font(font_scale.SMALL, False))
+        col_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        col_color = accent if self._col_visible < self._col_total else txt
+        col_btn.setStyleSheet(
+            f"QPushButton {{ background: {inp_bg}; color: {col_color};"
+            f"border: 1px solid {border}; border-radius: 6px; padding: 0 10px; text-align: left; }}"
+            f"QPushButton:hover {{ border-color: {accent}; color: {accent}; }}"
+        )
+        col_btn.clicked.connect(self._on_columns_clicked)
+        lay.addLayout(_row("Columns", col_btn))
+
+        # ── Category row ──────────────────────────────────────────────────────
+        cat_combo = QComboBox()
+        cat_combo.addItems(["All", "Daily", "Weekly", "Monthly"])
+        cat_combo.setCurrentText(self._current_category)
+        cat_combo.setFixedHeight(32)
+        cat_combo.setFont(font_scale.font(font_scale.SMALL, False))
+        cat_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        cat_combo.setStyleSheet(combo_ss)
+        cat_combo.currentTextChanged.connect(self.category_changed)
+        lay.addLayout(_row("Category", cat_combo))
+
+        # ── Sector row ────────────────────────────────────────────────────────
+        sec_combo = QComboBox()
+        sec_combo.addItem("All")
+        for s in self._sectors:
+            sec_combo.addItem(s)
+        sec_combo.setCurrentText(self._current_sector)
+        sec_combo.setFixedHeight(32)
+        sec_combo.setFont(font_scale.font(font_scale.SMALL, False))
+        sec_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        sec_combo.setStyleSheet(combo_ss)
+        sec_combo.currentTextChanged.connect(self.sector_changed)
+        lay.addLayout(_row("Sector", sec_combo))
+
+        outer.addWidget(card)
+
+    def _on_columns_clicked(self):
+        self.close()
+        self.columns_requested.emit()
+
+    def _on_clear(self):
+        self.cleared.emit()
+        self.close()
+
+
 class LiveViewerWindow(QWidget):
     """
     Standalone window showing the merged master table in real-time.
@@ -427,16 +570,32 @@ class LiveViewerWindow(QWidget):
         self._status_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._status_lbl.setStyleSheet(f"color: {text_s};")
 
-        self._col_btn = QPushButton("⊞  Columns")
-        self._col_btn.setFixedHeight(30)
-        self._col_btn.setFont(font_scale.font(font_scale.SMALL, False))
-        self._col_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._col_btn.setStyleSheet(
+        # Hidden combos — keep as instance attrs so existing logic / tests can
+        # read their current selection without touching the toolbar layout.
+        self._cat_combo = QComboBox(self)
+        self._cat_combo.addItems(["All", "Daily", "Weekly", "Monthly"])
+        self._cat_combo.setCurrentText("All")
+        self._cat_combo.hide()
+        self._cat_combo.currentTextChanged.connect(self._on_category_changed)
+
+        self._sector_combo = QComboBox(self)
+        self._sector_combo.addItem("All")
+        for s in sorted(set(self._sector_map.values())):
+            self._sector_combo.addItem(s)
+        self._sector_combo.setCurrentText("All")
+        self._sector_combo.hide()
+        self._sector_combo.currentTextChanged.connect(self._apply_sector_filter)
+
+        self._filter_btn = QPushButton("⊞  Filters")
+        self._filter_btn.setFixedHeight(30)
+        self._filter_btn.setFont(font_scale.font(font_scale.SMALL, False))
+        self._filter_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._filter_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {text_s};"
             f"border: 1px solid {divclr}; border-radius: 4px; padding: 0 12px; }}"
             f"QPushButton:hover {{ border-color: {accent}; color: {accent}; }}"
         )
-        self._col_btn.clicked.connect(self._show_col_filter)
+        self._filter_btn.clicked.connect(self._show_filter_panel)
 
         self._strat_btn = QPushButton("⚡  Strategies")
         self._strat_btn.setFixedHeight(30)
@@ -448,25 +607,6 @@ class LiveViewerWindow(QWidget):
             f"QPushButton:hover {{ border-color: {accent}; color: {accent}; }}"
         )
         self._strat_btn.clicked.connect(self._show_strategy_picker)
-
-        self._cat_combo = QComboBox()
-        self._cat_combo.addItems(["All", "Daily", "Weekly", "Monthly"])
-        self._cat_combo.setCurrentText("All")
-        self._cat_combo.setFixedHeight(30)
-        self._cat_combo.setFont(font_scale.font(font_scale.SMALL, False))
-        self._cat_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._cat_combo.currentTextChanged.connect(self._on_category_changed)
-
-        self._sector_combo = QComboBox()
-        self._sector_combo.addItem("All")
-        sectors = sorted(set(self._sector_map.values()))
-        for s in sectors:
-            self._sector_combo.addItem(s)
-        self._sector_combo.setCurrentText("All")
-        self._sector_combo.setFixedHeight(30)
-        self._sector_combo.setFont(font_scale.font(font_scale.SMALL, False))
-        self._sector_combo.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._sector_combo.currentTextChanged.connect(self._apply_sector_filter)
 
         stop_btn = QPushButton("Stop")
         stop_btn.setFixedHeight(30)
@@ -483,12 +623,8 @@ class LiveViewerWindow(QWidget):
         top.addSpacing(4)
         top.addWidget(self._status_lbl)
         top.addSpacing(12)
-        top.addWidget(self._col_btn)
+        top.addWidget(self._filter_btn)
         top.addSpacing(8)
-        top.addWidget(self._cat_combo)
-        top.addSpacing(4)
-        top.addWidget(self._sector_combo)
-        top.addSpacing(4)
         top.addWidget(self._strat_btn)
         top.addSpacing(8)
         top.addWidget(stop_btn)
@@ -610,7 +746,7 @@ class LiveViewerWindow(QWidget):
         self._visible_cols = set(range(len(headers)))
         self._populate_table(data, changed_keys=set())
         self._apply_sector_filter()
-        self._update_col_btn_label()
+        self._update_filter_btn_label()
 
     def _inject_sector(self, headers: list, data: list) -> tuple:
         """Prepend a Sector column to headers and every data row."""
@@ -917,6 +1053,7 @@ class LiveViewerWindow(QWidget):
         self._visible_cols = set(range(len(self._headers)))
         self._populate_table(self._data, set())
         self._apply_sector_filter()
+        self._update_filter_btn_label()
 
     def _show_strategy_picker(self):
         popup = StrategyPickerPopup(self._filtered_strategies(), self._theme, self)
@@ -949,15 +1086,45 @@ class LiveViewerWindow(QWidget):
         else:
             self._strat_btn.setText(f"⚡  Strategies  {active}/{total}")
 
-    # ── Column filter ─────────────────────────────────────────────────────────
+    # ── Filter panel ──────────────────────────────────────────────────────────
+
+    def _show_filter_panel(self):
+        sectors = sorted(set(self._sector_map.values()))
+        col_total   = len(self._headers)
+        col_visible = len(self._visible_cols)
+        popup = FilterPanelPopup(
+            current_category=self._cat_combo.currentText(),
+            current_sector=self._sector_combo.currentText(),
+            sectors=sectors,
+            col_visible=col_visible,
+            col_total=col_total,
+            theme=self._theme,
+            parent=self,
+        )
+        popup.columns_requested.connect(self._show_col_filter)
+        popup.category_changed.connect(self._cat_combo.setCurrentText)
+        popup.sector_changed.connect(self._sector_combo.setCurrentText)
+        popup.cleared.connect(self._clear_all_filters)
+        btn_pos = self._filter_btn.mapToGlobal(self._filter_btn.rect().bottomLeft())
+        popup.adjustSize()
+        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.show()
+
+    def _clear_all_filters(self):
+        self._cat_combo.setCurrentText("All")
+        self._sector_combo.setCurrentText("All")
+        if self._headers:
+            self._visible_cols = set(range(len(self._headers)))
+            for c in range(len(self._headers)):
+                self._table.setColumnHidden(c, False)
+        self._update_filter_btn_label()
 
     def _show_col_filter(self):
         if not self._headers:
             return
         popup = ColumnFilterPopup(self._headers, self._visible_cols, self._theme, self)
         popup.columns_changed.connect(self._apply_col_filter)
-        # Position below the Columns button
-        btn_pos = self._col_btn.mapToGlobal(self._col_btn.rect().bottomLeft())
+        btn_pos = self._filter_btn.mapToGlobal(self._filter_btn.rect().bottomLeft())
         popup.adjustSize()
         popup.move(btn_pos.x(), btn_pos.y() + 4)
         popup.show()
@@ -969,17 +1136,42 @@ class LiveViewerWindow(QWidget):
         self._visible_cols = visible
         for c in range(len(self._headers)):
             self._table.setColumnHidden(c, c not in self._visible_cols)
-        self._update_col_btn_label()
+        self._update_filter_btn_label()
 
     def _update_col_btn_label(self):
+        self._update_filter_btn_label()
+
+    def _update_filter_btn_label(self):
+        t      = self._theme
+        accent = t.get("accent")         if t else "#39d353"
+        text_s = t.get("text_secondary") if t else "#8b949e"
+        divclr = t.get("divider")        if t else "#30363d"
+
+        active = 0
+        if self._cat_combo.currentText() != "All":
+            active += 1
+        if self._sector_combo.currentText() != "All":
+            active += 1
         total   = len(self._headers)
         visible = len(self._visible_cols)
-        if total == 0:
-            return
-        if visible == total:
-            self._col_btn.setText("⊞  Columns")
+        if total > 0 and visible < total:
+            active += 1
+
+        if active:
+            label = f"⊞  Filters · {active}"
+            color = accent
+            border = accent
         else:
-            self._col_btn.setText(f"⊞  Columns  {visible}/{total}")
+            label = "⊞  Filters"
+            color = text_s
+            border = divclr
+
+        self._filter_btn.setText(label)
+        self._filter_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {color};"
+            f"border: 1px solid {border}; border-radius: 4px; padding: 0 12px; }}"
+            f"QPushButton:hover {{ border-color: {accent}; color: {accent}; }}"
+        )
 
     def _repopulate_sector_combo(self):
         """Rebuild sector combo items from the current sector map."""
@@ -1004,6 +1196,7 @@ class LiveViewerWindow(QWidget):
             else:
                 item = self._table.item(r, 0)   # Sector is always col 0
                 self._table.setRowHidden(r, item is None or item.text() != selected)
+        self._update_filter_btn_label()
 
     # ── Controls ─────────────────────────────────────────────────────────────
 
