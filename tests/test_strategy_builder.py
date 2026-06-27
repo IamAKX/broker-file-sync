@@ -159,3 +159,39 @@ def test_filtered_strategies_by_category(qapp, tmp_path, monkeypatch):
     result = lmv._filtered_strategies()
     assert len(result) == 1
     assert result[0]["name"] == "B"
+
+
+def test_live_viewer_sector_map_built(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    assert hasattr(lmv, "_sector_map")
+    assert isinstance(lmv._sector_map, dict)
+    assert lmv._sector_map.get("INFY") == "TECHNOLOGY"
+    assert lmv._sector_map.get("HDFCBANK") == "BANKING"
+
+
+def test_inject_sector_prepends_column(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    headers = ["Scrip Name", "% Change", "Current"]
+    data = [["INFY", 1.5, 1800.0], ["HDFCBANK", -0.5, 1650.0], ["UNKNOWN", 0.0, 100.0]]
+    new_headers, new_data = lmv._inject_sector(headers, data)
+    assert new_headers[0] == "Sector"
+    assert new_headers[1] == "Scrip Name"
+    assert new_data[0][0] == "TECHNOLOGY"
+    assert new_data[1][0] == "BANKING"
+    assert new_data[2][0] == "—"
+
+
+def test_inject_sector_idempotent_on_empty(qapp, tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    new_headers, new_data = lmv._inject_sector([], [])
+    assert new_headers == ["Sector"]
+    assert new_data == []

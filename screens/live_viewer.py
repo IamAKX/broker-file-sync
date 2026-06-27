@@ -379,6 +379,10 @@ class LiveViewerWindow(QWidget):
         self._strategies: list   = []      # injected by DataImportScreen
         self._selected_category: str = "All"
 
+        # Build sector lookup from config defaults once at init
+        from config_defaults import SECTOR_STOCK_DATA
+        self._sector_map: dict = {stock: sector for sector, stock in SECTOR_STOCK_DATA}
+
         # Live-update bookkeeping
         self._render_sig         = None    # signature of last full rebuild
         self._sized_cols         = set()   # columns already auto-sized once
@@ -586,12 +590,24 @@ class LiveViewerWindow(QWidget):
         except Exception as exc:
             self._status_lbl.setText(f"Error loading: {exc}")
             return
+        headers, data = self._inject_sector(headers, data)
         self._headers = headers
         self._data    = data
         # All columns visible by default
         self._visible_cols = set(range(len(headers)))
         self._populate_table(data, changed_keys=set())
         self._update_col_btn_label()
+
+    def _inject_sector(self, headers: list, data: list) -> tuple:
+        """Prepend a Sector column to headers and every data row."""
+        scrip_idx = headers.index("Scrip Name") if "Scrip Name" in headers else -1
+        new_headers = ["Sector"] + list(headers)
+        new_data = []
+        for row in data:
+            scrip = row[scrip_idx] if scrip_idx >= 0 and scrip_idx < len(row) else ""
+            sector = self._sector_map.get(str(scrip).strip().upper(), "—")
+            new_data.append([sector] + list(row))
+        return new_headers, new_data
 
     def _refresh_from_disk(self):
         # Disk-based saves (e.g. Sharekhan export on macOS) may still be
@@ -618,6 +634,7 @@ class LiveViewerWindow(QWidget):
     def _on_data_ready(self, headers: list, new_data: list):
         from datetime import datetime
         try:
+            headers, new_data = self._inject_sector(headers, new_data)
             self._data    = new_data
             self._headers = headers
             self._populate_table(new_data, changed_keys=None)  # diff internally
