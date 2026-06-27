@@ -13,9 +13,9 @@ else:
 def _s(size: int) -> int:
     return max(8, round(size * _SCALE))
 
-SMALL      = _s(14)
-MEDIUM     = _s(16)
-LARGE      = _s(18)
+SMALL      = _s(10)
+MEDIUM     = _s(12)
+LARGE      = _s(14)
 DISPLAY_SM = _s(22)
 DISPLAY_MD = _s(28)
 DISPLAY_LG = _s(36)
