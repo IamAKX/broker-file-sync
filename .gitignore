@@ -66,6 +66,7 @@ temp/
 *.tmp
 *.bak
 strategies.json
+config_data.json
 
 # Superpowers internal docs
 docs/superpowers/

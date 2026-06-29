@@ -610,6 +610,17 @@ class LiveViewerWindow(QWidget):
         )
         self._strat_btn.clicked.connect(self._show_strategy_picker)
 
+        self._export_btn = QPushButton("⭳  Export")
+        self._export_btn.setFixedHeight(30)
+        self._export_btn.setFont(font_scale.font(font_scale.SMALL, False))
+        self._export_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._export_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {text_s};"
+            f"border: 1px solid {divclr}; border-radius: 4px; padding: 0 12px; }}"
+            f"QPushButton:hover {{ border-color: {accent}; color: {accent}; }}"
+        )
+        self._export_btn.clicked.connect(self._export)
+
         stop_btn = QPushButton("Stop")
         stop_btn.setFixedHeight(30)
         stop_btn.setFont(font_scale.font(font_scale.SMALL, False))
@@ -628,6 +639,8 @@ class LiveViewerWindow(QWidget):
         top.addWidget(self._filter_btn)
         top.addSpacing(8)
         top.addWidget(self._strat_btn)
+        top.addSpacing(8)
+        top.addWidget(self._export_btn)
         top.addSpacing(8)
         top.addWidget(stop_btn)
         root.addLayout(top)
@@ -1189,6 +1202,56 @@ class LiveViewerWindow(QWidget):
         idx = self._sector_combo.findText(current)
         self._sector_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self._sector_combo.blockSignals(False)
+
+    def _visible_table_data(self) -> tuple:
+        """
+        Scrape the table for exactly what's on screen: visible columns and
+        visible (non-filtered) rows, in display order. Returns (headers, rows).
+        """
+        cols = [c for c in range(self._table.columnCount())
+                if not self._table.isColumnHidden(c)]
+        headers = []
+        for c in cols:
+            hdr = self._table.horizontalHeaderItem(c)
+            headers.append(hdr.text() if hdr else "")
+
+        rows = []
+        for r in range(self._table.rowCount()):
+            if self._table.isRowHidden(r):
+                continue
+            row = []
+            for c in cols:
+                item = self._table.item(r, c)
+                row.append(item.text() if item else "")
+            rows.append(row)
+        return headers, rows
+
+    def _export(self):
+        """Export the currently displayed table to an .xlsx file, applying the
+        'Main Column Name' rename overrides to the headers."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from services.lmv_export import export_xlsx
+
+        headers, rows = self._visible_table_data()
+        if not headers:
+            QMessageBox.information(self, "Export", "Nothing to export yet.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export Live Master View", "lmv_export.xlsx",
+            "Excel Workbook (*.xlsx)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".xlsx"):
+            path += ".xlsx"
+        try:
+            export_xlsx(path, headers, rows)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Failed", f"Could not export:\n\n{exc}")
+            return
+        QMessageBox.information(self, "Export",
+                               f"Exported {len(rows)} rows to:\n{path}")
 
     def _apply_sector_filter(self):
         """Show/hide rows based on the selected sector. No table re-render."""

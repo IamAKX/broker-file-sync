@@ -46,12 +46,20 @@ def _svg_icon(filename: str, color: str) -> QIcon:
 
 class ConfigTabWidget(QWidget):
     def __init__(self, col_headers: list, default_data: list, theme,
-                 reorderable: bool = False, parent=None):
+                 reorderable: bool = False, store_key: str = None, parent=None):
         super().__init__(parent)
         self._theme = theme
         self._col_headers = col_headers
         self._default_data = [tuple(r) for r in default_data]
         self._reorderable = reorderable
+        self._store_key = store_key
+        # Load persisted rows for this tab, falling back to defaults.
+        if store_key:
+            from services import config_store
+            self._initial_data = [tuple(r) for r in
+                                  config_store.load_tab(store_key, default_data)]
+        else:
+            self._initial_data = self._default_data
         # column indices
         self._order_col = 0 if reorderable else None
         self._data_start = 1 if reorderable else 0
@@ -127,7 +135,7 @@ class ConfigTabWidget(QWidget):
         hh.setSectionsClickable(True)
         hh.sectionClicked.connect(self._on_header_clicked)
 
-        for row_data in self._default_data:
+        for row_data in self._initial_data:
             self._insert_row(row_data)
 
         self._update_count()
@@ -339,6 +347,9 @@ class ConfigTabWidget(QWidget):
             self._update_count()
 
     def _save(self):
+        if self._store_key:
+            from services import config_store
+            config_store.save_tab(self._store_key, self.get_data())
         QMessageBox.information(self, "Saved", "Configuration saved successfully.")
 
     def get_data(self) -> list:
@@ -377,19 +388,23 @@ class ConfigEditorScreen(QWidget):
         tabs.setFont(font_scale.font(font_scale.MEDIUM, False))
 
         tabs.addTab(
-            ConfigTabWidget(["Sector", "Stock"], SECTOR_STOCK_DATA, t),
+            ConfigTabWidget(["Sector", "Stock"], SECTOR_STOCK_DATA, t,
+                            store_key="sector_stock"),
             "Sector Stock"
         )
         tabs.addTab(
-            ConfigTabWidget(["Stock", "Initial"], SCRIPT_NAME_DATA, t),
+            ConfigTabWidget(["Stock", "Initial"], SCRIPT_NAME_DATA, t,
+                            store_key="script_name"),
             "Script Name"
         )
         tabs.addTab(
-            ConfigTabWidget(["Actual", "Renamed"], MAIN_COLUMN_ORDER_DATA, t),
+            ConfigTabWidget(["Actual", "Renamed"], MAIN_COLUMN_NAME_DATA, t,
+                            store_key="main_column_name"),
             "Main Column Name"
         )
         tabs.addTab(
-            ConfigTabWidget(["Column Name"], MAIN_COLUMN_NAME_DATA, t, reorderable=True),
+            ConfigTabWidget(["Column Name"], MAIN_COLUMN_ORDER_DATA, t,
+                            reorderable=True, store_key="main_column_order"),
             "Main Column Order"
         )
 
