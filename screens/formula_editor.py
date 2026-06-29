@@ -178,7 +178,7 @@ class ExpressionEditorDialog(QDialog):
     def __init__(self, tokens: list, lmv_headers: list,
                  strategy_col_headers: list, lmv_first_row: dict,
                  all_lmv_data: list = None,
-                 theme=None, mode: str = "value", parent=None):
+                 theme=None, mode: str = "value", self_value=None, parent=None):
         super().__init__(parent)
         self._tokens = list(tokens)
         self._lmv_headers = list(lmv_headers)
@@ -187,6 +187,7 @@ class ExpressionEditorDialog(QDialog):
         self._all_lmv_data  = all_lmv_data or ([lmv_first_row] if lmv_first_row else [])
         self._theme = theme
         self._mode  = mode
+        self._self_value = self_value
         self._compiled_ok = False
         self.setWindowTitle("Expression Editor")
         self.setFixedSize(900, 620)
@@ -543,7 +544,8 @@ class ExpressionEditorDialog(QDialog):
 
     def _compile_and_test(self):
         from services.strategy_engine import compile_check
-        ok, msg = compile_check(self._tokens, self._lmv_first_row, self._all_lmv_data)
+        ok, msg = compile_check(self._tokens, self._lmv_first_row,
+                                self._all_lmv_data, self_value=self._self_value)
         if ok:
             self._compiled_ok = True
             self._save_btn.setEnabled(True)

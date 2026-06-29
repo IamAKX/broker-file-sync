@@ -192,6 +192,35 @@ def test_compile_check_empty_tokens():
     assert "empty" in msg.lower()
 
 
+# ── compile_check with THIS / self_value (conditional-format conditions) ───────
+
+def tok_self():    return {"type": "self"}
+
+def test_compile_check_this_resolves_to_self_value():
+    # THIS <= 10000 with the column's own value supplied → compiles.
+    from services.strategy_engine import compile_check
+    tokens = [tok_self(), tok_op("<="), {"type": "num", "value": "10000"}]
+    ok, msg = compile_check(tokens, {"LTP": "5"}, [{"LTP": "5"}], self_value=5000)
+    assert ok, msg
+    assert msg == "True"
+
+def test_compile_check_this_false_branch_still_compiles():
+    from services.strategy_engine import compile_check
+    tokens = [tok_self(), tok_op("<="), {"type": "num", "value": "10000"}]
+    ok, msg = compile_check(tokens, {"LTP": "5"}, [{"LTP": "5"}], self_value=20000)
+    assert ok, msg
+    assert msg == "False"
+
+def test_compile_check_this_without_value_reports_clearly():
+    # No self_value provided → THIS is None; report a clear reason, not a raw
+    # TypeError about NoneType.
+    from services.strategy_engine import compile_check
+    tokens = [tok_self(), tok_op("<="), {"type": "num", "value": "10000"}]
+    ok, msg = compile_check(tokens, {"LTP": "5"}, [{"LTP": "5"}])
+    assert not ok
+    assert "THIS" in msg
+
+
 # ── apply_strategies row filtering (filtered rows are dropped) ──────────────────
 
 def _eq(col, val):

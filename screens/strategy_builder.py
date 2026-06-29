@@ -727,8 +727,14 @@ class ColumnEditorDialog(QDialog):
 
     def _open_condition_editor(self, idx: int, preview_label: QLabel):
         from screens.formula_editor import ExpressionEditorDialog
+        from services.strategy_engine import evaluate
         from PySide6.QtWidgets import QDialog as _QD
         rule = self._col["fmt_rules"][idx]
+        # THIS in a condition refers to this column's own computed value.
+        # Evaluate the column's value formula on the first row so the compile
+        # test can resolve THIS.
+        self_value = evaluate(self._col.get("formula", []),
+                              self._lmv_first_row, self._all_lmv_data)
         dlg = ExpressionEditorDialog(
             tokens=list(rule.get("condition", [])),
             lmv_headers=self._lmv,
@@ -737,6 +743,7 @@ class ColumnEditorDialog(QDialog):
             all_lmv_data=self._all_lmv_data,
             theme=self._theme,
             mode="condition",
+            self_value=self_value,
             parent=self,
         )
         if dlg.exec() == _QD.DialogCode.Accepted:

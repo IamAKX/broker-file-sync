@@ -382,3 +382,50 @@ def test_fmt_rule_condition_has_edit_button(qapp):
     dlg = ColumnEditorDialog(col, ["LTP"], None)
     btns = [b.text() for b in dlg.findChildren(QPushButton)]
     assert any("Edit Condition" in t for t in btns)
+
+
+def test_condition_editor_passes_computed_self_value(qapp, monkeypatch):
+    # THIS in a fmt-rule condition must receive the column's computed value so
+    # compile works (regression: TypeError NoneType <= int).
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+    from screens import formula_editor
+
+    col = new_column("TestCol")
+    col["formula"] = [{"type": "col", "value": "LTP"}]   # value = LTP
+    col["fmt_rules"].append(new_fmt_rule())
+    dlg = ColumnEditorDialog(
+        col, ["LTP"], None,
+        lmv_first_row={"LTP": "5000"}, all_lmv_data=[{"LTP": "5000"}],
+    )
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, *a, **kw):
+            captured["self_value"] = kw.get("self_value")
+        def exec(self):
+            return 0  # rejected — we only care about construction
+        def get_tokens(self):
+            return []
+
+    monkeypatch.setattr(formula_editor, "ExpressionEditorDialog", _FakeDlg)
+    from PySide6.QtWidgets import QLabel
+    dlg._open_condition_editor(0, QLabel())
+    assert captured["self_value"] == 5000.0
+
+
+def test_fmt_color_applies_when_this_condition_met():
+    # End-to-end of get_cell_color with a THIS-based condition.
+    from services.strategy_engine import get_cell_color
+    col_def = {
+        "name": "X", "formula": [],
+        "fmt_rules": [{
+            "condition": [{"type": "self"},
+                          {"type": "op", "value": "<="},
+                          {"type": "num", "value": "10000"}],
+            "color": "#ff0000",
+        }],
+    }
+    assert get_cell_color(col_def, 5000, {}, [{}]) == "#ff0000"
+    assert get_cell_color(col_def, 20000, {}, [{}]) is None

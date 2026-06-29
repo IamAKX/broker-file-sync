@@ -306,14 +306,17 @@ def get_cell_color(col_def: dict, value, row_dict: dict,
     return None
 
 
-def compile_check(tokens: list, row_data: dict, all_data: list) -> tuple:
+def compile_check(tokens: list, row_data: dict, all_data: list,
+                  self_value=None) -> tuple:
     """
     Validate tokens against the actual loaded LMV sheet (never dummy data).
     Returns (True, result_str) on success, (False, error_message) on failure.
 
-    The first row of the real sheet is used as the test row. Errors are
-    reported specifically: unknown columns, syntax errors, or the actual
-    Python exception raised while evaluating the formula.
+    The first row of the real sheet is used as the test row. ``self_value`` is
+    the column's own computed value, used to resolve the THIS token in
+    conditional-format conditions. Errors are reported specifically: unknown
+    columns, syntax errors, or the actual Python exception raised while
+    evaluating the formula.
     """
     if not tokens:
         return False, "Formula is empty."
@@ -322,27 +325,34 @@ def compile_check(tokens: list, row_data: dict, all_data: list) -> tuple:
     all_data = all_data or []
 
     # 1. Structural check — does the expression even parse?
-    expr = _tokens_to_expr(tokens, row_data, all_data)
+    expr = _tokens_to_expr(tokens, row_data, all_data, self_value)
     try:
         compile(expr, "<formula>", "eval")  # noqa: S307
     except SyntaxError as exc:
         return False, f"Syntax error: {exc}"
 
-    # 2. Column-referencing formulas need a loaded sheet to test against.
+    # 2. A THIS token needs the column's own value to test against.
+    uses_self = any(tok.get("type") == "self" for tok in tokens)
+    if uses_self and self_value is None:
+        return False, ("THIS has no value to test against. Define the column's "
+                       "value formula first (and ensure it produces a result "
+                       "on the loaded sheet) before using THIS in a condition.")
+
+    # 3. Column-referencing formulas need a loaded sheet to test against.
     referenced = _referenced_columns(tokens)
     if referenced and not row_data:
         return False, ("No LMV sheet is loaded. Load a sheet before "
                        "running the compile test.")
 
-    # 3. Every referenced column must exist in the loaded sheet.
+    # 4. Every referenced column must exist in the loaded sheet.
     unknown = [c for c in referenced if c not in row_data]
     if unknown:
         names = ", ".join(f"[{c}]" for c in unknown)
         return False, (f"Unknown column(s): {names}. "
                        f"Check the column name against the loaded sheet.")
 
-    # 4. Evaluate against the real first row, surfacing the actual error.
-    result, err = _evaluate_verbose(tokens, row_data, all_data)
+    # 5. Evaluate against the real first row, surfacing the actual error.
+    result, err = _evaluate_verbose(tokens, row_data, all_data, self_value)
     if err:
         return False, err
 
