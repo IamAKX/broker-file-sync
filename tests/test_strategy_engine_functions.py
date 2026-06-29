@@ -190,3 +190,59 @@ def test_compile_check_empty_tokens():
     ok, msg = compile_check([], {"High": "1"}, [{"High": "1"}])
     assert not ok
     assert "empty" in msg.lower()
+
+
+# ── apply_strategies row filtering (filtered rows are dropped) ──────────────────
+
+def _eq(col, val):
+    return [tok_col(col), tok_op("=="), {"type": "num", "value": repr(val)}]
+
+def test_apply_strategies_drops_filtered_rows():
+    from services.strategy_engine import apply_strategies
+    strat = {
+        "id": "1", "active": True, "row_filter": _eq("Sector", "CG"),
+        "columns": [{"name": "Out", "formula": [tok_col("LTP")]}],
+    }
+    headers = ["Sector", "LTP"]
+    data = [["CG", "10"], ["IT", "20"], ["CG", "30"]]
+    new_headers, new_data = apply_strategies([strat], headers, data)
+    assert new_headers == ["Sector", "LTP", "Out"]
+    # Only the two CG rows survive
+    assert [r[0] for r in new_data] == ["CG", "CG"]
+    assert [r[2] for r in new_data] == [10.0, 30.0]
+
+def test_apply_strategies_no_filter_keeps_all_rows():
+    from services.strategy_engine import apply_strategies
+    strat = {
+        "id": "1", "active": True, "row_filter": [],
+        "columns": [{"name": "Out", "formula": [tok_col("LTP")]}],
+    }
+    headers = ["Sector", "LTP"]
+    data = [["CG", "10"], ["IT", "20"]]
+    _, new_data = apply_strategies([strat], headers, data)
+    assert len(new_data) == 2
+
+def test_apply_strategies_row_kept_if_any_active_strategy_matches():
+    # Union semantics: a row visible if it passes ANY active strategy's filter.
+    from services.strategy_engine import apply_strategies
+    s_cg = {"id": "1", "active": True, "row_filter": _eq("Sector", "CG"),
+            "columns": [{"name": "A", "formula": [tok_col("LTP")]}]}
+    s_it = {"id": "2", "active": True, "row_filter": _eq("Sector", "IT"),
+            "columns": [{"name": "B", "formula": [tok_col("LTP")]}]}
+    headers = ["Sector", "LTP"]
+    data = [["CG", "10"], ["IT", "20"], ["FIN", "30"]]
+    _, new_data = apply_strategies([s_cg, s_it], headers, data)
+    # CG and IT rows survive (each matches one strategy); FIN dropped.
+    assert [r[0] for r in new_data] == ["CG", "IT"]
+
+def test_apply_strategies_unfiltered_strategy_keeps_all_rows():
+    # If any active strategy has no filter, every row is included.
+    from services.strategy_engine import apply_strategies
+    s_cg  = {"id": "1", "active": True, "row_filter": _eq("Sector", "CG"),
+             "columns": [{"name": "A", "formula": [tok_col("LTP")]}]}
+    s_all = {"id": "2", "active": True, "row_filter": [],
+             "columns": [{"name": "B", "formula": [tok_col("LTP")]}]}
+    headers = ["Sector", "LTP"]
+    data = [["CG", "10"], ["IT", "20"]]
+    _, new_data = apply_strategies([s_cg, s_all], headers, data)
+    assert len(new_data) == 2
