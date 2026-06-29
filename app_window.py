@@ -74,6 +74,7 @@ class MainWindow(QMainWindow):
                 viewer.set_strategies(strategy_builder.get_active_strategies())
 
         data_import.lmv_headers_ready.connect(_on_lmv_ready)
+        data_import.lmv_data_ready.connect(strategy_builder.set_lmv_data)
 
         screens = [
             ("dashboard",        dashboard),

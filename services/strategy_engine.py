@@ -10,12 +10,127 @@ Given:
 Returns float | str | None.
 
 Supported:
-  Per-row  : +  -  *  /  (  )  MIN  MAX  ABS  ROUND  FLOOR  CEIL  IF
+  Per-row  : +  -  *  /  (  )  MIN  MAX  ABS  ROUND  FLOOR  CEILING  IF/IIF
+             CONCAT  LEN  LOWER  UPPER  TRIM  REPLACE  CONTAINS  STARTSWITH
+             ENDSWITH  SUBSTRING  REVERSE  CHARINDEX  INSERT  REMOVE  PADLEFT
+             PADRIGHT  CHAR  ASCII  EXP  LOG  LOG10  POWER  SIGN  SQR  BIGMUL
+             ACOS  ASIN  ATN  ATN2  COS  COSH  SIN  SINH  TAN  TANH
+             ISNULL  ISNULLOREMPTY  INRANGE
+             TODECIMAL  TODOUBLE  TOFLOAT  TOINT  TOLONG  TOSTR
   Aggregate: SUM_ALL  MIN_ALL  MAX_ALL  AVG_ALL  COUNT_ALL
 """
 
 import math
 import re
+
+
+# ── Built-in function implementations ────────────────────────────────────────
+
+def _floor(x, *_):          return math.floor(x)
+def _ceil(x, *_):           return math.ceil(x)
+def _sum(*args):             return sum(args)
+def _if(cond, a, b):        return a if cond else b
+def _exp(x):                return math.exp(x)
+def _log(x, base=None):     return math.log(x) if base is None else math.log(x, base)
+def _log10(x):              return math.log10(x)
+def _power(b, e):           return b ** e
+def _sign(x):               return (1 if x > 0 else (-1 if x < 0 else 0))
+def _sqr(x):                return math.sqrt(x)
+def _bigmul(a, b):          return int(a) * int(b)
+def _acos(x):               return math.acos(x)
+def _asin(x):               return math.asin(x)
+def _atn(x):                return math.atan(x)
+def _atn2(y, x):            return math.atan2(y, x)
+def _cos(x):                return math.cos(x)
+def _cosh(x):               return math.cosh(x)
+def _sin(x):                return math.sin(x)
+def _sinh(x):               return math.sinh(x)
+def _tan(x):                return math.tan(x)
+def _tanh(x):               return math.tanh(x)
+def _isnull(v):             return v is None
+def _isnullorempty(v):      return v is None or str(v).strip() == ""
+def _inrange(v, lo, hi):    return lo <= v <= hi
+def _concat(a, b):          return str(a) + str(b)
+def _ascii(c):              return ord(str(c)[0]) if c else 0
+def _char(n):               return chr(int(n))
+def _charindex(s, q):       return str(s).find(str(q))
+def _contains(s, q):        return str(q) in str(s)
+def _endswith(s, q):        return str(s).endswith(str(q))
+def _insert(s, pos, v):     return str(s)[:int(pos)] + str(v) + str(s)[int(pos):]
+def _len(s):                return len(str(s)) if s is not None else 0
+def _lower(s):              return str(s).lower()
+def _upper(s):              return str(s).upper()
+def _padleft(s, w):         return str(s).rjust(int(w))
+def _padright(s, w):        return str(s).ljust(int(w))
+def _remove(s, q):          return str(s).replace(str(q), "")
+def _replace(s, old, new):  return str(s).replace(str(old), str(new))
+def _reverse(s):            return str(s)[::-1]
+def _startswith(s, q):      return str(s).startswith(str(q))
+def _substring(s, start, length): return str(s)[int(start):int(start) + int(length)]
+def _trim(s):               return str(s).strip()
+def _todecimal(v):          return float(v)
+def _todouble(v):           return float(v)
+def _tofloat(v):            return float(v)
+def _toint(v):              return int(float(v))
+def _tolong(v):             return int(float(v))
+def _tostr(v):              return str(v)
+
+
+_FUNC_MAP = {
+    # Math
+    "MIN": "min", "MAX": "max", "ABS": "abs", "ROUND": "round",
+    "FLOOR": "_floor", "CEILING": "_ceil", "CEIL": "_ceil",
+    "SUM": "_sum", "IF": "_if", "IIF": "_if",
+    "EXP": "_exp", "LOG": "_log", "LOG10": "_log10",
+    "POWER": "_power", "SIGN": "_sign", "SQR": "_sqr", "BIGMUL": "_bigmul",
+    # Trig
+    "ACOS": "_acos", "ASIN": "_asin", "ATN": "_atn", "ATN2": "_atn2",
+    "COS": "_cos", "COSH": "_cosh", "SIN": "_sin", "SINH": "_sinh",
+    "TAN": "_tan", "TANH": "_tanh",
+    # Conditional / null
+    "ISNULL": "_isnull", "ISNULLOREMPTY": "_isnullorempty", "INRANGE": "_inrange",
+    # String
+    "ASCII": "_ascii", "CHAR": "_char", "CHARINDEX": "_charindex",
+    "CONCAT": "_concat", "CONTAINS": "_contains", "ENDSWITH": "_endswith",
+    "INSERT": "_insert", "LEN": "_len", "LOWER": "_lower", "UPPER": "_upper",
+    "PADLEFT": "_padleft", "PADRIGHT": "_padright",
+    "REMOVE": "_remove", "REPLACE": "_replace", "REVERSE": "_reverse",
+    "STARTSWITH": "_startswith", "SUBSTRING": "_substring", "TRIM": "_trim",
+    # Type conversion
+    "TODECIMAL": "_todecimal", "TODOUBLE": "_todouble", "TOFLOAT": "_tofloat",
+    "TOINT": "_toint", "TOLONG": "_tolong", "TOSTR": "_tostr",
+}
+
+_EVAL_BUILTINS = {
+    "__builtins__": {},
+    "min": min, "max": max, "abs": abs, "round": round,
+    "_floor": _floor, "_ceil": _ceil, "_sum": _sum, "_if": _if,
+    "_exp": _exp, "_log": _log, "_log10": _log10,
+    "_power": _power, "_sign": _sign, "_sqr": _sqr, "_bigmul": _bigmul,
+    "_acos": _acos, "_asin": _asin, "_atn": _atn, "_atn2": _atn2,
+    "_cos": _cos, "_cosh": _cosh, "_sin": _sin, "_sinh": _sinh,
+    "_tan": _tan, "_tanh": _tanh,
+    "_isnull": _isnull, "_isnullorempty": _isnullorempty, "_inrange": _inrange,
+    "_concat": _concat, "_ascii": _ascii, "_char": _char,
+    "_charindex": _charindex, "_contains": _contains, "_endswith": _endswith,
+    "_insert": _insert, "_len": _len, "_lower": _lower, "_upper": _upper,
+    "_padleft": _padleft, "_padright": _padright,
+    "_remove": _remove, "_replace": _replace, "_reverse": _reverse,
+    "_startswith": _startswith, "_substring": _substring, "_trim": _trim,
+    "_todecimal": _todecimal, "_todouble": _todouble, "_tofloat": _tofloat,
+    "_toint": _toint, "_tolong": _tolong, "_tostr": _tostr,
+    "True": True, "False": False, "None": None, "IIf": _if,
+}
+
+
+def _col_literal(raw) -> str:
+    """Represent a column value as a safe Python literal (numeric or string)."""
+    if raw is None or raw == "":
+        return "None"
+    try:
+        return str(float(raw))
+    except (TypeError, ValueError):
+        return repr(str(raw))
 
 
 # ── token → expression string ──────────────────────────────────────────────
@@ -28,14 +143,10 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
         v = tok.get("value", "")
 
         if t == "col":
-            raw = row_data.get(v)
-            try:
-                parts.append(str(float(raw)) if raw not in (None, "") else "0")
-            except (TypeError, ValueError):
-                parts.append("0")
+            parts.append(_col_literal(row_data.get(v)))
 
         elif t == "self":
-            parts.append(str(float(self_value)) if self_value is not None else "0")
+            parts.append(_col_literal(self_value))
 
         elif t in ("num", "op", "paren"):
             parts.append(v)
@@ -66,44 +177,58 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
                     result = 0
                 parts.append(str(result))
             else:
-                # per-row function: emit Python-callable name + (
-                _FUNC_MAP = {
-                    "MIN": "min", "MAX": "max",
-                    "ABS": "abs", "ROUND": "round",
-                    "FLOOR": "_floor", "CEIL": "_ceil",
-                    "SUM": "_sum", "IF": "_if",
-                }
                 parts.append(_FUNC_MAP.get(fname, fname.lower()) + "(")
 
     return "".join(parts)
 
 
-def _floor(x, *_):  return math.floor(x)
-def _ceil(x, *_):   return math.ceil(x)
-def _sum(*args):     return sum(args)
-def _if(cond, a, b): return a if cond else b
-
-
 def evaluate(tokens: list, row_data: dict, all_data: list,
              self_value=None):
-    """Return numeric result or None on error."""
+    """Return numeric or string result, or None on error."""
     if not tokens:
         return None
     expr = _tokens_to_expr(tokens, row_data, all_data, self_value)
     if not expr.strip():
         return None
     try:
-        result = eval(expr, {   # noqa: S307
-            "__builtins__": {},
-            "min": min, "max": max, "abs": abs, "round": round,
-            "_floor": _floor, "_ceil": _ceil,
-            "_sum": _sum, "_if": _if,
-            "True": True, "False": False, "None": None,
-            "IIf": _if,
-        })
-        return result
+        return eval(expr, _EVAL_BUILTINS)   # noqa: S307
     except Exception:
         return None
+
+
+def _evaluate_verbose(tokens: list, row_data: dict, all_data: list,
+                      self_value=None):
+    """Like evaluate() but returns (result, error). error is None on success.
+
+    Unlike evaluate(), this surfaces the real Python exception so the compile
+    test can report a specific, correct reason for failure.
+    """
+    if not tokens:
+        return None, "Formula is empty."
+    expr = _tokens_to_expr(tokens, row_data, all_data, self_value)
+    if not expr.strip():
+        return None, "Formula is empty."
+    try:
+        return eval(expr, _EVAL_BUILTINS), None   # noqa: S307
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _referenced_columns(tokens: list) -> list:
+    """Distinct column names referenced by col tokens and aggregate col_args."""
+    cols = []
+    for tok in tokens:
+        if tok.get("type") == "col" and tok.get("value"):
+            cols.append(tok["value"])
+        if tok.get("col_arg"):
+            cols.append(tok["col_arg"])
+    # preserve order, drop dups
+    seen, out = set(), []
+    for c in cols:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
 
 
 def evaluate_condition(tokens: list, row_data: dict, all_data: list,
@@ -137,13 +262,17 @@ def apply_strategies(strategies: list, headers: list,
     new_headers = list(headers) + extra_headers
 
     new_data = []
-    for row_idx, row in enumerate(data):
+    for row in data:
         row_dict = dict(zip(headers, row))
         extra_vals = []
         for strat in active:
-            for col in strat.get("columns", []):
-                val = evaluate(col["formula"], row_dict, all_dicts)
-                extra_vals.append(val)
+            row_filter = strat.get("row_filter", [])
+            if row_filter and not evaluate_condition(row_filter, row_dict, all_dicts):
+                extra_vals.extend([None] * len(strat.get("columns", [])))
+            else:
+                for col in strat.get("columns", []):
+                    val = evaluate(col["formula"], row_dict, all_dicts)
+                    extra_vals.append(val)
         new_data.append(list(row) + extra_vals)
 
     return new_headers, new_data
@@ -163,15 +292,49 @@ def get_cell_color(col_def: dict, value, row_dict: dict,
 
 def compile_check(tokens: list, row_data: dict, all_data: list) -> tuple:
     """
-    Attempt to evaluate tokens against row_data.
+    Validate tokens against the actual loaded LMV sheet (never dummy data).
     Returns (True, result_str) on success, (False, error_message) on failure.
+
+    The first row of the real sheet is used as the test row. Errors are
+    reported specifically: unknown columns, syntax errors, or the actual
+    Python exception raised while evaluating the formula.
     """
     if not tokens:
         return False, "Formula is empty."
+
+    row_data = row_data or {}
+    all_data = all_data or []
+
+    # 1. Structural check — does the expression even parse?
+    expr = _tokens_to_expr(tokens, row_data, all_data)
     try:
-        result = evaluate(tokens, row_data, all_data)
-        if result is None:
-            return False, "Formula evaluated to None — check column names and syntax."
-        return True, str(result)
-    except Exception as exc:
-        return False, str(exc)
+        compile(expr, "<formula>", "eval")  # noqa: S307
+    except SyntaxError as exc:
+        return False, f"Syntax error: {exc}"
+
+    # 2. Column-referencing formulas need a loaded sheet to test against.
+    referenced = _referenced_columns(tokens)
+    if referenced and not row_data:
+        return False, ("No LMV sheet is loaded. Load a sheet before "
+                       "running the compile test.")
+
+    # 3. Every referenced column must exist in the loaded sheet.
+    unknown = [c for c in referenced if c not in row_data]
+    if unknown:
+        names = ", ".join(f"[{c}]" for c in unknown)
+        return False, (f"Unknown column(s): {names}. "
+                       f"Check the column name against the loaded sheet.")
+
+    # 4. Evaluate against the real first row, surfacing the actual error.
+    result, err = _evaluate_verbose(tokens, row_data, all_data)
+    if err:
+        return False, err
+
+    if result is None:
+        # Formula ran but produced no value — usually an empty cell feeding a
+        # numeric function in this particular row.
+        return False, ("Formula evaluated to None on the first row "
+                       "(an input cell is likely empty). "
+                       "Verify the data in the loaded sheet.")
+
+    return True, str(result)

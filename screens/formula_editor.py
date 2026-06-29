@@ -102,6 +102,7 @@ OPERATOR_CATALOGUE = [
     {"name": "Not", "signature": "Not a",   "description": "Logical NOT.",          "token": {"type": "op", "value": " not "}},
     {"name": "(",   "signature": "( ... )", "description": "Open parenthesis.",     "token": {"type": "paren", "value": "("}},
     {"name": ")",   "signature": "( ... )", "description": "Close parenthesis.",    "token": {"type": "paren", "value": ")"}},
+    {"name": ",",   "signature": "f(a, b)", "description": "Argument separator.",    "token": {"type": "op",    "value": ","}},
 ]
 
 
@@ -158,6 +159,8 @@ def _tokens_to_text(tokens: list) -> str:
             fname = val.rstrip("(")
             col_arg = tok.get("col_arg", "")
             parts.append(f"{fname}({col_arg})" if col_arg else f"{fname}(")
+        elif kind == "op" and val == ",":
+            parts.append(", ")
         else:
             parts.append(f" {val} " if kind == "op" else val)
     return "".join(parts).strip() or ""
@@ -384,6 +387,7 @@ class ExpressionEditorDialog(QDialog):
             ("And",{"type":"op","value":" and "}),
             ("Or", {"type":"op","value":" or "}),
             ("Not",{"type":"op","value":" not "}),
+            (",",  {"type":"op","value":","}),
         ]
         for label, token in _QUICK_OPS:
             b = QPushButton(label)

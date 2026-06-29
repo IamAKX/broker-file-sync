@@ -500,6 +500,7 @@ class LiveViewerWindow(QWidget):
     # Emitted from the GUI thread to drive work on the worker thread.
     _request_read     = Signal(bool, float)   # force_slow, settle_seconds
     _request_shutdown = Signal()              # release COM on the worker thread
+    data_updated      = Signal(list, list)    # headers, data — for downstream consumers
 
     def __init__(self, sharekhan_path: str, reliable_path: str,
                  nifty_path: str, script_name_data: list,
@@ -792,6 +793,7 @@ class LiveViewerWindow(QWidget):
             self._apply_sector_filter()
             self._status_lbl.setText(f"Updated: {datetime.now().strftime('%H:%M:%S')}")
             self._adapt_poll_rate(getattr(self, "_last_change_count", 0))
+            self.data_updated.emit(self._headers, self._data)
         finally:
             self._refreshing = False
 

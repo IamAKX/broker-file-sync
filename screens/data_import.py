@@ -120,9 +120,11 @@ class BrokerImportCard(QFrame):
         name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
         self._status_lbl = QLabel("Awaiting")
         self._status_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._status_lbl.setFixedHeight(22)
+        self._status_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._status_lbl.setStyleSheet(
             f"color: {t.get('text_secondary')}; border: 1px solid {t.get('text_secondary')};"
-            "border-radius: 4px; padding: 1px 8px;"
+            "border-radius: 4px; padding: 0 8px;"
         )
         header.addWidget(dot)
         header.addWidget(name_lbl)
@@ -283,9 +285,10 @@ class BrokerImportCard(QFrame):
             self._progress.setVisible(False)
             self._pct_lbl.setVisible(False)
             self._status_lbl.setText("Imported")
+            acc = self._theme.get('accent')
             self._status_lbl.setStyleSheet(
-                f"color: {self._theme.get('accent')}; border: 1px solid {self._theme.get('accent')};"
-                "border-radius: 4px; padding: 1px 8px;"
+                f"color: {acc}; border: 1px solid {acc};"
+                "border-radius: 4px; padding: 0 8px;"
             )
             rows = self._row_count
             self._file_lbl.setText(f"1 file imported · {rows:,} rows")
@@ -466,6 +469,7 @@ class DataImportScreen(QWidget):
     broker_imported    = Signal(str, int)   # broker name, row count
     broker_reset       = Signal(str)
     lmv_headers_ready  = Signal(list)       # emitted when LMV loads headers
+    lmv_data_ready     = Signal(list, list)  # headers, data rows (list[list])
     _REQUIRED_BROKERS = {"Sharekhan", "ReliableSoftware", "NiftyInvest", "ExternalImport"}
 
     def __init__(self, controller):
@@ -614,9 +618,19 @@ class DataImportScreen(QWidget):
             controller=self._controller,
         )
         self._live_viewer.show()
-        # Share LMV column headers with strategy builder
+        # Share LMV column headers and row data with strategy builder
         if self._live_viewer._headers:
             self.lmv_headers_ready.emit(list(self._live_viewer._headers))
+            self.lmv_data_ready.emit(
+                list(self._live_viewer._headers),
+                [list(r) for r in self._live_viewer._data],
+            )
+        # Keep strategy builder in sync as live data refreshes
+        self._live_viewer.data_updated.connect(
+            lambda headers, data: self.lmv_data_ready.emit(
+                list(headers), [list(r) for r in data]
+            )
+        )
         # Notify the rest of the UI that the watcher is now active
         self._controller.watcher.started.emit()
 

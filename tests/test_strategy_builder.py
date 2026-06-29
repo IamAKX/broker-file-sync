@@ -36,6 +36,34 @@ def test_get_active_strategies_returns_list(screen):
     assert isinstance(result, list)
 
 
+def test_set_lmv_data_populates_first_row_and_all_data(screen):
+    headers = ["Scrip Name", "High", "Low"]
+    data = [["INFY", "100", "50"], ["TCS", "200", "150"]]
+    screen.set_lmv_data(headers, data)
+    assert screen._lmv_headers == headers
+    assert screen._lmv_first_row == {"Scrip Name": "INFY", "High": "100", "Low": "50"}
+    assert len(screen._all_lmv_data) == 2
+    assert screen._all_lmv_data[1]["Low"] == "150"
+
+
+def test_set_lmv_data_enables_compile_against_real_sheet(screen):
+    # The bug: LMV loaded but row data never reached compile_check.
+    from services.strategy_engine import compile_check
+    headers = ["High", "Low"]
+    data = [["100", "50"]]
+    screen.set_lmv_data(headers, data)
+    tokens = [
+        {"type": "func", "value": "Max("},
+        {"type": "col", "value": "High"},
+        {"type": "op", "value": ","},
+        {"type": "col", "value": "Low"},
+        {"type": "paren", "value": ")"},
+    ]
+    ok, msg = compile_check(tokens, screen._lmv_first_row, screen._all_lmv_data)
+    assert ok, msg
+    assert msg == "100.0"
+
+
 def test_new_strategy_has_category():
     from services.strategy_store import new_strategy
     s = new_strategy("Test")

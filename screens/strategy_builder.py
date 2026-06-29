@@ -893,6 +893,34 @@ class StrategyEditor(QWidget):
 
         root.addWidget(_sep(t))
 
+        # ── Row Filter ────────────────────────────────────────────────────────
+        filter_hdr = QHBoxLayout()
+        filter_title = QLabel("Row Filter")
+        filter_title.setFont(font_scale.font(font_scale.MEDIUM, True))
+        filter_info = QLabel("(leave blank to include all rows)")
+        filter_info.setFont(font_scale.font(font_scale.SMALL, False))
+        filter_info.setStyleSheet(f"color:{txts};")
+        self._filter_edit_btn = _btn("Edit Filter…", outlined=True, theme=t, small=True)
+        self._filter_edit_btn.clicked.connect(self._open_filter_editor)
+        filter_hdr.addWidget(filter_title)
+        filter_hdr.addSpacing(8)
+        filter_hdr.addWidget(filter_info)
+        filter_hdr.addStretch()
+        filter_hdr.addWidget(self._filter_edit_btn)
+        root.addLayout(filter_hdr)
+
+        self._filter_preview = QLabel(
+            _tokens_to_display(self._strategy.get("row_filter", []))
+        )
+        self._filter_preview.setFont(QFont("Menlo,Consolas,monospace", 9))
+        self._filter_preview.setStyleSheet(
+            f"color:{_t(t,'accent')};background:transparent;border:none;padding:2px 4px;"
+        )
+        self._filter_preview.setWordWrap(True)
+        root.addWidget(self._filter_preview)
+
+        root.addWidget(_sep(t))
+
         col_hdr = QHBoxLayout()
         col_title = QLabel("Columns")
         col_title.setFont(font_scale.font(font_scale.MEDIUM, True))
@@ -1035,6 +1063,27 @@ class StrategyEditor(QWidget):
 
             self._col_layout.insertWidget(self._col_layout.count() - 1, row_frame)
 
+    def _open_filter_editor(self):
+        from screens.formula_editor import ExpressionEditorDialog
+        all_headers = self._lmv_headers + [
+            c["name"] for c in self._strategy.get("columns", [])
+        ]
+        dlg = ExpressionEditorDialog(
+            tokens=list(self._strategy.get("row_filter", [])),
+            lmv_headers=all_headers,
+            strategy_col_headers=[],
+            lmv_first_row=self._lmv_first_row,
+            all_lmv_data=self._all_lmv_data,
+            theme=self._theme,
+            mode="condition",
+            parent=self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._strategy["row_filter"] = dlg.get_tokens()
+            self._filter_preview.setText(
+                _tokens_to_display(self._strategy["row_filter"])
+            )
+
     def _save(self):
         self._strategy["name"]     = self._name_edit.text().strip() or "Untitled"
         self._strategy["category"] = self._category_combo.currentText()
@@ -1050,6 +1099,8 @@ class StrategyBuilderScreen(QWidget):
         self._theme               = controller.theme
         self._strategies: list    = store.load_all()
         self._lmv_headers: list   = []
+        self._lmv_first_row: dict = {}
+        self._all_lmv_data: list  = []
         self._active_editor       = None
         self._build()
 
@@ -1179,6 +1230,7 @@ class StrategyBuilderScreen(QWidget):
                 item.widget().deleteLater()
 
         editor = StrategyEditor(strategy, self._lmv_headers, self._theme, self)
+        editor.update_lmv_data(self._lmv_first_row, self._all_lmv_data)
         editor.saved.connect(self._on_strategy_saved)
         self._editor_slot.addWidget(editor)
         self._active_editor = editor
@@ -1231,6 +1283,17 @@ class StrategyBuilderScreen(QWidget):
         self._update_lmv_warn()
         if self._active_editor is not None:
             self._active_editor.update_lmv_headers(self._lmv_headers)
+
+    def set_lmv_data(self, headers: list, data: list):
+        """Store the loaded LMV sheet so formulas compile against real data."""
+        self._lmv_headers   = list(headers)
+        self._all_lmv_data  = [dict(zip(headers, row)) for row in data]
+        self._lmv_first_row = dict(self._all_lmv_data[0]) if self._all_lmv_data else {}
+        self._update_lmv_warn()
+        if self._active_editor is not None:
+            self._active_editor.update_lmv_headers(self._lmv_headers)
+            self._active_editor.update_lmv_data(self._lmv_first_row,
+                                                self._all_lmv_data)
 
     def _update_lmv_warn(self):
         t = self._theme
