@@ -660,8 +660,11 @@ class LiveViewerWindow(QWidget):
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.setAlternatingRowColors(False)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        self._table.horizontalHeader().setStretchLastSection(True)
+        hdr = self._table.horizontalHeader()
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        hdr.setStretchLastSection(True)
+        hdr.setSectionsMovable(True)
+        hdr.sectionMoved.connect(self._on_section_moved)
         self._table.setShowGrid(True)
         root.addWidget(self._table, 1)
 
@@ -959,7 +962,44 @@ class LiveViewerWindow(QWidget):
             self._sized_headers = tuple(disp_headers)
 
         self._render_sig = sig
+        self._restore_column_order()
         self._update_strat_btn_label()
+
+    def _on_section_moved(self, logical: int, old_visual: int, new_visual: int):
+        """Persist the new column order whenever the user drags a header."""
+        hdr = self._table.horizontalHeader()
+        ordered = [
+            self._table.horizontalHeaderItem(hdr.logicalIndex(v)).text()
+            for v in range(hdr.count())
+            if self._table.horizontalHeaderItem(hdr.logicalIndex(v))
+        ]
+        from services.config_store import save_column_order
+        save_column_order(ordered)
+
+    def _restore_column_order(self):
+        """Reorder columns to match the saved order (by column name)."""
+        from services.config_store import load_column_order
+        saved = load_column_order()
+        if not saved:
+            return
+        hdr = self._table.horizontalHeader()
+        n = hdr.count()
+        # Build name → logical index map
+        name_to_logical = {}
+        for logical in range(n):
+            item = self._table.horizontalHeaderItem(logical)
+            if item:
+                name_to_logical[item.text()] = logical
+        # Walk the saved order; skip names not present in the current table
+        target_visual = 0
+        for name in saved:
+            logical = name_to_logical.get(name)
+            if logical is None:
+                continue
+            current_visual = hdr.visualIndex(logical)
+            if current_visual != target_visual:
+                hdr.moveSection(current_visual, target_visual)
+            target_visual += 1
 
     def _apply_cell_style(self, item, c, val, row_dict, all_dicts,
                           strat_col_defs, base_col_count,
@@ -1208,23 +1248,30 @@ class LiveViewerWindow(QWidget):
 
     def _visible_table_data(self) -> tuple:
         """
-        Scrape the table for exactly what's on screen: visible columns and
-        visible (non-filtered) rows, in display order. Returns (headers, rows).
+        Scrape the table for exactly what's on screen: visible columns in
+        visual (display) order and visible (non-filtered) rows.
+        Returns (headers, rows).
         """
-        cols = [c for c in range(self._table.columnCount())
-                if not self._table.isColumnHidden(c)]
+        hdr = self._table.horizontalHeader()
+        n = self._table.columnCount()
+        # Collect logical column indices in visual order, skipping hidden ones
+        cols = [
+            hdr.logicalIndex(v)
+            for v in range(n)
+            if not self._table.isColumnHidden(hdr.logicalIndex(v))
+        ]
         headers = []
-        for c in cols:
-            hdr = self._table.horizontalHeaderItem(c)
-            headers.append(hdr.text() if hdr else "")
+        for logical in cols:
+            item = self._table.horizontalHeaderItem(logical)
+            headers.append(item.text() if item else "")
 
         rows = []
         for r in range(self._table.rowCount()):
             if self._table.isRowHidden(r):
                 continue
             row = []
-            for c in cols:
-                item = self._table.item(r, c)
+            for logical in cols:
+                item = self._table.item(r, logical)
                 row.append(item.text() if item else "")
             rows.append(row)
         return headers, rows

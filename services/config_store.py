@@ -17,7 +17,8 @@ import os
 
 _STORE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config_data.json")
 
-MAIN_COLUMN_NAME = "main_column_name"
+MAIN_COLUMN_NAME  = "main_column_name"
+MAIN_COLUMN_ORDER = "main_column_order"
 
 
 def _load_raw() -> dict:
@@ -50,6 +51,20 @@ def save_tab(key: str, rows: list):
     data = _load_raw()
     data[key] = [list(r) for r in rows]
     _save_raw(data)
+
+
+def save_column_order(ordered_names: list):
+    """Persist the user's column order as a list of column names."""
+    data = _load_raw()
+    data[MAIN_COLUMN_ORDER] = list(ordered_names)
+    _save_raw(data)
+
+
+def load_column_order() -> list:
+    """Return saved column order (list of names), or [] if none saved."""
+    data = _load_raw()
+    order = data.get(MAIN_COLUMN_ORDER)
+    return list(order) if isinstance(order, list) else []
 
 
 def get_rename_map() -> dict:

@@ -178,16 +178,25 @@ class ExpressionEditorDialog(QDialog):
     def __init__(self, tokens: list, lmv_headers: list,
                  strategy_col_headers: list, lmv_first_row: dict,
                  all_lmv_data: list = None,
-                 theme=None, mode: str = "value", self_value=None, parent=None):
+                 theme=None, mode: str = "value", self_value=None,
+                 allow_self: bool = None, extra_row_values: dict = None,
+                 parent=None):
         super().__init__(parent)
         self._tokens = list(tokens)
         self._lmv_headers = list(lmv_headers)
         self._strategy_col_headers = list(strategy_col_headers)
+        # Computed strategy-column values (name -> value) merged into the test
+        # row so a row filter can be compiled against the columns it references.
+        self._extra_row_values = dict(extra_row_values or {})
         self._lmv_first_row = lmv_first_row or {}
         self._all_lmv_data  = all_lmv_data or ([lmv_first_row] if lmv_first_row else [])
         self._theme = theme
         self._mode  = mode
         self._self_value = self_value
+        # THIS (own value) only makes sense for a single column's fmt rule.
+        # Row filters span multiple columns, so they reference columns by name
+        # instead — allow_self defaults to on for conditions unless disabled.
+        self._allow_self = (mode == "condition") if allow_self is None else allow_self
         self._compiled_ok = False
         self.setWindowTitle("Expression Editor")
         self.setFixedSize(900, 620)
@@ -352,7 +361,7 @@ class ExpressionEditorDialog(QDialog):
             "QPushButton:hover{background:#9a670066;}"
         )
         self._this_btn.clicked.connect(lambda: self._add_token({"type": "self"}))
-        self._this_btn.setVisible(self._mode == "condition")
+        self._this_btn.setVisible(self._allow_self)
 
         const_lay.addWidget(lbl)
         const_lay.addWidget(self._const_input)
@@ -544,8 +553,15 @@ class ExpressionEditorDialog(QDialog):
 
     def _compile_and_test(self):
         from services.strategy_engine import compile_check
-        ok, msg = compile_check(self._tokens, self._lmv_first_row,
-                                self._all_lmv_data, self_value=self._self_value)
+        # Merge computed strategy-column values into the test row so a row
+        # filter referencing those columns can be evaluated.
+        test_row = dict(self._lmv_first_row)
+        test_row.update(self._extra_row_values)
+        test_all = self._all_lmv_data
+        if self._extra_row_values and test_all:
+            test_all = [dict(test_all[0], **self._extra_row_values)] + list(test_all[1:])
+        ok, msg = compile_check(self._tokens, test_row,
+                                test_all, self_value=self._self_value)
         if ok:
             self._compiled_ok = True
             self._save_btn.setEnabled(True)

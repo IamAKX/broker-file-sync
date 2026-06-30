@@ -772,6 +772,7 @@ class ColumnEditorDialog(QDialog):
 
 class StrategyCard(QFrame):
     edit_requested   = Signal(dict)
+    clone_requested  = Signal(dict)
     delete_requested = Signal(str)
     toggled          = Signal(str, bool)
 
@@ -833,11 +834,14 @@ class StrategyCard(QFrame):
         lay.addWidget(info)
 
         act_row = QHBoxLayout()
-        edit_btn = _btn("Edit", theme=t, small=True)
-        del_btn  = _btn("Delete", theme=t, small=True, danger=True)
+        edit_btn  = _btn("Edit",  theme=t, small=True)
+        clone_btn = _btn("Clone", theme=t, small=True, outlined=True)
+        del_btn   = _btn("Delete", theme=t, small=True, danger=True)
         edit_btn.clicked.connect(lambda: self.edit_requested.emit(self._strategy))
+        clone_btn.clicked.connect(lambda: self.clone_requested.emit(self._strategy))
         del_btn.clicked.connect(lambda: self.delete_requested.emit(self._strategy["id"]))
         act_row.addWidget(edit_btn)
+        act_row.addWidget(clone_btn)
         act_row.addWidget(del_btn)
         act_row.addStretch()
         lay.addLayout(act_row)
@@ -1005,6 +1009,13 @@ class StrategyEditor(QWidget):
             self._strategy["columns"][idx] = dlg.result_col()
             self._refresh_columns()
 
+    def _clone_column(self, idx: int):
+        original = self._strategy["columns"][idx]
+        cloned = copy.deepcopy(original)
+        cloned["name"] = original["name"] + " (Copy)"
+        self._strategy["columns"].insert(idx + 1, cloned)
+        self._refresh_columns()
+
     def _delete_column(self, idx: int):
         del self._strategy["columns"][idx]
         self._refresh_columns()
@@ -1042,11 +1053,14 @@ class StrategyEditor(QWidget):
             rule_lbl.setFont(font_scale.font(font_scale.SMALL, False))
             rule_lbl.setStyleSheet(f"color:{txts};background:transparent;")
 
-            edit_b = _btn("Edit", theme=t, small=True)
-            del_b  = _btn("✕",   theme=t, small=True, danger=True)
+            edit_b  = _btn("Edit",  theme=t, small=True)
+            clone_b = _btn("Clone", theme=t, small=True, outlined=True)
+            del_b   = _btn("✕",    theme=t, small=True, danger=True)
             edit_b.setFixedWidth(50)
+            clone_b.setFixedWidth(64)
             del_b.setFixedWidth(30)
             edit_b.clicked.connect(lambda _, i=idx: self._edit_column(i))
+            clone_b.clicked.connect(lambda _, i=idx: self._clone_column(i))
             del_b.clicked.connect(lambda _, i=idx:  self._delete_column(i))
 
             top_row.addWidget(name_lbl)
@@ -1054,6 +1068,8 @@ class StrategyEditor(QWidget):
             top_row.addWidget(rule_lbl)
             top_row.addStretch()
             top_row.addWidget(edit_b)
+            top_row.addSpacing(4)
+            top_row.addWidget(clone_b)
             top_row.addSpacing(4)
             top_row.addWidget(del_b)
             row_lay.addLayout(top_row)
@@ -1072,9 +1088,19 @@ class StrategyEditor(QWidget):
 
     def _open_filter_editor(self):
         from screens.formula_editor import ExpressionEditorDialog
-        all_headers = self._lmv_headers + [
-            c["name"] for c in self._strategy.get("columns", [])
-        ]
+        from services.strategy_engine import evaluate
+        # A row filter can reference this strategy's own columns by name, so the
+        # column names appear in the Fields list (THIS is disabled — ambiguous
+        # when a strategy has multiple columns).
+        strat_cols = self._strategy.get("columns", [])
+        all_headers = self._lmv_headers + [c["name"] for c in strat_cols]
+        # Compute each strategy column's value on the first row so the compile
+        # test can evaluate the filter against those columns.
+        extra_values = {}
+        for col in strat_cols:
+            extra_values[col["name"]] = evaluate(
+                col.get("formula", []), self._lmv_first_row, self._all_lmv_data
+            )
         dlg = ExpressionEditorDialog(
             tokens=list(self._strategy.get("row_filter", [])),
             lmv_headers=all_headers,
@@ -1083,6 +1109,8 @@ class StrategyEditor(QWidget):
             all_lmv_data=self._all_lmv_data,
             theme=self._theme,
             mode="condition",
+            allow_self=False,
+            extra_row_values=extra_values,
             parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -1224,6 +1252,7 @@ class StrategyBuilderScreen(QWidget):
         for strat in self._strategies:
             card = StrategyCard(strat, self._theme, parent=self)
             card.edit_requested.connect(self._open_editor)
+            card.clone_requested.connect(self._clone_strategy)
             card.delete_requested.connect(self._delete_strategy)
             card.toggled.connect(self._on_toggled)
             self._list_layout.insertWidget(self._list_layout.count() - 1, card)
@@ -1250,6 +1279,16 @@ class StrategyBuilderScreen(QWidget):
         self._strategies.append(strat)
         self._refresh_list()
         self._open_editor(strat)
+
+    def _clone_strategy(self, original: dict):
+        import uuid
+        cloned = copy.deepcopy(original)
+        cloned["id"]   = str(uuid.uuid4())
+        cloned["name"] = "Copy of " + original["name"]
+        self._strategies.append(cloned)
+        store.save_strategy(cloned)
+        self._refresh_list()
+        self._open_editor(cloned)
 
     def _delete_strategy(self, strategy_id: str):
         msg = QMessageBox(self)

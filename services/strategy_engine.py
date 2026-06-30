@@ -269,26 +269,34 @@ def apply_strategies(strategies: list, headers: list,
     for row in data:
         row_dict = dict(zip(headers, row))
 
-        # Decide row visibility: drop rows excluded by every active filter.
-        if not any_unfiltered:
-            keep = any(
-                evaluate_condition(s["row_filter"], row_dict, all_dicts)
-                for s in active if s.get("row_filter")
-            )
-            if not keep:
-                continue
+        # Compute each active strategy's columns first, then evaluate its row
+        # filter against a row enriched with those computed values — so a filter
+        # can reference the strategy's own columns by name.
+        per_strat = []   # (passed, [computed values in column order])
+        for strat in active:
+            enriched = dict(row_dict)
+            values = []
+            for col in strat.get("columns", []):
+                val = evaluate(col["formula"], row_dict, all_dicts)
+                enriched[col["name"]] = val
+                values.append(val)
+            row_filter = strat.get("row_filter", [])
+            passed = (not row_filter) or evaluate_condition(
+                row_filter, enriched, all_dicts)
+            per_strat.append((passed, values))
+
+        # Drop rows excluded by every active filter (union of filters).
+        if not any_unfiltered and not any(passed for passed, _ in per_strat):
+            continue
 
         extra_vals = []
-        for strat in active:
-            row_filter = strat.get("row_filter", [])
-            if row_filter and not evaluate_condition(row_filter, row_dict, all_dicts):
-                # Row is shown (it matched another strategy) but this strategy's
+        for (passed, values), strat in zip(per_strat, active):
+            if passed:
+                extra_vals.extend(values)
+            else:
+                # Row is shown (matched another strategy) but this strategy's
                 # columns don't apply to it.
                 extra_vals.extend([None] * len(strat.get("columns", [])))
-            else:
-                for col in strat.get("columns", []):
-                    val = evaluate(col["formula"], row_dict, all_dicts)
-                    extra_vals.append(val)
         new_data.append(list(row) + extra_vals)
 
     return new_headers, new_data

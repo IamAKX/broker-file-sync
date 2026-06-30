@@ -5,7 +5,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QProgressBar, QFileDialog, QScrollArea, QSizePolicy,
+    QFrame, QProgressBar, QFileDialog, QSizePolicy,
     QCalendarWidget
 )
 from PySide6.QtCore import Qt, QTimer, QByteArray, QSize, Signal, QDate, QObject
@@ -58,37 +58,6 @@ def _svg_icon(filename: str, color: str) -> QIcon:
     return QIcon(pixmap)
 
 
-class DropZone(QFrame):
-    file_dropped = Signal(str)
-
-    def __init__(self, exts: tuple = (".xlsx", ".xls"), parent=None):
-        super().__init__(parent)
-        self._exts = exts
-        self.setObjectName("dropArea")
-        self.setFixedHeight(130)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setAcceptDrops(True)
-
-    def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls():
-            if any(u.toLocalFile().lower().endswith(self._exts) for u in event.mimeData().urls()):
-                event.acceptProposedAction()
-                return
-        event.ignore()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.acceptProposedAction()
-
-    def dropEvent(self, event):
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if path.lower().endswith(self._exts):
-                self.file_dropped.emit(path)
-                event.acceptProposedAction()
-                return
-
-
 class BrokerImportCard(QFrame):
     import_done = Signal(str, int)  # broker name, row count
     import_reset = Signal(str)      # broker name when file is deleted
@@ -99,28 +68,111 @@ class BrokerImportCard(QFrame):
         super().__init__(parent)
         self._theme = theme
         self._broker = broker
+        self._hint = hint
         self._exts = exts
         self._selected_file = None
         self._row_count = 0
         self._progress_value = 0
         self._show_date_picker = show_date_picker
         self.setObjectName("brokerPanel")
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setAcceptDrops(True)
         self._build(color_token, hint)
+
+    # ── Drag & drop (the whole card is the drop target) ────────────────────────
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(
+            u.toLocalFile().lower().endswith(self._exts) for u in event.mimeData().urls()
+        ):
+            event.acceptProposedAction()
+            return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if path.lower().endswith(self._exts):
+                self._on_file_dropped(path)
+                event.acceptProposedAction()
+                return
+
+    def mousePressEvent(self, event):
+        # Click anywhere on the card (except child buttons) opens the browser.
+        self._browse()
 
     def _build(self, color_token: str, hint: str):
         t = self._theme
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(10)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(14, 10, 14, 10)
+        layout.setSpacing(12)
 
-        # Header row: dot + name + status badge
-        header = QHBoxLayout()
+        # Status dot
         dot = QLabel("●")
         dot.setStyleSheet(f"color: {t.get(color_token)}; font-size: 12pt;")
         dot.setFixedWidth(16)
+        layout.addWidget(dot)
+
+        # Name + sub-label (hint, or filename + rows once imported)
+        info_col = QVBoxLayout()
+        info_col.setSpacing(1)
         name_lbl = QLabel(self._broker)
         name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
+        self._file_lbl = QLabel(hint)
+        self._file_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._file_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        info_col.addWidget(name_lbl)
+        info_col.addWidget(self._file_lbl)
+        layout.addLayout(info_col, 1)
+
+        # Expiry date picker (only for Sharekhan)
+        if self._show_date_picker:
+            from services.master_generator import last_tuesday_of_month
+            default_date = last_tuesday_of_month()
+            self._expiry_date = default_date
+
+            self._date_btn = QPushButton(default_date.strftime("%d-%b-%Y"))
+            self._date_btn.setFixedHeight(30)
+            self._date_btn.setFont(font_scale.font(font_scale.SMALL, False))
+            self._date_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._update_date_btn_style()
+            self._date_btn.clicked.connect(self._show_calendar)
+            layout.addWidget(self._date_btn)
+
+        # Progress bar + percentage (inline, hidden until importing)
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setFixedSize(110, 6)
+        self._progress.setTextVisible(False)
+        self._progress.setVisible(False)
+        self._pct_lbl = QLabel("")
+        self._pct_lbl.setFixedWidth(34)
+        self._pct_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._pct_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        self._pct_lbl.setVisible(False)
+        layout.addWidget(self._progress)
+        layout.addWidget(self._pct_lbl)
+
+        # Browse button
+        self._browse_btn = QPushButton("Browse")
+        self._browse_btn.setFixedHeight(30)
+        self._browse_btn.setFont(font_scale.font(font_scale.SMALL, False))
+        self._browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        accent = t.get('accent')
+        self._browse_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {accent};"
+            f"border: 1px solid {accent}; border-radius: 4px; padding: 0 14px; }}"
+            f"QPushButton:hover {{ background: {accent}22; }}"
+        )
+        self._browse_btn.clicked.connect(self._browse)
+        layout.addWidget(self._browse_btn)
+
+        # Status badge
         self._status_lbl = QLabel("Awaiting")
         self._status_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._status_lbl.setFixedHeight(22)
@@ -129,116 +181,20 @@ class BrokerImportCard(QFrame):
             f"color: {t.get('text_secondary')}; border: 1px solid {t.get('text_secondary')};"
             "border-radius: 4px; padding: 0 8px;"
         )
-        header.addWidget(dot)
-        header.addWidget(name_lbl)
-        header.addStretch()
-        header.addWidget(self._status_lbl)
-        layout.addLayout(header)
+        layout.addWidget(self._status_lbl)
 
-        # Expiry date picker (only for Sharekhan)
-        if self._show_date_picker:
-            date_row = QHBoxLayout()
-            date_label = QLabel("Expiry Date:")
-            date_label.setFont(font_scale.font(font_scale.SMALL, False))
-            date_label.setStyleSheet(f"color: {t.get('text_secondary')};")
-
-            from services.master_generator import last_tuesday_of_month
-            default_date = last_tuesday_of_month()
-            self._expiry_date = default_date
-
-            self._date_btn = QPushButton(default_date.strftime("%d-%b-%Y"))
-            self._date_btn.setFixedHeight(32)
-            self._date_btn.setFont(font_scale.font(font_scale.SMALL, False))
-            self._date_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            bg = t.get('input_bg')
-            txt = t.get('text_primary')
-            bd = t.get('border')
-            accent = t.get('accent')
-            self._date_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: {bg};
-                    color: {txt};
-                    border: 1px solid {bd};
-                    border-radius: 4px;
-                    padding: 4px 12px;
-                    text-align: left;
-                }}
-                QPushButton:hover {{
-                    border-color: {accent};
-                }}
-            """)
-            self._date_btn.clicked.connect(self._show_calendar)
-
-            date_row.addWidget(date_label)
-            date_row.addWidget(self._date_btn)
-            date_row.addStretch()
-            layout.addLayout(date_row)
-
-        # Drop zone
-        drop = DropZone(self._exts)
-        drop_layout = QVBoxLayout(drop)
-        drop_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        drop_layout.setSpacing(6)
-
-        upload_icon = QLabel()
-        upload_icon.setFixedSize(32, 32)
-        upload_icon.setPixmap(_svg_icon("import.svg", t.get("text_secondary")).pixmap(QSize(32, 32)))
-        upload_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        drop_main = QLabel("Drop file or click to browse")
-        drop_main.setFont(font_scale.font(font_scale.MEDIUM, False))
-        drop_main.setStyleSheet(f"color: {t.get('text_secondary')};")
-        drop_main.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        drop_hint = QLabel(hint)
-        drop_hint.setFont(font_scale.font(font_scale.SMALL, False))
-        drop_hint.setStyleSheet(f"color: {t.get('text_secondary')};")
-        drop_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        drop_layout.addWidget(upload_icon, alignment=Qt.AlignmentFlag.AlignCenter)
-        drop_layout.addWidget(drop_main)
-        drop_layout.addWidget(drop_hint)
-        drop.mousePressEvent = lambda _: self._browse()
-        drop.file_dropped.connect(self._on_file_dropped)
-        layout.addWidget(drop)
-
-        # Progress bar + percentage label
-        progress_row = QHBoxLayout()
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 100)
-        self._progress.setValue(0)
-        self._progress.setFixedHeight(6)
-        self._progress.setTextVisible(False)
-        self._progress.setVisible(False)
-        self._pct_lbl = QLabel("")
-        self._pct_lbl.setFixedWidth(36)
-        self._pct_lbl.setFont(font_scale.font(font_scale.SMALL, False))
-        self._pct_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
-        self._pct_lbl.setVisible(False)
-        progress_row.addWidget(self._progress)
-        progress_row.addWidget(self._pct_lbl)
-        layout.addLayout(progress_row)
-
-        # Bottom row: file label + delete button
-        bottom_row = QHBoxLayout()
-        self._file_lbl = QLabel("No files imported yet")
-        self._file_lbl.setFont(font_scale.font(font_scale.SMALL, False))
-        self._file_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
-        self._file_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-
-        self._delete_btn = QPushButton("✕ Remove")
+        # Remove button (hidden until a file is imported)
+        self._delete_btn = QPushButton("✕")
         self._delete_btn.setFont(font_scale.font(font_scale.SMALL, False))
-        self._delete_btn.setFixedHeight(24)
+        self._delete_btn.setFixedSize(26, 26)
         self._delete_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._delete_btn.setToolTip("Remove file")
         self._delete_btn.setStyleSheet(
             f"color: {t.get('status_red')}; background: transparent; border: none;"
         )
         self._delete_btn.setVisible(False)
         self._delete_btn.clicked.connect(self._reset)
-
-        bottom_row.addWidget(self._file_lbl, 1)
-        bottom_row.addWidget(self._delete_btn)
-        layout.addLayout(bottom_row)
+        layout.addWidget(self._delete_btn)
 
     def _on_file_dropped(self, path: str):
         self._selected_file = path
@@ -270,6 +226,7 @@ class BrokerImportCard(QFrame):
         self._pct_lbl.setText("0%")
         self._pct_lbl.setVisible(True)
         self._delete_btn.setVisible(False)
+        self._browse_btn.setVisible(False)
         self._status_lbl.setText("Importing...")
         self._status_lbl.setStyleSheet(
             f"color: {self._theme.get('accent')}; border: 1px solid {self._theme.get('accent')};"
@@ -308,12 +265,13 @@ class BrokerImportCard(QFrame):
         self._progress.setVisible(False)
         self._pct_lbl.setVisible(False)
         self._delete_btn.setVisible(False)
+        self._browse_btn.setVisible(True)
         self._status_lbl.setText("Awaiting")
         self._status_lbl.setStyleSheet(
             f"color: {self._theme.get('text_secondary')}; border: 1px solid {self._theme.get('text_secondary')};"
             "border-radius: 4px; padding: 1px 8px;"
         )
-        self._file_lbl.setText("No files imported yet")
+        self._file_lbl.setText(self._hint)
         self._file_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
         self.import_reset.emit(self._broker)
 
@@ -511,15 +469,10 @@ class DataImportScreen(QWidget):
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
-        # Vertical list of broker cards inside a scroll area (5 full-width rows)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        cards_host = QWidget()
-        cards_col = QVBoxLayout(cards_host)
+        # Compact vertical list of broker cards — all 5 fit without scrolling.
+        cards_col = QVBoxLayout()
         cards_col.setContentsMargins(0, 0, 0, 0)
-        cards_col.setSpacing(16)
+        cards_col.setSpacing(10)
         self._cards: dict[str, BrokerImportCard] = {}
         for broker, color_token, hint, exts, show_date in BROKERS:
             card = BrokerImportCard(broker, color_token, hint, t, exts, show_date)
@@ -529,9 +482,8 @@ class DataImportScreen(QWidget):
             card.import_reset.connect(self._on_card_reset)
             self._cards[broker] = card
             cards_col.addWidget(card)
-        cards_col.addStretch()
-        scroll.setWidget(cards_host)
-        layout.addWidget(scroll, 1)
+        layout.addLayout(cards_col)
+        layout.addStretch()
 
         # Bottom button row — Run Watcher
         gen_row = QHBoxLayout()
