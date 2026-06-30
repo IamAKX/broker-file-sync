@@ -429,3 +429,35 @@ def test_fmt_color_applies_when_this_condition_met():
     }
     assert get_cell_color(col_def, 5000, {}, [{}]) == "#ff0000"
     assert get_cell_color(col_def, 20000, {}, [{}]) is None
+
+
+def test_row_filter_editor_disables_this_and_passes_column_values(qapp, monkeypatch):
+    # Row filter must NOT offer THIS (ambiguous with multiple columns) and must
+    # pass each strategy column's computed value for the compile test.
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyEditor
+    from screens import formula_editor
+
+    s = new_strategy("S")
+    s["columns"] = [{"name": "Out", "formula": [{"type": "col", "value": "LTP"}],
+                     "fmt_rules": []}]
+    editor = StrategyEditor(s, ["LTP"], None)
+    editor.update_lmv_data({"LTP": "42"}, [{"LTP": "42"}])
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, *a, **kw):
+            captured.update(kw)
+        def exec(self):
+            return 0
+        def get_tokens(self):
+            return []
+
+    monkeypatch.setattr(formula_editor, "ExpressionEditorDialog", _FakeDlg)
+    editor._open_filter_editor()
+    assert captured.get("allow_self") is False
+    # The strategy's own column appears as a selectable field…
+    assert "Out" in captured.get("lmv_headers", [])
+    # …and its computed value is supplied for the compile test.
+    assert captured.get("extra_row_values", {}).get("Out") == 42.0

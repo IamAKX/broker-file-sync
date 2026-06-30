@@ -1072,9 +1072,19 @@ class StrategyEditor(QWidget):
 
     def _open_filter_editor(self):
         from screens.formula_editor import ExpressionEditorDialog
-        all_headers = self._lmv_headers + [
-            c["name"] for c in self._strategy.get("columns", [])
-        ]
+        from services.strategy_engine import evaluate
+        # A row filter can reference this strategy's own columns by name, so the
+        # column names appear in the Fields list (THIS is disabled — ambiguous
+        # when a strategy has multiple columns).
+        strat_cols = self._strategy.get("columns", [])
+        all_headers = self._lmv_headers + [c["name"] for c in strat_cols]
+        # Compute each strategy column's value on the first row so the compile
+        # test can evaluate the filter against those columns.
+        extra_values = {}
+        for col in strat_cols:
+            extra_values[col["name"]] = evaluate(
+                col.get("formula", []), self._lmv_first_row, self._all_lmv_data
+            )
         dlg = ExpressionEditorDialog(
             tokens=list(self._strategy.get("row_filter", [])),
             lmv_headers=all_headers,
@@ -1083,6 +1093,8 @@ class StrategyEditor(QWidget):
             all_lmv_data=self._all_lmv_data,
             theme=self._theme,
             mode="condition",
+            allow_self=False,
+            extra_row_values=extra_values,
             parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:

@@ -275,3 +275,20 @@ def test_apply_strategies_unfiltered_strategy_keeps_all_rows():
     data = [["CG", "10"], ["IT", "20"]]
     _, new_data = apply_strategies([s_cg, s_all], headers, data)
     assert len(new_data) == 2
+
+def test_row_filter_can_reference_strategy_own_column():
+    # Filter on the strategy's computed column (not a raw LMV column).
+    # Column "Out" = LTP; keep rows where Out <= 15.
+    from services.strategy_engine import apply_strategies
+    strat = {
+        "id": "1", "active": True,
+        "row_filter": [tok_col("Out"), tok_op("<="), {"type": "num", "value": "15"}],
+        "columns": [{"name": "Out", "formula": [tok_col("LTP")]}],
+    }
+    headers = ["Sector", "LTP"]
+    data = [["CG", "10"], ["IT", "20"], ["FIN", "12"]]
+    new_headers, new_data = apply_strategies([strat], headers, data)
+    assert new_headers == ["Sector", "LTP", "Out"]
+    # LTP 10 and 12 pass (<=15); 20 dropped.
+    assert [r[1] for r in new_data] == ["10", "12"]
+    assert [r[2] for r in new_data] == [10.0, 12.0]
