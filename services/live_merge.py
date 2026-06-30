@@ -112,7 +112,7 @@ class LiveDataReader:
         unless ``force_slow`` is set or the slow interval has elapsed.
         """
         from services.master_generator import (
-            _build_script_name_lookup, _normalise, _strip_date_suffix,
+            _build_script_name_lookup, _normalise,
             _strip_rolling_suffix,
             _RS_DATA_INDICES, _NI_DATA_INDICES,
             _SK_PK_IDX, _RS_FK_IDX, _NI_FK_IDX,
@@ -147,14 +147,19 @@ class LiveDataReader:
         for row in ni_rows:
             ni_lookup[_normalise(row[_NI_FK_IDX]).upper()] = row
 
-        # External import: join on first column (must be symbol / scrip name)
-        ext_data_indices = list(range(1, len(ext_headers))) if len(ext_headers) > 1 else []
+        # External import: same shape as ReliableSoftware — column B (index 1)
+        # is the join key (full name + rolling suffix → symbol via config),
+        # column C onward (index 2+) are the data columns.
+        ext_data_indices = list(range(2, len(ext_headers))) if len(ext_headers) > 2 else []
         ext_lookup: dict = {}
         if ext_rows and ext_headers:
             for row in ext_rows:
-                key = _strip_date_suffix(_normalise(row[0])).upper() if row else ""
-                if key:
-                    ext_lookup[key] = row
+                if not row or len(row) < 2:
+                    continue
+                full_name = _strip_rolling_suffix(_normalise(row[1]))
+                sym = name_to_symbol.get(full_name.lower())
+                if sym:
+                    ext_lookup[_normalise(sym).upper()] = row
 
         out_headers = list(sk_headers)
         for i in _RS_DATA_INDICES:

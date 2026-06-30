@@ -63,15 +63,6 @@ def _normalise(value) -> str:
     return str(value).strip() if value is not None else ""
 
 
-import re as _re
-_DATE_SUFFIX_RE = _re.compile(r"\s+\d{1,2}-[A-Za-z]{3}-\d{4}$")
-
-
-def _strip_date_suffix(name: str) -> str:
-    """Strip trailing ' DD-Mon-YYYY' from stock names (e.g. external-import col-0)."""
-    return _DATE_SUFFIX_RE.sub("", name).strip()
-
-
 def _strip_rolling_suffix(name: str) -> str:
     """
     Strip a trailing rolling-expiry suffix from a ReliableSoftware ScripName.
@@ -137,14 +128,19 @@ def generate_master(
         key = _normalise(row[_NI_FK_IDX]).upper()
         ni_lookup[key] = row
 
-    # External import: join on first column (symbol / scrip name)
-    ext_data_indices = list(range(1, len(ext_headers))) if len(ext_headers) > 1 else []
+    # External import: same shape as ReliableSoftware — column B (index 1) is
+    # the join key (full name + rolling suffix → symbol via config), column C
+    # onward (index 2+) are the data columns.
+    ext_data_indices = list(range(2, len(ext_headers))) if len(ext_headers) > 2 else []
     ext_lookup: dict = {}
     if ext_rows and ext_headers:
         for row in ext_rows:
-            key = _strip_date_suffix(_normalise(row[0])).upper() if row else ""
-            if key:
-                ext_lookup[key] = row
+            if not row or len(row) < 2:
+                continue
+            full_name = _strip_rolling_suffix(_normalise(row[1]))
+            symbol = name_to_symbol.get(full_name.lower())
+            if symbol:
+                ext_lookup[_normalise(symbol).upper()] = row
 
     # --- Build merged headers ---
     out_headers = list(sk_headers)

@@ -87,19 +87,23 @@ def test_live_merge_includes_external_columns(tmp_path, monkeypatch):
         lambda path: (["Symbol", "Max Pain"], []),
     )
 
+    # External now mirrors ReliableSoftware: col A ignored, col B is the join
+    # key (full name + rolling suffix → symbol via config), col C onward = data.
     ext_file = _make_csv(tmp_path, "ext.csv", [
-        ["Symbol", "MyScore"],
-        ["INFY", "99"],
-        ["TCS", "88"],
+        ["RowNo", "ScripName", "MyScore"],
+        ["1", "Infosys Limited.rolling.12D", "99"],
+        ["2", "TCS.rolling.11D", "88"],
     ])
+    script_name_data = [("Infosys Limited", "INFY"), ("TCS", "TCS")]
 
-    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [],
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", script_name_data,
                             external_path=ext_file)
     # Trigger slow-source read manually
     reader._read_slow_sources(force=True)
     headers, data = reader.read_merged(force_slow=False)
 
     assert "MyScore" in headers
+    assert "ScripName" not in headers   # the key column is not output
     score_idx = headers.index("MyScore")
     rows_by_scrip = {r[0]: r for r in data}
     assert rows_by_scrip["INFY"][score_idx] == "99"
@@ -148,11 +152,12 @@ def test_live_merge_external_missing_scrip_fills_none(tmp_path, monkeypatch):
 
     # Only INFY in external — TCS should get None
     ext_file = _make_csv(tmp_path, "partial.csv", [
-        ["Symbol", "MyScore"],
-        ["INFY", "99"],
+        ["RowNo", "ScripName", "MyScore"],
+        ["1", "Infosys Limited.rolling.12D", "99"],
     ])
+    script_name_data = [("Infosys Limited", "INFY")]
 
-    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [],
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", script_name_data,
                             external_path=ext_file)
     reader._read_slow_sources(force=True)
     headers, data = reader.read_merged(force_slow=False)
@@ -161,6 +166,60 @@ def test_live_merge_external_missing_scrip_fills_none(tmp_path, monkeypatch):
     rows_by_scrip = {r[0]: r for r in data}
     assert rows_by_scrip["INFY"][score_idx] == "99"
     assert rows_by_scrip["TCS"][score_idx] is None
+
+
+def test_live_merge_external_matches_any_rolling_duration(tmp_path, monkeypatch):
+    # External uses .rolling.10D; config (stripped) maps ABB LTD → ABB.
+    from services.live_merge import LiveDataReader
+    monkeypatch.setattr(
+        "services.live_merge.LiveDataReader._read_sharekhan",
+        lambda self: (["Scrip Name", "Current"], [["ABB", 1.0]]),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_reliable_software",
+        lambda path: (["ScripName", "callstrikehighestoi"], []),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_nifty_invest",
+        lambda path: (["Symbol", "Max Pain"], []),
+    )
+    ext_file = _make_csv(tmp_path, "roll.csv", [
+        ["RowNo", "ScripName", "ExtCol"],
+        ["1", "ABB LTD.rolling.10D", "XYZ"],
+    ])
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv",
+                            [("ABB LTD", "ABB")], external_path=ext_file)
+    reader._read_slow_sources(force=True)
+    headers, data = reader.read_merged(force_slow=False)
+    assert data[0][headers.index("ExtCol")] == "XYZ"
+
+
+def test_live_merge_external_column_a_is_ignored(tmp_path, monkeypatch):
+    # Column A holds junk; matching must rely on column B only.
+    from services.live_merge import LiveDataReader
+    monkeypatch.setattr(
+        "services.live_merge.LiveDataReader._read_sharekhan",
+        lambda self: (["Scrip Name", "Current"], [["INFY", 1.0]]),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_reliable_software",
+        lambda path: (["ScripName", "callstrikehighestoi"], []),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_nifty_invest",
+        lambda path: (["Symbol", "Max Pain"], []),
+    )
+    ext_file = _make_csv(tmp_path, "cola.csv", [
+        ["GARBAGE", "ScripName", "ExtCol"],
+        ["zzz", "Infosys Limited.rolling.12D", "OK"],
+    ])
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv",
+                            [("Infosys Limited", "INFY")], external_path=ext_file)
+    reader._read_slow_sources(force=True)
+    headers, data = reader.read_merged(force_slow=False)
+    # Column A header ("GARBAGE") must not be in output; ExtCol is matched.
+    assert "GARBAGE" not in headers
+    assert data[0][headers.index("ExtCol")] == "OK"
 
 
 # ── data_import UI ────────────────────────────────────────────────────────────
