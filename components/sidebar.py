@@ -25,6 +25,7 @@ BROKERS = [
     ("ReliableSoftware","status_blue"),
     ("NiftyInvest",     "status_orange"),
     ("ExternalImport",  "status_purple"),
+    ("MarketProfile",   "status_pink"),
 ]
 
 
@@ -62,7 +63,7 @@ class Sidebar(QWidget):
         self._nav_meta: list[tuple[str, str, str]] = []
         self._active = "dashboard"
         # broker row state: name -> (dot_label, name_label, selected)
-        self._broker_rows: list[tuple[str, QLabel, QLabel]] = []
+        self._broker_rows: list[tuple[str, QLabel, QLabel, str]] = []
         self._selected_brokers: set[str] = set()
         self.setMinimumWidth(180)
         self.setMaximumWidth(180)
@@ -117,7 +118,7 @@ class Sidebar(QWidget):
             row_layout.addStretch()
             layout.addWidget(row)
 
-            self._broker_rows.append((name, dot, name_lbl))
+            self._broker_rows.append((name, dot, name_lbl, color_token))
 
         layout.addSpacing(8)
 
@@ -167,11 +168,11 @@ class Sidebar(QWidget):
         self._refresh_broker_rows()
 
     def _refresh_broker_rows(self):
-        for name, dot, name_lbl in self._broker_rows:
+        for name, dot, name_lbl, color_token in self._broker_rows:
             selected = name in self._selected_brokers
             if selected:
                 dot.setText("●")
-                dot.setStyleSheet(f"color: {self._theme.get('accent')};")
+                dot.setStyleSheet(f"color: {self._theme.get(color_token)};")
                 name_lbl.setFont(font_scale.font(font_scale.SMALL, True))
                 name_lbl.setStyleSheet(f"color: {self._theme.get('text_primary')};")
             else:

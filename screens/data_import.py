@@ -16,6 +16,7 @@ from services.file_reader import (
     count_rows_reliable,
     count_rows_nifty,
     count_rows_external,
+    count_rows_market_profile,
 )
 
 _BROKER_ROW_COUNTERS = {
@@ -23,6 +24,7 @@ _BROKER_ROW_COUNTERS = {
     "ReliableSoftware": count_rows_reliable,
     "NiftyInvest":      count_rows_nifty,
     "ExternalImport":   count_rows_external,
+    "MarketProfile":    count_rows_market_profile,
 }
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
@@ -32,6 +34,7 @@ BROKERS = [
     ("ReliableSoftware", "status_blue",   "Transactions export (.xlsx / .xls)",     (".xlsx", ".xls"),        False),
     ("NiftyInvest",      "status_orange", "Portfolio export (.csv)",                (".csv",),                False),
     ("ExternalImport",   "status_purple", "Any file — columns auto-detected",       (".xlsx", ".xls", ".csv"), False),
+    ("MarketProfile",    "status_pink",   "Market Profile export (.csv / .xlsx)",   (".csv", ".xlsx", ".xls"), False),
 ]
 
 
@@ -470,7 +473,8 @@ class DataImportScreen(QWidget):
     broker_reset       = Signal(str)
     lmv_headers_ready  = Signal(list)       # emitted when LMV loads headers
     lmv_data_ready     = Signal(list, list)  # headers, data rows (list[list])
-    _REQUIRED_BROKERS = {"Sharekhan", "ReliableSoftware", "NiftyInvest", "ExternalImport"}
+    _REQUIRED_BROKERS = {"Sharekhan", "ReliableSoftware", "NiftyInvest",
+                         "ExternalImport", "MarketProfile"}
 
     def __init__(self, controller):
         super().__init__()
@@ -488,7 +492,6 @@ class DataImportScreen(QWidget):
         self._controller.watcher.stopped.connect(self._on_watcher_stopped)
 
     def _build(self):
-        from PySide6.QtWidgets import QGridLayout
         t = self._controller.theme
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
@@ -499,28 +502,36 @@ class DataImportScreen(QWidget):
         layout.addWidget(title)
 
         subtitle = QLabel(
-            "Upload all four files to start the watcher. "
-            "Sharekhan, ReliableSoftware, NiftyInvest, and ExternalImport are all required."
+            "Upload all five files to start the watcher. "
+            "Sharekhan, ReliableSoftware, NiftyInvest, ExternalImport, and "
+            "MarketProfile are all required."
         )
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
 
-        # 2×2 grid of broker cards
-        grid = QGridLayout()
-        grid.setSpacing(16)
+        # Vertical list of broker cards inside a scroll area (5 full-width rows)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        cards_host = QWidget()
+        cards_col = QVBoxLayout(cards_host)
+        cards_col.setContentsMargins(0, 0, 0, 0)
+        cards_col.setSpacing(16)
         self._cards: dict[str, BrokerImportCard] = {}
-        positions = [(0, 0), (0, 1), (1, 0), (1, 1)]
-        for (row, col), (broker, color_token, hint, exts, show_date) in zip(positions, BROKERS):
+        for broker, color_token, hint, exts, show_date in BROKERS:
             card = BrokerImportCard(broker, color_token, hint, t, exts, show_date)
             card.import_done.connect(self.broker_imported)
             card.import_reset.connect(self.broker_reset)
             card.import_done.connect(self._on_card_imported)
             card.import_reset.connect(self._on_card_reset)
             self._cards[broker] = card
-            grid.addWidget(card, row, col)
-        layout.addLayout(grid)
+            cards_col.addWidget(card)
+        cards_col.addStretch()
+        scroll.setWidget(cards_host)
+        layout.addWidget(scroll, 1)
 
         # Bottom button row — Run Watcher
         gen_row = QHBoxLayout()
@@ -536,8 +547,6 @@ class DataImportScreen(QWidget):
         gen_row.addWidget(self._watcher_btn)
 
         layout.addLayout(gen_row)
-
-        layout.addStretch()
 
     def _on_card_imported(self, broker: str, rows: int):
         self._imported_brokers.add(broker)
@@ -602,6 +611,7 @@ class DataImportScreen(QWidget):
         reliable_path  = self._cards["ReliableSoftware"]._selected_file
         nifty_path     = self._cards["NiftyInvest"]._selected_file
         external_path  = self._cards["ExternalImport"]._selected_file
+        market_profile_path = self._cards["MarketProfile"]._selected_file
         expiry_date    = self._cards["Sharekhan"].get_expiry_date()
         # Reuse existing window if already open
         if self._live_viewer is not None and not self._live_viewer.isHidden():
@@ -614,6 +624,7 @@ class DataImportScreen(QWidget):
             SCRIPT_NAME_DATA,
             expiry_date=expiry_date,
             external_path=external_path,
+            market_profile_path=market_profile_path,
             theme=self._controller.theme,
             controller=self._controller,
         )

@@ -8,16 +8,20 @@ Column specs (0-based indices):
                   cols B,E,F,K,L
   NiftyInvest     (.csv):       header at row 1 (idx 0), data from row 2
                   cols A,C
+  MarketProfile   (.csv/.xlsx): header at row 1 (idx 0), data from row 2
+                  cols B(stock key),G(VAH),H(POC),I(VAL)
 """
 
 _SHAREKHAN_COLS  = [2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 25, 26, 27]
 _RELIABLE_COLS   = [1, 4, 5, 10, 11]
 _NIFTY_COLS      = [0, 2]
+_MARKET_PROFILE_COLS = [1, 6, 7, 8]   # B=stock(key), G=VAH, H=POC, I=VAL
 
 # Row index (0-based) of the header row for each broker
 _SHAREKHAN_HEADER_ROW  = 7   # row 8
 _RELIABLE_HEADER_ROW   = 0   # row 1
 _NIFTY_HEADER_ROW      = 0   # row 1
+_MARKET_PROFILE_HEADER_ROW = 0   # row 1
 
 
 def count_rows(path: str, data_start_row: int = 1) -> int:
@@ -53,6 +57,10 @@ def count_rows_reliable(path: str) -> int:
 
 def count_rows_nifty(path: str) -> int:
     return count_rows(path, data_start_row=_NIFTY_HEADER_ROW + 1)
+
+
+def count_rows_market_profile(path: str) -> int:
+    return count_rows(path, data_start_row=_MARKET_PROFILE_HEADER_ROW + 1)
 
 
 def _extract_cols(row: tuple | list, col_indices: list, ncols: int) -> list:
@@ -127,6 +135,10 @@ def read_reliable_software(path: str) -> tuple[list, list]:
 
 def read_nifty_invest(path: str) -> tuple[list, list]:
     return _read_file(path, _NIFTY_COLS, _NIFTY_HEADER_ROW)
+
+
+def read_market_profile(path: str) -> tuple[list, list]:
+    return _read_file(path, _MARKET_PROFILE_COLS, _MARKET_PROFILE_HEADER_ROW)
 
 
 def read_external_import(path: str) -> tuple[list, list]:

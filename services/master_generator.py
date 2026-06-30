@@ -21,7 +21,9 @@ Column positions within each read result (0-based within the extracted cols):
 
 import os
 from datetime import date, timedelta
-from services.file_reader import read_sharekhan, read_reliable_software, read_nifty_invest, read_external_import
+from services.file_reader import (read_sharekhan, read_reliable_software,
+                                  read_nifty_invest, read_external_import,
+                                  read_market_profile)
 
 
 def last_tuesday_of_month(ref_date: date = None) -> date:
@@ -43,10 +45,12 @@ def last_tuesday_of_month(ref_date: date = None) -> date:
 _SK_PK_IDX  = 0   # Sharekhan  → Scrip Name
 _RS_FK_IDX  = 0   # ReliableSoftware → ScripName (full name, needs mapping)
 _NI_FK_IDX  = 0   # NiftyInvest → Symbol
+_MP_FK_IDX  = 0   # MarketProfile → stock (already a symbol, direct match)
 
 # Indices of data columns to include in output (foreign key col excluded)
 _RS_DATA_INDICES = [1, 2, 3, 4]   # skip index 0 (ScripName FK)
 _NI_DATA_INDICES = [1]             # skip index 0 (Symbol FK)
+_MP_DATA_INDICES = [1, 2, 3]       # skip index 0 (stock FK): VAH, POC, VAL
 
 
 def _build_script_name_lookup(script_name_data: list) -> dict:
@@ -91,6 +95,7 @@ def generate_master(
     script_name_data: list,   # [(full_name, symbol), ...] from config tab 2
     expiry_date: date = None,  # expiry date to strip from Sharekhan Scrip Names
     external_path: str = None,
+    market_profile_path: str = None,
 ) -> None:
     # --- Read all sources ---
     sk_headers, sk_rows = read_sharekhan(sharekhan_path)
@@ -100,6 +105,10 @@ def generate_master(
         ext_headers, ext_rows = read_external_import(external_path)
     else:
         ext_headers, ext_rows = [], []
+    if market_profile_path:
+        mp_headers, mp_rows = read_market_profile(market_profile_path)
+    else:
+        mp_headers, mp_rows = [], []
 
     # --- Strip expiry date suffix from Sharekhan Scrip Names ---
     if expiry_date is not None:
@@ -142,6 +151,13 @@ def generate_master(
             if symbol:
                 ext_lookup[_normalise(symbol).upper()] = row
 
+    # MarketProfile: stock (index 0) is already a symbol → direct match.
+    mp_lookup: dict = {}
+    for row in mp_rows:
+        key = _normalise(row[_MP_FK_IDX]).upper()
+        if key:
+            mp_lookup[key] = row
+
     # --- Build merged headers ---
     out_headers = list(sk_headers)
     for i in _RS_DATA_INDICES:
@@ -150,6 +166,8 @@ def generate_master(
         out_headers.append(ni_headers[i] if i < len(ni_headers) else "")
     for i in ext_data_indices:
         out_headers.append(ext_headers[i] if i < len(ext_headers) else "")
+    for i in _MP_DATA_INDICES:
+        out_headers.append(mp_headers[i] if i < len(mp_headers) else "")
 
     # --- Build merged rows ---
     merged_rows = []
@@ -169,6 +187,10 @@ def generate_master(
         ext_row = ext_lookup.get(pk)
         for i in ext_data_indices:
             out_row.append(ext_row[i] if ext_row and i < len(ext_row) else None)
+
+        mp_row = mp_lookup.get(pk)
+        for i in _MP_DATA_INDICES:
+            out_row.append(mp_row[i] if mp_row and i < len(mp_row) else None)
 
         merged_rows.append(out_row)
 

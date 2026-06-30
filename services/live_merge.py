@@ -23,11 +23,13 @@ class LiveDataReader:
     def __init__(self, sharekhan_path, reliable_path, nifty_path,
                  script_name_data, expiry_date=None,
                  use_com=False, slow_interval_s: float = 1.0,
-                 clock=time.monotonic, external_path=None):
+                 clock=time.monotonic, external_path=None,
+                 market_profile_path=None):
         self._sharekhan_path   = sharekhan_path
         self._reliable_path    = reliable_path
         self._nifty_path       = nifty_path
         self._external_path    = external_path
+        self._market_profile_path = market_profile_path
         self._script_name_data = script_name_data
         self._expiry_date      = expiry_date
         self._use_com          = use_com
@@ -38,6 +40,7 @@ class LiveDataReader:
         self._rs_cache = None
         self._ni_cache = None
         self._ext_cache = None
+        self._mp_cache = None
         self._slow_stamp = None   # monotonic time of last slow refresh
 
         # Cached symbol-resolution map (rebuilt only when script data changes).
@@ -89,7 +92,8 @@ class LiveDataReader:
 
     def _read_slow_sources(self, force: bool = False):
         """Refresh Reliable + Nifty + External if the slow interval has elapsed."""
-        from services.file_reader import read_nifty_invest, read_external_import
+        from services.file_reader import (read_nifty_invest, read_external_import,
+                                          read_market_profile)
 
         now = self._clock()
         due = (
@@ -102,6 +106,8 @@ class LiveDataReader:
             self._ni_cache  = read_nifty_invest(self._nifty_path)
             self._ext_cache = (read_external_import(self._external_path)
                                if self._external_path else ([], []))
+            self._mp_cache  = (read_market_profile(self._market_profile_path)
+                               if self._market_profile_path else ([], []))
             self._slow_stamp = now
 
     def read_merged(self, force_slow: bool = False) -> tuple[list, list[list]]:
@@ -114,8 +120,8 @@ class LiveDataReader:
         from services.master_generator import (
             _build_script_name_lookup, _normalise,
             _strip_rolling_suffix,
-            _RS_DATA_INDICES, _NI_DATA_INDICES,
-            _SK_PK_IDX, _RS_FK_IDX, _NI_FK_IDX,
+            _RS_DATA_INDICES, _NI_DATA_INDICES, _MP_DATA_INDICES,
+            _SK_PK_IDX, _RS_FK_IDX, _NI_FK_IDX, _MP_FK_IDX,
         )
 
         sk_headers, sk_rows = self._read_sharekhan()
@@ -123,6 +129,7 @@ class LiveDataReader:
         rs_headers, rs_rows = self._rs_cache
         ni_headers, ni_rows = self._ni_cache
         ext_headers, ext_rows = self._ext_cache if self._ext_cache else ([], [])
+        mp_headers, mp_rows = self._mp_cache if self._mp_cache else ([], [])
 
         # Strip expiry date suffix from Sharekhan Scrip Names
         if self._expiry_date is not None:
@@ -161,6 +168,13 @@ class LiveDataReader:
                 if sym:
                     ext_lookup[_normalise(sym).upper()] = row
 
+        # MarketProfile: stock (index 0) is already a symbol → direct match.
+        mp_lookup = {}
+        for row in mp_rows:
+            key = _normalise(row[_MP_FK_IDX]).upper()
+            if key:
+                mp_lookup[key] = row
+
         out_headers = list(sk_headers)
         for i in _RS_DATA_INDICES:
             out_headers.append(rs_headers[i] if i < len(rs_headers) else "")
@@ -168,6 +182,8 @@ class LiveDataReader:
             out_headers.append(ni_headers[i] if i < len(ni_headers) else "")
         for i in ext_data_indices:
             out_headers.append(ext_headers[i] if i < len(ext_headers) else "")
+        for i in _MP_DATA_INDICES:
+            out_headers.append(mp_headers[i] if i < len(mp_headers) else "")
 
         merged = []
         for sk_row in sk_rows:
@@ -182,6 +198,9 @@ class LiveDataReader:
             ext_row = ext_lookup.get(pk)
             for i in ext_data_indices:
                 out_row.append(ext_row[i] if ext_row and i < len(ext_row) else None)
+            mp_row = mp_lookup.get(pk)
+            for i in _MP_DATA_INDICES:
+                out_row.append(mp_row[i] if mp_row and i < len(mp_row) else None)
             merged.append(out_row)
 
         return out_headers, merged

@@ -73,6 +73,7 @@ BROKER_COLORS = [
     ("ReliableSoftware", "status_blue"),
     ("NiftyInvest",      "status_orange"),
     ("ExternalImport",   "status_purple"),
+    ("MarketProfile",    "status_pink"),
 ]
 
 
@@ -116,7 +117,7 @@ class DashboardScreen(QWidget):
             ("TOTAL FILES IMPORTED",  "0",   "file.svg"),
             ("TOTAL ROWS PROCESSED",  "0",   "database.svg"),
             ("IMPORT ERRORS",         "0",   "error.svg"),
-            ("BROKER SOURCES ACTIVE", "0/4", "folder.svg"),
+            ("BROKER SOURCES ACTIVE", f"0/{len(BROKER_COLORS)}", "folder.svg"),
         ]
         for label, value, icon in stats:
             card = StatCard(label, value, icon, t)
@@ -369,5 +370,5 @@ class DashboardScreen(QWidget):
         self._stat_cards[0].set_value(str(total_files))
         self._stat_cards[1].set_value(f"{total_rows:,}")
         self._stat_cards[2].set_value("0")
-        self._stat_cards[3].set_value(f"{total_files}/4")
+        self._stat_cards[3].set_value(f"{total_files}/{len(BROKER_COLORS)}")
         self._total_lbl.setText(f"{total_files} total")

@@ -25,10 +25,10 @@ def test_has_watcher_button(screen):
     assert any("Watcher" in t for t in buttons)
 
 
-def test_has_four_broker_cards(screen):
+def test_has_five_broker_cards(screen):
     from PySide6.QtWidgets import QPushButton
     buttons = [b.text() for b in screen.findChildren(QPushButton)]
-    assert sum(1 for t in buttons if "Remove" in t) == 4
+    assert sum(1 for t in buttons if "Remove" in t) == 5
 
 
 def test_watcher_button_initially_disabled(screen):

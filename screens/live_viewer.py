@@ -505,12 +505,14 @@ class LiveViewerWindow(QWidget):
     def __init__(self, sharekhan_path: str, reliable_path: str,
                  nifty_path: str, script_name_data: list,
                  expiry_date=None, external_path=None,
+                 market_profile_path=None,
                  theme=None, controller=None, parent=None):
         super().__init__(parent)
         self._sharekhan_path   = sharekhan_path
         self._reliable_path    = reliable_path
         self._nifty_path       = nifty_path
         self._external_path    = external_path
+        self._market_profile_path = market_profile_path
         self._script_name_data = script_name_data
         self._expiry_date      = expiry_date
         self._theme            = theme
@@ -686,6 +688,7 @@ class LiveViewerWindow(QWidget):
             self._sharekhan_path, self._reliable_path, self._nifty_path,
             self._script_name_data, expiry_date=self._expiry_date,
             use_com=self._use_com, external_path=self._external_path,
+            market_profile_path=self._market_profile_path,
         )
 
         # Worker thread: all polled reads/merges run here so a slow read never
