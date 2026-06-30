@@ -113,6 +113,7 @@ class LiveDataReader:
         """
         from services.master_generator import (
             _build_script_name_lookup, _normalise, _strip_date_suffix,
+            _strip_rolling_suffix,
             _RS_DATA_INDICES, _NI_DATA_INDICES,
             _SK_PK_IDX, _RS_FK_IDX, _NI_FK_IDX,
         )
@@ -137,7 +138,8 @@ class LiveDataReader:
 
         rs_lookup = {}
         for row in rs_rows:
-            sym = name_to_symbol.get(_normalise(row[_RS_FK_IDX]).lower())
+            full_name = _strip_rolling_suffix(_normalise(row[_RS_FK_IDX]))
+            sym = name_to_symbol.get(full_name.lower())
             if sym:
                 rs_lookup[_normalise(sym).upper()] = row
 

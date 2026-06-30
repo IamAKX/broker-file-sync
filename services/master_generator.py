@@ -72,6 +72,26 @@ def _strip_date_suffix(name: str) -> str:
     return _DATE_SUFFIX_RE.sub("", name).strip()
 
 
+def _strip_rolling_suffix(name: str) -> str:
+    """
+    Strip a trailing rolling-expiry suffix from a ReliableSoftware ScripName.
+
+    The suffix looks like ``.rolling.12D`` (or .11D, .10D, …) — i.e. the two
+    dot-separated segments after the last two dots. We remove everything from
+    the second-last dot onward, so any rolling duration is handled on the fly:
+
+        "ABB LTD.rolling.12D"          -> "ABB LTD"
+        "ADANIENT.rolling.11D"         -> "ADANIENT"
+        "BIOCON LIMITED..rolling.12D"  -> "BIOCON LIMITED."
+
+    Names with fewer than two dots are returned unchanged.
+    """
+    s = str(name).strip() if name is not None else ""
+    if s.count(".") < 2:
+        return s
+    return s.rsplit(".", 2)[0]
+
+
 def generate_master(
     sharekhan_path: str,
     reliable_path: str,
@@ -105,7 +125,7 @@ def generate_master(
     # ReliableSoftware: resolve full name → symbol first
     rs_lookup: dict[str, list] = {}
     for row in rs_rows:
-        full_name = _normalise(row[_RS_FK_IDX])
+        full_name = _strip_rolling_suffix(_normalise(row[_RS_FK_IDX]))
         symbol = name_to_symbol.get(full_name.lower())
         if symbol:
             key = _normalise(symbol).upper()

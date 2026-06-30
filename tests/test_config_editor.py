@@ -43,9 +43,11 @@ def theme(qapp):
     return AppController(qapp).theme
 
 
-def test_main_column_name_tab_uses_actual_renamed_pairs(theme):
+def test_main_column_name_tab_uses_actual_renamed_pairs(theme, tmp_path, monkeypatch):
     # Regression: the "Main Column Name" tab must hold (Actual, Renamed) pairs,
     # not the single-column order data.
+    from services import config_store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "c.json"))
     from config_defaults import MAIN_COLUMN_NAME_DATA
     from screens.config_editor import ConfigTabWidget
     tab = ConfigTabWidget(["Actual", "Renamed"], MAIN_COLUMN_NAME_DATA, theme,
