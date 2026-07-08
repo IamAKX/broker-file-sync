@@ -23,7 +23,25 @@ def show_api_error(theme, parent, exc: Exception) -> None:
     box.setIcon(QMessageBox.Icon.Critical)
     box.setWindowTitle(title)
     box.setText(message)
-    box.setStyleSheet(
-        f"QMessageBox {{ background: {theme.get('background')}; color: {theme.get('text_primary')}; }}"
-    )
+    box.setStyleSheet(f"""
+        QMessageBox {{
+            background: {theme.get('background')};
+            color: {theme.get('text_primary')};
+        }}
+        QMessageBox QLabel {{
+            color: {theme.get('text_primary')};
+            background: transparent;
+        }}
+        QMessageBox QPushButton {{
+            background: {theme.get('button_bg')};
+            color: {theme.get('text_primary')};
+            border: 1px solid {theme.get('border')};
+            border-radius: 4px;
+            padding: 6px 14px;
+        }}
+        QMessageBox QPushButton:hover {{
+            border-color: {theme.get('accent')};
+            color: {theme.get('accent')};
+        }}
+    """)
     box.exec()
