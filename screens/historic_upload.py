@@ -9,8 +9,10 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtGui import QPainter, QColor, QBrush
 
+from config_defaults import SCRIPT_NAME_DATA
+from services import config_store
 from services.file_reader import read_historic_sheet
-from services.master_generator import _strip_rolling_suffix
+from services.master_generator import _build_script_name_lookup, _strip_rolling_suffix
 from api import historic_api
 from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
@@ -338,18 +340,21 @@ class HistoricUploadScreen(QWidget):
 
         scripname_idx = self._headers.index("ScripName") if "ScripName" in self._headers else None
         selected_indices = self._checkbox_col_indices_selected()
+        script_name_data = config_store.load_tab("script_name", SCRIPT_NAME_DATA)
+        name_to_symbol = _build_script_name_lookup(script_name_data)
 
         rows_payload = []
         for row in self._rows:
             raw_name = str(row[scripname_idx]) if scripname_idx is not None and scripname_idx < len(row) else ""
-            symbol = _strip_rolling_suffix(raw_name) or raw_name
+            display_name = _strip_rolling_suffix(raw_name) or raw_name
+            symbol = name_to_symbol.get(display_name.lower()) or display_name
             metrics = {}
             for idx in selected_indices:
                 if idx < len(row):
                     metrics[self._headers[idx]] = row[idx]
             rows_payload.append({
                 "symbol": symbol,
-                "display_name": raw_name or None,
+                "display_name": display_name or None,
                 "metrics": metrics,
             })
 
