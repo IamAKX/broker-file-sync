@@ -12,6 +12,10 @@ _TIMEOUT_SECONDS = 15
 class ApiClient:
     def __init__(self):
         self._session = requests.Session()
+        self._on_session_expired = None
+
+    def set_session_expired_callback(self, callback) -> None:
+        self._on_session_expired = callback
 
     def get(self, path: str, params: dict | None = None, auth: bool = True) -> dict:
         return self._request("GET", path, params=params, auth=auth)
@@ -78,6 +82,7 @@ class ApiClient:
             return False
         if not response.ok:
             token_manager.clear()
+            self._notify_session_expired()
             return False
         try:
             body = response.json()
@@ -85,9 +90,17 @@ class ApiClient:
             refresh_token_value = body["refresh_token"]
         except (requests.exceptions.JSONDecodeError, KeyError):
             return False
-        was_persisted = token_manager.get_refresh_token() is not None
+        was_persisted = token_manager.is_persisted()
         token_manager.set(access_token, refresh_token_value, persist=was_persisted)
         return True
+
+    def _notify_session_expired(self) -> None:
+        if self._on_session_expired is None:
+            return
+        try:
+            self._on_session_expired()
+        except Exception:
+            pass
 
     @staticmethod
     def _parse_error(response: requests.Response) -> tuple[str, str]:

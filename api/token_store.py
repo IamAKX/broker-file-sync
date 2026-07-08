@@ -15,10 +15,12 @@ class TokenManager:
     def __init__(self):
         self._access_token: str | None = None
         self._refresh_token: str | None = None
+        self._persist: bool = False
 
     def set(self, access_token: str, refresh_token: str, persist: bool) -> None:
         self._access_token = access_token
         self._refresh_token = refresh_token
+        self._persist = persist
         if persist:
             self._save_to_disk()
         else:
@@ -33,9 +35,13 @@ class TokenManager:
     def is_logged_in(self) -> bool:
         return self._access_token is not None
 
+    def is_persisted(self) -> bool:
+        return self._persist
+
     def clear(self) -> None:
         self._access_token = None
         self._refresh_token = None
+        self._persist = False
         self._delete_from_disk()
 
     def load_persisted(self) -> bool:
@@ -50,6 +56,7 @@ class TokenManager:
                 return False
             self._access_token = access
             self._refresh_token = refresh
+            self._persist = True
             return True
         except Exception:
             return False

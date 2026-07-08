@@ -1,6 +1,7 @@
 from PySide6.QtWidgets import QApplication
 from theme import ThemeManager
 from api.token_store import token_manager
+from api.client import api_client
 
 
 class AppController:
@@ -13,6 +14,7 @@ class AppController:
         self.output_dir = ""    # set from Profile → Preferences
         from services.watcher import FileWatcher
         self.watcher = FileWatcher()
+        api_client.set_session_expired_callback(self.show_login)
 
     def start(self):
         self.theme.apply()   # re-apply now that primaryScreen() is available
@@ -36,6 +38,14 @@ class AppController:
 
     def show_login(self):
         from screens.login import LoginScreen
+        from api import auth_api
+        from api.exceptions import ApiError, NetworkError
+        refresh_token = token_manager.get_refresh_token()
+        if refresh_token:
+            try:
+                auth_api.logout(refresh_token)
+            except (ApiError, NetworkError):
+                pass  # best-effort server-side revoke; local logout proceeds regardless
         token_manager.clear()
         if self._main_window:
             self._main_window.hide()
