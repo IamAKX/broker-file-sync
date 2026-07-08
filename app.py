@@ -36,6 +36,7 @@ class AppController:
 
     def show_login(self):
         from screens.login import LoginScreen
+        token_manager.clear()
         if self._main_window:
             self._main_window.hide()
         if self._signup:
