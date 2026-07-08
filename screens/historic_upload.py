@@ -499,7 +499,10 @@ class HistoricUploadScreen(QWidget):
 
         layout.addStretch()
 
-        self._refresh_browse_availability()
+        # Defer the initial availability fetch (a blocking network call) so it
+        # doesn't hold up widget construction — this can run during MainWindow
+        # construction on the auto-login path, before any window is visible.
+        QTimer.singleShot(0, self._refresh_browse_availability)
         self._update_view_btn_enabled()
         self._browse_refresh_calendar = self._refresh_browse_availability
         return tab
@@ -526,8 +529,12 @@ class HistoricUploadScreen(QWidget):
         date_to = date(year, month, last_day)
         try:
             result = historic_api.get_availability(date_from, date_to)
-        except (ApiError, NetworkError) as exc:
-            if show_popup_on_error:
+            days = {
+                date.fromisoformat(d["trade_date"]).day
+                for d in result["dates"] if d["has_data"]
+            }
+        except (ApiError, NetworkError, KeyError, ValueError, TypeError) as exc:
+            if show_popup_on_error and isinstance(exc, (ApiError, NetworkError)):
                 show_api_error(self._controller.theme, self, exc)
             elif hasattr(self, "_browse_status_lbl"):
                 t = self._controller.theme
@@ -537,10 +544,6 @@ class HistoricUploadScreen(QWidget):
             self._available_days = set()
             self._update_view_btn_enabled()
             return
-        days = {
-            date.fromisoformat(d["trade_date"]).day
-            for d in result["dates"] if d["has_data"]
-        }
         self._browse_calendar.set_available_days(days)
         self._available_days = days
         self._update_view_btn_enabled()
@@ -557,10 +560,23 @@ class HistoricUploadScreen(QWidget):
         t = self._controller.theme
         try:
             result = historic_api.get_snapshot(self._selected_browse_date)
+            stocks = result.get("stocks", [])
+            if stocks:
+                metric_keys = sorted({k for s in stocks for k in s.get("metrics", {})})
+                headers = ["Symbol", "Display Name"] + metric_keys
+                rows = [
+                    [s["symbol"], s.get("display_name") or ""] +
+                    [s.get("metrics", {}).get(k) for k in metric_keys]
+                    for s in stocks
+                ]
         except (ApiError, NetworkError) as exc:
             show_api_error(t, self, exc)
             return
-        stocks = result.get("stocks", [])
+        except (KeyError, ValueError, TypeError):
+            self._browse_status_lbl.setText("Couldn't parse response from server.")
+            self._browse_status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
+            return
+
         if not stocks:
             self._browse_status_lbl.setText(
                 f"No data saved for {self._selected_browse_date.strftime('%d-%b-%Y')}."
@@ -568,13 +584,6 @@ class HistoricUploadScreen(QWidget):
             self._browse_status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
             return
 
-        metric_keys = sorted({k for s in stocks for k in s.get("metrics", {})})
-        headers = ["Symbol", "Display Name"] + metric_keys
-        rows = [
-            [s["symbol"], s.get("display_name") or ""] +
-            [s.get("metrics", {}).get(k) for k in metric_keys]
-            for s in stocks
-        ]
         viewer = HistoricDataViewer(headers, rows, self._selected_browse_date.strftime("%d-%b-%Y"), theme=t)
         viewer.show()
         self._viewers.append(viewer)
