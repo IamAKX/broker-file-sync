@@ -52,6 +52,7 @@ class MainWindow(QMainWindow):
         from screens.notifications import NotificationsScreen
         from screens.profile import ProfileScreen
         from screens.strategy_builder import StrategyBuilderScreen
+        from screens.historic_upload import HistoricUploadScreen
 
         dashboard        = DashboardScreen(self._controller)
         data_import      = DataImportScreen(self._controller)
@@ -83,6 +84,7 @@ class MainWindow(QMainWindow):
             ("strategy_builder", strategy_builder),
             ("notifications",    NotificationsScreen(self._controller)),
             ("profile",          ProfileScreen(self._controller)),
+            ("historic_upload",  HistoricUploadScreen(self._controller)),
         ]
         for name, widget in screens:
             self._screens[name] = widget
@@ -125,3 +127,6 @@ class MainWindow(QMainWindow):
         strategy_builder = self._screens.get("strategy_builder")
         if strategy_builder is not None:
             strategy_builder.refresh_theme()
+        historic_upload = self._screens.get("historic_upload")
+        if historic_upload is not None:
+            historic_upload.refresh_theme()

@@ -1,5 +1,8 @@
+import os
 from PySide6.QtWidgets import QApplication
 import font_scale
+
+_CHECK_ICON = os.path.join(os.path.dirname(__file__), "assets", "icons", "check.svg").replace("\\", "/")
 
 DARK = {
     "background":    "#0d1117",
@@ -181,10 +184,22 @@ class ThemeManager:
             }}
             QCheckBox {{
                 color: {p['text_primary']};
+                spacing: 8px;
+            }}
+            QCheckBox::indicator {{
+                width: 15px;
+                height: 15px;
+                border: 1px solid {p['text_secondary']};
+                border-radius: 3px;
+                background: {p['input_bg']};
+            }}
+            QCheckBox::indicator:hover {{
+                border: 1px solid {p['accent']};
             }}
             QCheckBox::indicator:checked {{
                 background: {p['accent']};
                 border: 1px solid {p['accent']};
+                image: url({_CHECK_ICON});
             }}
             QDialog {{
                 background: {p['background']};

@@ -175,3 +175,8 @@ def read_external_import(path: str) -> tuple[list, list]:
 
 def count_rows_external(path: str) -> int:
     return count_rows(path, data_start_row=1)
+
+
+def read_historic_upload(path: str) -> tuple[list, list]:
+    """Read all columns from a historic-upload file (xlsx/xls/csv), no fixed template."""
+    return read_external_import(path)
