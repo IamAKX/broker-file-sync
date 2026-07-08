@@ -508,12 +508,18 @@ class HistoricUploadScreen(QWidget):
         today = date.today()
         year = self._browse_calendar.yearShown() or today.year
         month = self._browse_calendar.monthShown() or today.month
-        self._fetch_and_apply_availability(year, month)
+        # Called during initial widget construction (and after a save, via the
+        # _browse_refresh_calendar hook) — a blocking modal popup here would fire
+        # before the user has done anything (or right after a successful save),
+        # so failures are reported quietly instead of via show_api_error().
+        self._fetch_and_apply_availability(year, month, show_popup_on_error=False)
 
     def _on_browse_page_changed(self, year, month):
+        # User-initiated (navigating the calendar month) — a blocking modal on
+        # failure is acceptable here since the screen is already visible.
         self._fetch_and_apply_availability(year, month)
 
-    def _fetch_and_apply_availability(self, year: int, month: int):
+    def _fetch_and_apply_availability(self, year: int, month: int, show_popup_on_error: bool = True):
         import calendar as _cal
         last_day = _cal.monthrange(year, month)[1]
         date_from = date(year, month, 1)
@@ -521,7 +527,12 @@ class HistoricUploadScreen(QWidget):
         try:
             result = historic_api.get_availability(date_from, date_to)
         except (ApiError, NetworkError) as exc:
-            show_api_error(self._controller.theme, self, exc)
+            if show_popup_on_error:
+                show_api_error(self._controller.theme, self, exc)
+            elif hasattr(self, "_browse_status_lbl"):
+                t = self._controller.theme
+                self._browse_status_lbl.setText("Couldn't load availability for this month.")
+                self._browse_status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
             self._browse_calendar.set_available_days(set())
             self._available_days = set()
             self._update_view_btn_enabled()
