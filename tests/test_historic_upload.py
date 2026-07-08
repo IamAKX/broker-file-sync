@@ -88,3 +88,53 @@ def test_historic_data_viewer_populates_table(qapp):
     assert viewer._table.columnCount() == 2
     assert viewer._table.item(0, 0).text() == "INFY"
     assert viewer._table.item(1, 1).text() == "3500"
+
+
+def test_historic_viewer_symbol_search_filters_rows(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Symbol", "Display Name", "Close"],
+        [["ABB", "ABB LTD", "6832.5"], ["INFY", "INFOSYS LTD", "1800"]],
+        "05-Jul-2026",
+    )
+    viewer._search_box.setText("abb")
+    assert viewer._table.isRowHidden(0) is False
+    assert viewer._table.isRowHidden(1) is True
+
+    viewer._search_box.setText("")
+    assert viewer._table.isRowHidden(0) is False
+    assert viewer._table.isRowHidden(1) is False
+
+
+def test_historic_viewer_column_filter_hides_column(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Symbol", "Display Name", "Close"],
+        [["ABB", "ABB LTD", "6832.5"]],
+        "05-Jul-2026",
+    )
+    viewer._apply_col_filter({0, 2})
+    assert viewer._table.isColumnHidden(1) is True
+    assert viewer._table.isColumnHidden(0) is False
+    assert viewer._table.isColumnHidden(2) is False
+
+
+def test_historic_viewer_symbol_column_always_visible(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Symbol", "Display Name", "Close"],
+        [["ABB", "ABB LTD", "6832.5"]],
+        "05-Jul-2026",
+    )
+    viewer._apply_col_filter({2})
+    assert viewer._table.isColumnHidden(0) is False
+
+
+def test_historic_viewer_header_sections_movable(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Symbol", "Display Name", "Close"],
+        [["ABB", "ABB LTD", "6832.5"]],
+        "05-Jul-2026",
+    )
+    assert viewer._table.horizontalHeader().sectionsMovable() is True
