@@ -9,7 +9,7 @@ from components.column_filter_popup import ColumnFilterPopup
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QFrame,
-    QLineEdit, QScrollArea, QCheckBox, QSizePolicy, QComboBox
+    QCheckBox, QSizePolicy, QComboBox
 )
 from PySide6.QtCore import (
     Qt, QTimer, QFileSystemWatcher, Signal, QObject, QThread
