@@ -367,7 +367,7 @@ class HistoricUploadScreen(QWidget):
 
         t = self._controller.theme
         self._status_lbl.setText(
-            f"Saved {result['values_upserted']} values for "
+            f"Saved {result.get('values_upserted', 0)} values for "
             f"{self._upload_date.strftime('%d-%b-%Y')}."
         )
         self._status_lbl.setStyleSheet(f"color: {t.get('accent')};")
