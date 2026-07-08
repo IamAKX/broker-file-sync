@@ -11,7 +11,6 @@ from PySide6.QtGui import QPainter, QColor, QBrush
 
 from services.file_reader import read_historic_sheet
 from services.master_generator import _strip_rolling_suffix
-from services import historic_store
 from api import historic_api
 from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
@@ -383,6 +382,8 @@ class HistoricUploadScreen(QWidget):
         self._selected_file = None
         self._headers = []
         self._rows = []
+        self._row_dates = []
+        self._structural_cols = set()
         self._checkboxes = []
         self._file_lbl.setText("No file selected")
         self._file_lbl.setStyleSheet(f"color: {self._controller.theme.get('text_secondary')};")
@@ -507,13 +508,28 @@ class HistoricUploadScreen(QWidget):
         today = date.today()
         year = self._browse_calendar.yearShown() or today.year
         month = self._browse_calendar.monthShown() or today.month
-        days = historic_store.fetch_available_dates(year, month)
-        self._browse_calendar.set_available_days(days)
-        self._available_days = days
-        self._update_view_btn_enabled()
+        self._fetch_and_apply_availability(year, month)
 
     def _on_browse_page_changed(self, year, month):
-        days = historic_store.fetch_available_dates(year, month)
+        self._fetch_and_apply_availability(year, month)
+
+    def _fetch_and_apply_availability(self, year: int, month: int):
+        import calendar as _cal
+        last_day = _cal.monthrange(year, month)[1]
+        date_from = date(year, month, 1)
+        date_to = date(year, month, last_day)
+        try:
+            result = historic_api.get_availability(date_from, date_to)
+        except (ApiError, NetworkError) as exc:
+            show_api_error(self._controller.theme, self, exc)
+            self._browse_calendar.set_available_days(set())
+            self._available_days = set()
+            self._update_view_btn_enabled()
+            return
+        days = {
+            date.fromisoformat(d["trade_date"]).day
+            for d in result["dates"] if d["has_data"]
+        }
         self._browse_calendar.set_available_days(days)
         self._available_days = days
         self._update_view_btn_enabled()
@@ -527,14 +543,27 @@ class HistoricUploadScreen(QWidget):
         self._view_btn.setEnabled(self._selected_browse_date.day in days)
 
     def _on_view_clicked(self):
-        date_str = self._selected_browse_date.isoformat()
-        result = historic_store.fetch_historic_data(date_str)
         t = self._controller.theme
-        if result is None:
-            self._browse_status_lbl.setText(f"No data saved for {self._selected_browse_date.strftime('%d-%b-%Y')}.")
+        try:
+            result = historic_api.get_snapshot(self._selected_browse_date)
+        except (ApiError, NetworkError) as exc:
+            show_api_error(t, self, exc)
+            return
+        stocks = result.get("stocks", [])
+        if not stocks:
+            self._browse_status_lbl.setText(
+                f"No data saved for {self._selected_browse_date.strftime('%d-%b-%Y')}."
+            )
             self._browse_status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
             return
-        headers, rows = result
+
+        metric_keys = sorted({k for s in stocks for k in s.get("metrics", {})})
+        headers = ["Symbol", "Display Name"] + metric_keys
+        rows = [
+            [s["symbol"], s.get("display_name") or ""] +
+            [s.get("metrics", {}).get(k) for k in metric_keys]
+            for s in stocks
+        ]
         viewer = HistoricDataViewer(headers, rows, self._selected_browse_date.strftime("%d-%b-%Y"), theme=t)
         viewer.show()
         self._viewers.append(viewer)
