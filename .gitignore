@@ -72,3 +72,4 @@ historic_data.json
 # Superpowers internal docs
 docs/superpowers/
 
+auth_session.json
