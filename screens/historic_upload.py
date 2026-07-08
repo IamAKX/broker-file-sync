@@ -9,8 +9,12 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtGui import QPainter, QColor, QBrush
 
-from services.file_reader import read_historic_upload
+from services.file_reader import read_historic_sheet
+from services.master_generator import _strip_rolling_suffix
 from services import historic_store
+from api import historic_api
+from api.exceptions import ApiError, NetworkError
+from components.error_popup import show_api_error
 from screens.historic_viewer import HistoricDataViewer
 
 
@@ -121,6 +125,8 @@ class HistoricUploadScreen(QWidget):
         self._selected_file = None
         self._headers = []
         self._rows = []
+        self._row_dates = []
+        self._structural_cols = set()   # header indices excluded from metric checkboxes
         self._checkboxes = []
         self._upload_date = date.today()
         self._viewers = []
@@ -264,7 +270,7 @@ class HistoricUploadScreen(QWidget):
         if not path:
             return
         try:
-            headers, rows = read_historic_upload(path)
+            headers, rows, row_dates = read_historic_sheet(path)
         except Exception as exc:
             self._status_lbl.setText(f"Failed to read file: {exc}")
             self._status_lbl.setStyleSheet(f"color: {self._controller.theme.get('status_red')};")
@@ -272,6 +278,10 @@ class HistoricUploadScreen(QWidget):
         self._selected_file = path
         self._headers = headers
         self._rows = rows
+        self._row_dates = row_dates
+        self._structural_cols = {
+            i for i, h in enumerate(headers) if h in ("ScripName", "DataTime")
+        }
         self._file_lbl.setText(f"Selected: {os.path.basename(path)} ({len(rows)} rows)")
         self._file_lbl.setStyleSheet(f"color: {self._controller.theme.get('accent')};")
         self._status_lbl.setText("")
@@ -285,14 +295,17 @@ class HistoricUploadScreen(QWidget):
             if w is not None:
                 w.deleteLater()
         self._checkboxes = []
-        t = self._controller.theme
-        for header in self._headers:
+        self._checkbox_col_indices = []
+        for i, header in enumerate(self._headers):
+            if i in self._structural_cols:
+                continue
             cb = QCheckBox(str(header) if header else "(unnamed)")
             cb.setChecked(True)
             cb.setFont(font_scale.font(font_scale.SMALL, False))
             cb.stateChanged.connect(self._on_column_toggled)
             self._columns_layout.addWidget(cb)
             self._checkboxes.append(cb)
+            self._checkbox_col_indices.append(i)
         self._columns_toggle.setChecked(True)
         self._columns_scroll.setVisible(True)
         self._set_columns_toggle_text()
@@ -307,15 +320,64 @@ class HistoricUploadScreen(QWidget):
         self._save_btn.setEnabled(has_file and has_column)
 
     def _on_save(self):
-        selected_indices = [i for i, cb in enumerate(self._checkboxes) if cb.isChecked()]
-        filtered_headers = [self._headers[i] for i in selected_indices]
-        filtered_rows = [[row[i] if i < len(row) else None for i in selected_indices] for row in self._rows]
-        date_str = self._upload_date.isoformat()
-        historic_store.save_historic_upload(date_str, filtered_headers, filtered_rows)
+        mismatched_rows = [
+            i + 1 for i, d in enumerate(self._row_dates)
+            if d is not None and d != self._upload_date
+        ]
+        if mismatched_rows:
+            t = self._controller.theme
+            first = mismatched_rows[0]
+            sheet_date = self._row_dates[first - 1]
+            self._status_lbl.setText(
+                f"Sheet date ({sheet_date.strftime('%d-%b-%Y')}) doesn't match "
+                f"selected date ({self._upload_date.strftime('%d-%b-%Y')}). "
+                f"Row {first}"
+                + (f" (+{len(mismatched_rows) - 1} more)" if len(mismatched_rows) > 1 else "") + "."
+            )
+            self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
+            return
+
+        scripname_idx = self._headers.index("ScripName") if "ScripName" in self._headers else None
+        selected_indices = self._checkbox_col_indices_selected()
+
+        rows_payload = []
+        for row in self._rows:
+            raw_name = str(row[scripname_idx]) if scripname_idx is not None and scripname_idx < len(row) else ""
+            symbol = _strip_rolling_suffix(raw_name) or raw_name
+            metrics = {}
+            for idx in selected_indices:
+                if idx < len(row):
+                    metrics[self._headers[idx]] = row[idx]
+            rows_payload.append({
+                "symbol": symbol,
+                "display_name": raw_name or None,
+                "metrics": metrics,
+            })
+
+        self._save_btn.setEnabled(False)
+        self._save_btn.setText("Saving...")
+        try:
+            result = historic_api.upload_daily(self._upload_date, rows_payload)
+        except (ApiError, NetworkError) as exc:
+            show_api_error(self._controller.theme, self, exc)
+            return
+        finally:
+            self._save_btn.setEnabled(True)
+            self._save_btn.setText("Save")
+
         t = self._controller.theme
-        self._status_lbl.setText(f"Saved {len(filtered_rows)} rows for {self._upload_date.strftime('%d-%b-%Y')}.")
+        self._status_lbl.setText(
+            f"Saved {result['values_upserted']} values for "
+            f"{self._upload_date.strftime('%d-%b-%Y')}."
+        )
         self._status_lbl.setStyleSheet(f"color: {t.get('accent')};")
         self._reset_upload_form()
+
+    def _checkbox_col_indices_selected(self) -> list:
+        return [
+            idx for cb, idx in zip(self._checkboxes, self._checkbox_col_indices)
+            if cb.isChecked()
+        ]
 
     def _reset_upload_form(self):
         self._selected_file = None
