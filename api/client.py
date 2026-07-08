@@ -59,7 +59,10 @@ class ApiClient:
 
         if not response.content:
             return {}
-        return response.json()
+        try:
+            return response.json()
+        except requests.exceptions.JSONDecodeError as exc:
+            raise NetworkError(f"Invalid response from server: {exc}") from exc
 
     def _refresh(self) -> bool:
         refresh_token = token_manager.get_refresh_token()
@@ -76,9 +79,14 @@ class ApiClient:
         if not response.ok:
             token_manager.clear()
             return False
-        body = response.json()
+        try:
+            body = response.json()
+            access_token = body["access_token"]
+            refresh_token_value = body["refresh_token"]
+        except (requests.exceptions.JSONDecodeError, KeyError):
+            return False
         was_persisted = token_manager.get_refresh_token() is not None
-        token_manager.set(body["access_token"], body["refresh_token"], persist=was_persisted)
+        token_manager.set(access_token, refresh_token_value, persist=was_persisted)
         return True
 
     @staticmethod
