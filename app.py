@@ -1,5 +1,6 @@
 from PySide6.QtWidgets import QApplication
 from theme import ThemeManager
+from api.token_store import token_manager
 
 
 class AppController:
@@ -15,6 +16,9 @@ class AppController:
 
     def start(self):
         self.theme.apply()   # re-apply now that primaryScreen() is available
+        if token_manager.load_persisted():
+            self.show_main_window()
+            return
         from screens.login import LoginScreen
         self._login = LoginScreen(self)
         self._login.show()
