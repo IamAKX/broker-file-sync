@@ -188,6 +188,7 @@ class ThemeManager:
             QCheckBox {{
                 color: {p['text_primary']};
                 spacing: 8px;
+                background: transparent;
             }}
             QCheckBox::indicator {{
                 width: 15px;

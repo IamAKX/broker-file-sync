@@ -1,9 +1,9 @@
 import font_scale
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QFrame, QSizePolicy, QCheckBox
+    QPushButton, QFrame, QSizePolicy, QCheckBox, QApplication
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 
 from api import auth_api
@@ -90,8 +90,9 @@ class LoginScreen(QWidget):
         self._login_btn.setFont(font_scale.font(font_scale.LARGE, True))
         self._login_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._login_btn.setStyleSheet(
-            f"background: {t.get('accent')}; color: {t.get('background')};"
-            "border: none; border-radius: 4px;"
+            f"QPushButton {{ background: {t.get('accent')}; color: {t.get('background')}; "
+            "border: none; border-radius: 4px; }"
+            f"QPushButton:disabled {{ background: {t.get('button_bg')}; color: {t.get('text_secondary')}; }}"
         )
         self._login_btn.clicked.connect(self._on_login_clicked)
         card_layout.addWidget(self._login_btn)
@@ -112,16 +113,21 @@ class LoginScreen(QWidget):
         outer.addStretch()
 
     def _on_login_clicked(self):
-        email = self._email.text().strip()
-        password = self._password.text()
         self._login_btn.setEnabled(False)
         self._login_btn.setText("Logging in...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QTimer.singleShot(0, self._do_login)
+
+    def _do_login(self):
+        email = self._email.text().strip()
+        password = self._password.text()
         try:
             result = auth_api.login(email, password)
         except (ApiError, NetworkError) as exc:
             show_api_error(self._controller.theme, self, exc)
             return
         finally:
+            QApplication.restoreOverrideCursor()
             self._login_btn.setEnabled(True)
             self._login_btn.setText("Login")
         token_manager.set(

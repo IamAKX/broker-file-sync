@@ -1,9 +1,9 @@
 import font_scale
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
-    QPushButton, QFrame, QCheckBox
+    QPushButton, QFrame, QCheckBox, QApplication
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont
 
 from api import auth_api
@@ -88,8 +88,9 @@ class SignupScreen(QWidget):
         self._create_btn.setFont(font_scale.font(font_scale.LARGE, True))
         self._create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._create_btn.setStyleSheet(
-            f"background: {t.get('accent')}; color: {t.get('background')};"
-            "border: none; border-radius: 4px;"
+            f"QPushButton {{ background: {t.get('accent')}; color: {t.get('background')}; "
+            "border: none; border-radius: 4px; }"
+            f"QPushButton:disabled {{ background: {t.get('button_bg')}; color: {t.get('text_secondary')}; }}"
         )
         self._create_btn.clicked.connect(self._on_create_clicked)
         card_layout.addWidget(self._create_btn)
@@ -116,8 +117,6 @@ class SignupScreen(QWidget):
         outer.addStretch()
 
     def _on_create_clicked(self):
-        name = self._fields["name"].text().strip()
-        email = self._fields["email"].text().strip()
         password = self._fields["password"].text()
         confirm = self._fields["confirm"].text()
 
@@ -128,12 +127,20 @@ class SignupScreen(QWidget):
 
         self._create_btn.setEnabled(False)
         self._create_btn.setText("Creating account...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QTimer.singleShot(0, self._do_create)
+
+    def _do_create(self):
+        name = self._fields["name"].text().strip()
+        email = self._fields["email"].text().strip()
+        password = self._fields["password"].text()
         try:
             result = auth_api.signup(name, email, password)
         except (ApiError, NetworkError) as exc:
             show_api_error(self._controller.theme, self, exc)
             return
         finally:
+            QApplication.restoreOverrideCursor()
             self._create_btn.setEnabled(True)
             self._create_btn.setText("Create Account")
         token_manager.set(
