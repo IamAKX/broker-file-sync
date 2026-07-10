@@ -2,6 +2,7 @@ PySide6>=6.6.0
 openpyxl
 xlrd
 requests
+pytest
 
 # Windows only — enables COM automation for live TradeTiger data via Snap to Excel
 # Install on Windows: pip install pywin32 && python -m pywin32_postinstall -install
