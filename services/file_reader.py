@@ -175,3 +175,87 @@ def read_external_import(path: str) -> tuple[list, list]:
 
 def count_rows_external(path: str) -> int:
     return count_rows(path, data_start_row=1)
+
+
+def _xls_cell_date(cell, datemode: int):
+    """Return a datetime.date from an xlrd cell if it holds a date, else None."""
+    import xlrd
+    if cell.ctype != xlrd.XL_CELL_DATE:
+        return None
+    dt = xlrd.xldate_as_datetime(cell.value, datemode)
+    return dt.date()
+
+
+def _xlsx_cell_date(value):
+    """Return a datetime.date from an openpyxl cell value if it's a date/datetime, else None."""
+    import datetime as _dt
+    if isinstance(value, _dt.datetime):
+        return value.date()
+    if isinstance(value, _dt.date):
+        return value
+    return None
+
+
+def read_historic_sheet(path: str) -> tuple[list, list, list]:
+    """
+    Read all columns from a historic-upload file (xlsx/xls/csv), no fixed
+    template, and additionally extract the trade date from a "DataTime"
+    column (time part dropped) for every row so the caller can validate the
+    sheet's dates against the user-picked upload date.
+
+    Returns (headers, rows, row_dates) — row_dates[i] is a datetime.date or
+    None if that row's DataTime cell wasn't a parseable date, or [] filled
+    with None for every row if there's no "DataTime" column at all.
+    """
+    from datetime import date as _date
+
+    lower = path.lower()
+    if lower.endswith(".xlsx"):
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        raw_rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+        if not raw_rows:
+            return [], [], []
+        headers = [str(h) if h is not None else "" for h in raw_rows[0]]
+        data = [list(r) for r in raw_rows[1:]]
+        date_col = headers.index("DataTime") if "DataTime" in headers else None
+        row_dates = [
+            _xlsx_cell_date(row[date_col]) if date_col is not None and date_col < len(row) else None
+            for row in data
+        ]
+        return headers, data, row_dates
+
+    elif lower.endswith(".xls"):
+        import xlrd
+        wb = xlrd.open_workbook(path)
+        ws = wb.sheet_by_index(0)
+        if ws.nrows == 0:
+            return [], [], []
+        headers = [str(ws.cell_value(0, c)) for c in range(ws.ncols)]
+        data = [[ws.cell_value(r, c) for c in range(ws.ncols)] for r in range(1, ws.nrows)]
+        date_col = headers.index("DataTime") if "DataTime" in headers else None
+        row_dates = []
+        for r in range(1, ws.nrows):
+            if date_col is None:
+                row_dates.append(None)
+            else:
+                row_dates.append(_xls_cell_date(ws.cell(r, date_col), wb.datemode))
+        return headers, data, row_dates
+
+    elif lower.endswith(".csv"):
+        headers, data = read_external_import(path)
+        date_col = headers.index("DataTime") if "DataTime" in headers else None
+        row_dates = []
+        for row in data:
+            parsed = None
+            if date_col is not None and date_col < len(row) and row[date_col]:
+                try:
+                    parsed = _date.fromisoformat(str(row[date_col])[:10])
+                except ValueError:
+                    parsed = None
+            row_dates.append(parsed)
+        return headers, data, row_dates
+
+    raise ValueError(f"Unsupported file type: {path}")

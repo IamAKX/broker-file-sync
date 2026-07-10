@@ -1,4 +1,4 @@
-name: CI — Test & Build
+name: CI — Test (main)
 
 on:
   push:
@@ -40,139 +40,16 @@ jobs:
         run: |
           python -m pytest tests/ -v --tb=short
 
-  # ── 2. Build macOS .app ─────────────────────────────────────────────────────
-  build-macos:
-    name: Build macOS App
-    runs-on: macos-latest
-    needs: test
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install openpyxl xlrd pyinstaller
-
-      - name: Build macOS .app
-        run: |
-          pyinstaller --windowed --onedir --name "BrokerFileSync" \
-            --add-data "assets:assets" \
-            --add-data "screens:screens" \
-            --add-data "services:services" \
-            --add-data "components:components" \
-            --add-data "font_scale.py:." \
-            --collect-data openpyxl \
-            main.py
-
-      - name: Zip .app bundle
-        run: |
-          cd dist
-          zip -r BrokerFileSync-mac.zip BrokerFileSync.app
-
-      - name: Upload macOS artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: BrokerFileSync-mac
-          path: dist/BrokerFileSync-mac.zip
-          retention-days: 30
-
-  # ── 3. Build Windows .exe ───────────────────────────────────────────────────
-  build-windows:
-    name: Build Windows EXE
-    runs-on: windows-latest
-    needs: test
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install openpyxl xlrd pyinstaller pywin32
-
-      - name: Build Windows .exe
-        run: |
-          pyinstaller --windowed --onedir --name "BrokerFileSync" `
-            --add-data "assets;assets" `
-            --add-data "screens;screens" `
-            --add-data "services;services" `
-            --add-data "components;components" `
-            --add-data "font_scale.py;." `
-            --collect-data openpyxl `
-            --collect-all win32com `
-            --collect-all pythoncom `
-            --hidden-import win32com `
-            --hidden-import win32com.client `
-            --hidden-import win32com.server `
-            --hidden-import pythoncom `
-            --hidden-import pywintypes `
-            --hidden-import win32api `
-            --hidden-import win32con `
-            --manifest "windows_dpi.manifest" `
-            main.py
-
-      - name: Zip Windows build
-        run: |
-          cd dist
-          Compress-Archive -Path BrokerFileSync -DestinationPath BrokerFileSync-windows.zip
-
-      - name: Upload Windows artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: BrokerFileSync-windows
-          path: dist/BrokerFileSync-windows.zip
-          retention-days: 30
-
-  # ── 4. Create GitHub Release (only on push to main) ─────────────────────────
-  release:
-    name: Create Release
+  # ── 2. Only staging may merge into main ─────────────────────────────────────
+  verify-source-branch:
+    name: Verify Source Branch
     runs-on: ubuntu-latest
-    needs: [build-macos, build-windows]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'pull_request'
 
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Download macOS artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: BrokerFileSync-mac
-          path: release/
-
-      - name: Download Windows artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: BrokerFileSync-windows
-          path: release/
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: build-${{ github.run_number }}
-          name: "Build #${{ github.run_number }}"
-          body: |
-            Automated build from commit ${{ github.sha }}
-
-            **Downloads**
-            - `BrokerFileSync-mac.zip` — macOS app bundle
-            - `BrokerFileSync-windows.zip` — Windows executable
-          files: |
-            release/BrokerFileSync-mac.zip
-            release/BrokerFileSync-windows.zip
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Require PR head to be staging
+        run: |
+          if [ "${{ github.head_ref }}" != "staging" ]; then
+            echo "::error::Only the 'staging' branch may be merged into main (got '${{ github.head_ref }}')."
+            exit 1
+          fi

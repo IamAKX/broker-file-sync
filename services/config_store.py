@@ -10,6 +10,7 @@ Tab keys (stable identifiers, independent of UI labels):
   "script_name"       — (Stock, Initial)
   "main_column_name"  — (Actual, Renamed)
   "main_column_order" — (Column Name,)
+  "theme"             — "dark" | "light"
 """
 
 import json
@@ -19,6 +20,7 @@ _STORE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config_d
 
 MAIN_COLUMN_NAME  = "main_column_name"
 MAIN_COLUMN_ORDER = "main_column_order"
+THEME             = "theme"
 
 
 def _load_raw() -> dict:
@@ -65,6 +67,20 @@ def load_column_order() -> list:
     data = _load_raw()
     order = data.get(MAIN_COLUMN_ORDER)
     return list(order) if isinstance(order, list) else []
+
+
+def save_theme(mode: str):
+    """Persist the selected theme mode ("dark" or "light")."""
+    data = _load_raw()
+    data[THEME] = mode
+    _save_raw(data)
+
+
+def load_theme(default: str = "light") -> str:
+    """Return the saved theme mode, or *default* if none saved."""
+    data = _load_raw()
+    mode = data.get(THEME)
+    return mode if mode in ("dark", "light") else default
 
 
 def get_rename_map() -> dict:

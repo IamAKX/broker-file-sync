@@ -65,9 +65,10 @@ class TopBar(QWidget):
                 ("Quit",         lambda: self.quit_requested.emit()),
             ]),
             ("Edit", [
-                ("Configs",      lambda: self.navigate.emit("config_editor")),
-                ("Output Path",  lambda: self.navigate.emit("profile")),
-                ("Data Import",  lambda: self.navigate.emit("data_import")),
+                ("Configs",         lambda: self.navigate.emit("config_editor")),
+                ("Output Path",     lambda: self.navigate.emit("profile")),
+                ("Data Import",     lambda: self.navigate.emit("data_import")),
+                ("Historic Upload", lambda: self.navigate.emit("historic_upload")),
             ]),
             ("View", [
                 ("Full Screen",  lambda: self.fullscreen_requested.emit()),
