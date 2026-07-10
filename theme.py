@@ -61,8 +61,9 @@ PALETTES = {"dark": DARK, "light": LIGHT}
 
 class ThemeManager:
     def __init__(self, app: QApplication):
+        from services import config_store
         self._app = app
-        self._mode = "dark"
+        self._mode = config_store.load_theme()
         # apply() is deferred — called explicitly from AppController.start()
         # so that setStyleSheet runs only after the event loop is ready
 
@@ -74,7 +75,9 @@ class ThemeManager:
         return PALETTES[self._mode][token]
 
     def toggle(self):
+        from services import config_store
         self._mode = "light" if self._mode == "dark" else "dark"
+        config_store.save_theme(self._mode)
         self.apply()
 
     def apply(self):
@@ -185,13 +188,14 @@ class ThemeManager:
             QCheckBox {{
                 color: {p['text_primary']};
                 spacing: 8px;
+                background: transparent;
             }}
             QCheckBox::indicator {{
                 width: 15px;
                 height: 15px;
                 border: 1px solid {p['text_secondary']};
                 border-radius: 3px;
-                background: {p['input_bg']};
+                background: transparent;
             }}
             QCheckBox::indicator:hover {{
                 border: 1px solid {p['accent']};

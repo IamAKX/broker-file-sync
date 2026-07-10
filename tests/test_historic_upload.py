@@ -12,57 +12,6 @@ def qapp():
     return QApplication.instance() or QApplication(sys.argv)
 
 
-# ── historic_store ────────────────────────────────────────────────────────────
-
-def test_save_and_fetch_round_trip(tmp_path, monkeypatch):
-    from services import historic_store as store
-    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "h.json"))
-
-    store.save_historic_upload("2026-07-05", ["Symbol", "Close"], [["INFY", 1800], ["TCS", 3500]])
-    headers, rows = store.fetch_historic_data("2026-07-05")
-    assert headers == ["Symbol", "Close"]
-    assert rows == [["INFY", 1800], ["TCS", 3500]]
-
-
-def test_fetch_missing_date_returns_none(tmp_path, monkeypatch):
-    from services import historic_store as store
-    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "h.json"))
-    assert store.fetch_historic_data("2026-01-01") is None
-
-
-def test_fetch_available_dates_stub_returns_1_to_20():
-    from services import historic_store as store
-    days = store.fetch_available_dates(2026, 7)
-    assert days == set(range(1, 21))
-    # stub ignores year/month
-    assert store.fetch_available_dates(1999, 1) == days
-
-
-# ── file_reader ───────────────────────────────────────────────────────────────
-
-def test_read_historic_upload_csv(tmp_path):
-    from services.file_reader import read_historic_upload
-    f = tmp_path / "hist.csv"
-    f.write_text("Symbol,Close\nINFY,1800\nTCS,3500\n")
-    headers, data = read_historic_upload(str(f))
-    assert headers == ["Symbol", "Close"]
-    assert data[0] == ["INFY", "1800"]
-
-
-def test_read_historic_upload_xlsx(tmp_path):
-    import openpyxl
-    from services.file_reader import read_historic_upload
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.append(["Symbol", "Close"])
-    ws.append(["INFY", 1800])
-    path = str(tmp_path / "hist.xlsx")
-    wb.save(path)
-    headers, data = read_historic_upload(path)
-    assert headers == ["Symbol", "Close"]
-    assert data[0][0] == "INFY"
-
-
 # ── HistoricUploadScreen ──────────────────────────────────────────────────────
 
 def test_historic_upload_screen_creates(qapp):
@@ -115,28 +64,6 @@ def test_populate_columns_creates_checkboxes(qapp):
     assert not screen._save_btn.isEnabled()
 
 
-def test_save_persists_only_checked_columns(qapp, tmp_path, monkeypatch):
-    from services import historic_store as store
-    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "h.json"))
-
-    from app import AppController
-    from screens.historic_upload import HistoricUploadScreen
-    from datetime import date
-    screen = HistoricUploadScreen(AppController(qapp))
-    screen._headers = ["Symbol", "Close", "Volume"]
-    screen._rows = [["INFY", 1800, 100], ["TCS", 3500, 200]]
-    screen._selected_file = "dummy.csv"
-    screen._upload_date = date(2026, 7, 5)
-    screen._populate_columns()
-    screen._checkboxes[2].setChecked(False)  # drop Volume
-
-    screen._on_save()
-
-    headers, rows = store.fetch_historic_data("2026-07-05")
-    assert headers == ["Symbol", "Close"]
-    assert rows == [["INFY", 1800], ["TCS", 3500]]
-
-
 def test_view_button_enabled_only_on_available_day(qapp):
     from app import AppController
     from screens.historic_upload import HistoricUploadScreen
@@ -161,3 +88,53 @@ def test_historic_data_viewer_populates_table(qapp):
     assert viewer._table.columnCount() == 2
     assert viewer._table.item(0, 0).text() == "INFY"
     assert viewer._table.item(1, 1).text() == "3500"
+
+
+def test_historic_viewer_symbol_search_filters_rows(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Symbol", "Display Name", "Close"],
+        [["ABB", "ABB LTD", "6832.5"], ["INFY", "INFOSYS LTD", "1800"]],
+        "05-Jul-2026",
+    )
+    viewer._search_box.setText("abb")
+    assert viewer._table.isRowHidden(0) is False
+    assert viewer._table.isRowHidden(1) is True
+
+    viewer._search_box.setText("")
+    assert viewer._table.isRowHidden(0) is False
+    assert viewer._table.isRowHidden(1) is False
+
+
+def test_historic_viewer_column_filter_hides_column(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Symbol", "Display Name", "Close"],
+        [["ABB", "ABB LTD", "6832.5"]],
+        "05-Jul-2026",
+    )
+    viewer._apply_col_filter({0, 2})
+    assert viewer._table.isColumnHidden(1) is True
+    assert viewer._table.isColumnHidden(0) is False
+    assert viewer._table.isColumnHidden(2) is False
+
+
+def test_historic_viewer_symbol_column_always_visible(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Symbol", "Display Name", "Close"],
+        [["ABB", "ABB LTD", "6832.5"]],
+        "05-Jul-2026",
+    )
+    viewer._apply_col_filter({2})
+    assert viewer._table.isColumnHidden(0) is False
+
+
+def test_historic_viewer_header_sections_movable(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Symbol", "Display Name", "Close"],
+        [["ABB", "ABB LTD", "6832.5"]],
+        "05-Jul-2026",
+    )
+    assert viewer._table.horizontalHeader().sectionsMovable() is True

@@ -74,3 +74,4 @@ docs/superpowers/
 .superpowers
 .claude
 
+auth_session.json

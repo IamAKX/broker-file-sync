@@ -9,8 +9,13 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtGui import QPainter, QColor, QBrush
 
-from services.file_reader import read_historic_upload
-from services import historic_store
+from config_defaults import SCRIPT_NAME_DATA
+from services import config_store
+from services.file_reader import read_historic_sheet
+from services.master_generator import _build_script_name_lookup, _strip_rolling_suffix
+from api import historic_api
+from api.exceptions import ApiError, NetworkError
+from components.error_popup import show_api_error
 from screens.historic_viewer import HistoricDataViewer
 
 
@@ -121,6 +126,8 @@ class HistoricUploadScreen(QWidget):
         self._selected_file = None
         self._headers = []
         self._rows = []
+        self._row_dates = []
+        self._structural_cols = set()   # header indices excluded from metric checkboxes
         self._checkboxes = []
         self._upload_date = date.today()
         self._viewers = []
@@ -264,7 +271,7 @@ class HistoricUploadScreen(QWidget):
         if not path:
             return
         try:
-            headers, rows = read_historic_upload(path)
+            headers, rows, row_dates = read_historic_sheet(path)
         except Exception as exc:
             self._status_lbl.setText(f"Failed to read file: {exc}")
             self._status_lbl.setStyleSheet(f"color: {self._controller.theme.get('status_red')};")
@@ -272,6 +279,10 @@ class HistoricUploadScreen(QWidget):
         self._selected_file = path
         self._headers = headers
         self._rows = rows
+        self._row_dates = row_dates
+        self._structural_cols = {
+            i for i, h in enumerate(headers) if h in ("ScripName", "DataTime")
+        }
         self._file_lbl.setText(f"Selected: {os.path.basename(path)} ({len(rows)} rows)")
         self._file_lbl.setStyleSheet(f"color: {self._controller.theme.get('accent')};")
         self._status_lbl.setText("")
@@ -285,14 +296,17 @@ class HistoricUploadScreen(QWidget):
             if w is not None:
                 w.deleteLater()
         self._checkboxes = []
-        t = self._controller.theme
-        for header in self._headers:
+        self._checkbox_col_indices = []
+        for i, header in enumerate(self._headers):
+            if i in self._structural_cols:
+                continue
             cb = QCheckBox(str(header) if header else "(unnamed)")
             cb.setChecked(True)
             cb.setFont(font_scale.font(font_scale.SMALL, False))
             cb.stateChanged.connect(self._on_column_toggled)
             self._columns_layout.addWidget(cb)
             self._checkboxes.append(cb)
+            self._checkbox_col_indices.append(i)
         self._columns_toggle.setChecked(True)
         self._columns_scroll.setVisible(True)
         self._set_columns_toggle_text()
@@ -307,20 +321,74 @@ class HistoricUploadScreen(QWidget):
         self._save_btn.setEnabled(has_file and has_column)
 
     def _on_save(self):
-        selected_indices = [i for i, cb in enumerate(self._checkboxes) if cb.isChecked()]
-        filtered_headers = [self._headers[i] for i in selected_indices]
-        filtered_rows = [[row[i] if i < len(row) else None for i in selected_indices] for row in self._rows]
-        date_str = self._upload_date.isoformat()
-        historic_store.save_historic_upload(date_str, filtered_headers, filtered_rows)
+        mismatched_rows = [
+            i + 1 for i, d in enumerate(self._row_dates)
+            if d is not None and d != self._upload_date
+        ]
+        if mismatched_rows:
+            t = self._controller.theme
+            first = mismatched_rows[0]
+            sheet_date = self._row_dates[first - 1]
+            self._status_lbl.setText(
+                f"Sheet date ({sheet_date.strftime('%d-%b-%Y')}) doesn't match "
+                f"selected date ({self._upload_date.strftime('%d-%b-%Y')}). "
+                f"Row {first}"
+                + (f" (+{len(mismatched_rows) - 1} more)" if len(mismatched_rows) > 1 else "") + "."
+            )
+            self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
+            return
+
+        scripname_idx = self._headers.index("ScripName") if "ScripName" in self._headers else None
+        selected_indices = self._checkbox_col_indices_selected()
+        script_name_data = config_store.load_tab("script_name", SCRIPT_NAME_DATA)
+        name_to_symbol = _build_script_name_lookup(script_name_data)
+
+        rows_payload = []
+        for row in self._rows:
+            raw_name = str(row[scripname_idx]) if scripname_idx is not None and scripname_idx < len(row) else ""
+            display_name = _strip_rolling_suffix(raw_name) or raw_name
+            symbol = name_to_symbol.get(display_name.lower()) or display_name
+            metrics = {}
+            for idx in selected_indices:
+                if idx < len(row):
+                    metrics[self._headers[idx]] = row[idx]
+            rows_payload.append({
+                "symbol": symbol,
+                "display_name": display_name or None,
+                "metrics": metrics,
+            })
+
+        self._save_btn.setEnabled(False)
+        self._save_btn.setText("Saving...")
+        try:
+            result = historic_api.upload_daily(self._upload_date, rows_payload)
+        except (ApiError, NetworkError) as exc:
+            show_api_error(self._controller.theme, self, exc)
+            return
+        finally:
+            self._save_btn.setEnabled(True)
+            self._save_btn.setText("Save")
+
         t = self._controller.theme
-        self._status_lbl.setText(f"Saved {len(filtered_rows)} rows for {self._upload_date.strftime('%d-%b-%Y')}.")
+        self._status_lbl.setText(
+            f"Saved {result.get('values_upserted', 0)} values for "
+            f"{self._upload_date.strftime('%d-%b-%Y')}."
+        )
         self._status_lbl.setStyleSheet(f"color: {t.get('accent')};")
         self._reset_upload_form()
+
+    def _checkbox_col_indices_selected(self) -> list:
+        return [
+            idx for cb, idx in zip(self._checkboxes, self._checkbox_col_indices)
+            if cb.isChecked()
+        ]
 
     def _reset_upload_form(self):
         self._selected_file = None
         self._headers = []
         self._rows = []
+        self._row_dates = []
+        self._structural_cols = set()
         self._checkboxes = []
         self._file_lbl.setText("No file selected")
         self._file_lbl.setStyleSheet(f"color: {self._controller.theme.get('text_secondary')};")
@@ -436,7 +504,10 @@ class HistoricUploadScreen(QWidget):
 
         layout.addStretch()
 
-        self._refresh_browse_availability()
+        # Defer the initial availability fetch (a blocking network call) so it
+        # doesn't hold up widget construction — this can run during MainWindow
+        # construction on the auto-login path, before any window is visible.
+        QTimer.singleShot(0, self._refresh_browse_availability)
         self._update_view_btn_enabled()
         self._browse_refresh_calendar = self._refresh_browse_availability
         return tab
@@ -445,13 +516,39 @@ class HistoricUploadScreen(QWidget):
         today = date.today()
         year = self._browse_calendar.yearShown() or today.year
         month = self._browse_calendar.monthShown() or today.month
-        days = historic_store.fetch_available_dates(year, month)
-        self._browse_calendar.set_available_days(days)
-        self._available_days = days
-        self._update_view_btn_enabled()
+        # Called during initial widget construction (and after a save, via the
+        # _browse_refresh_calendar hook) — a blocking modal popup here would fire
+        # before the user has done anything (or right after a successful save),
+        # so failures are reported quietly instead of via show_api_error().
+        self._fetch_and_apply_availability(year, month, show_popup_on_error=False)
 
     def _on_browse_page_changed(self, year, month):
-        days = historic_store.fetch_available_dates(year, month)
+        # User-initiated (navigating the calendar month) — a blocking modal on
+        # failure is acceptable here since the screen is already visible.
+        self._fetch_and_apply_availability(year, month)
+
+    def _fetch_and_apply_availability(self, year: int, month: int, show_popup_on_error: bool = True):
+        import calendar as _cal
+        last_day = _cal.monthrange(year, month)[1]
+        date_from = date(year, month, 1)
+        date_to = date(year, month, last_day)
+        try:
+            result = historic_api.get_availability(date_from, date_to)
+            days = {
+                date.fromisoformat(d["trade_date"]).day
+                for d in result["dates"] if d["has_data"]
+            }
+        except (ApiError, NetworkError, KeyError, ValueError, TypeError) as exc:
+            if show_popup_on_error and isinstance(exc, (ApiError, NetworkError)):
+                show_api_error(self._controller.theme, self, exc)
+            elif hasattr(self, "_browse_status_lbl"):
+                t = self._controller.theme
+                self._browse_status_lbl.setText("Couldn't load availability for this month.")
+                self._browse_status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+            self._browse_calendar.set_available_days(set())
+            self._available_days = set()
+            self._update_view_btn_enabled()
+            return
         self._browse_calendar.set_available_days(days)
         self._available_days = days
         self._update_view_btn_enabled()
@@ -465,14 +562,33 @@ class HistoricUploadScreen(QWidget):
         self._view_btn.setEnabled(self._selected_browse_date.day in days)
 
     def _on_view_clicked(self):
-        date_str = self._selected_browse_date.isoformat()
-        result = historic_store.fetch_historic_data(date_str)
         t = self._controller.theme
-        if result is None:
-            self._browse_status_lbl.setText(f"No data saved for {self._selected_browse_date.strftime('%d-%b-%Y')}.")
+        try:
+            result = historic_api.get_snapshot(self._selected_browse_date)
+            stocks = result.get("stocks", [])
+            if stocks:
+                metric_keys = sorted({k for s in stocks for k in s.get("metrics", {})})
+                headers = ["Symbol", "Display Name"] + metric_keys
+                rows = [
+                    [s["symbol"], s.get("display_name") or ""] +
+                    [s.get("metrics", {}).get(k) for k in metric_keys]
+                    for s in stocks
+                ]
+        except (ApiError, NetworkError) as exc:
+            show_api_error(t, self, exc)
+            return
+        except (KeyError, ValueError, TypeError):
+            self._browse_status_lbl.setText("Couldn't parse response from server.")
             self._browse_status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
             return
-        headers, rows = result
+
+        if not stocks:
+            self._browse_status_lbl.setText(
+                f"No data saved for {self._selected_browse_date.strftime('%d-%b-%Y')}."
+            )
+            self._browse_status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
+            return
+
         viewer = HistoricDataViewer(headers, rows, self._selected_browse_date.strftime("%d-%b-%Y"), theme=t)
         viewer.show()
         self._viewers.append(viewer)
