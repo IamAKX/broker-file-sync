@@ -103,7 +103,13 @@ class MainWindow(QMainWindow):
             viewer = getattr(data_import, "_live_viewer", None)
             if viewer is not None:
                 viewer.close()
+        # Close any historic-data viewer popups
+        historic_upload = self._screens.get("historic_upload")
+        if historic_upload is not None:
+            for viewer in getattr(historic_upload, "_viewers", []):
+                viewer.close()
         super().closeEvent(event)
+        QApplication.quit()
 
     def _toggle_fullscreen(self):
         if self.isFullScreen():
