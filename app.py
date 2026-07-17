@@ -67,3 +67,7 @@ class AppController:
     def navigate(self, screen_name: str):
         if self._main_window is not None:
             self._main_window.navigate(screen_name)
+
+    def refresh_user_display(self):
+        if self._main_window is not None:
+            self._main_window.refresh_user()

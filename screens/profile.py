@@ -1,17 +1,41 @@
 import font_scale
 import re
 import os
+from datetime import datetime, timezone
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QLineEdit, QScrollArea, QSizePolicy, QMessageBox
+    QFrame, QLineEdit, QScrollArea, QSizePolicy, QMessageBox, QApplication
 )
-from PySide6.QtCore import Qt, QByteArray, QSize
+from PySide6.QtCore import Qt, QByteArray, QSize, QTimer
 from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QBrush
 from PySide6.QtSvg import QSvgRenderer
+from api import auth_api
 from api.token_store import token_manager
+from api.exceptions import ApiError, NetworkError
 from components.sidebar import _initials
+from components.error_popup import show_api_error
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
+
+
+def _format_member_since(iso_str: str | None) -> str:
+    if not iso_str:
+        return "—"
+    try:
+        dt = datetime.fromisoformat(iso_str).replace(tzinfo=timezone.utc).astimezone()
+        return dt.strftime("%b %Y")
+    except (ValueError, TypeError):
+        return "—"
+
+
+def _format_last_login(iso_str: str | None) -> str:
+    if not iso_str:
+        return "First login"
+    try:
+        dt = datetime.fromisoformat(iso_str).replace(tzinfo=timezone.utc).astimezone()
+        return dt.strftime("%b %d, %Y %I:%M %p")
+    except (ValueError, TypeError):
+        return "—"
 
 
 def _svg_icon(filename: str, color: str) -> QIcon:
@@ -90,6 +114,7 @@ class ProfileScreen(QWidget):
             "border: none; border-radius: 4px; padding: 0 20px;"
         )
         save_btn.clicked.connect(self._save_profile)
+        self._save_btn = save_btn
 
         header_row.addLayout(title_col, 1)
         header_row.addWidget(save_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
@@ -124,35 +149,43 @@ class ProfileScreen(QWidget):
             "border-radius: 8px;"
         )
         left_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self._avatar_lbl = avatar
 
         name_lbl = QLabel(user_name)
         name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
         name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         left_layout.addWidget(name_lbl)
+        self._card_name_lbl = name_lbl
 
         email_lbl = QLabel(user_email)
         email_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         email_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         email_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         left_layout.addWidget(email_lbl)
+        self._card_email_lbl = email_lbl
 
         left_layout.addSpacing(8)
 
-        # Stats
+        # Stats — values are fetched from GET /auth/me (see showEvent) since
+        # created_at/last_login_at aren't JWT claims and would go stale in the token
         div1 = QWidget(); div1.setFixedHeight(1)
         div1.setStyleSheet(f"background-color: {t.get('divider')};")
         left_layout.addWidget(div1)
 
-        for stat_label, stat_value in [
-            ("Member since",  "Jan 2024"),
+        self._member_since_lbl = None
+        self._last_login_lbl = None
+        for stat_label, attr in [
+            ("Member since", "_member_since_lbl"),
+            ("Last login",   "_last_login_lbl"),
         ]:
             row = QHBoxLayout()
             sl = QLabel(stat_label)
             sl.setFont(font_scale.font(font_scale.SMALL, False))
             sl.setStyleSheet(f"color: {t.get('text_secondary')};")
-            sv = QLabel(stat_value)
+            sv = QLabel("—")
             sv.setFont(font_scale.font(font_scale.SMALL, False))
             sv.setAlignment(Qt.AlignmentFlag.AlignRight)
+            setattr(self, attr, sv)
             row.addWidget(sl)
             row.addStretch()
             row.addWidget(sv)
@@ -241,10 +274,22 @@ class ProfileScreen(QWidget):
         div3.setStyleSheet(f"background-color: {t.get('divider')};")
         pwd_layout.addWidget(div3)
 
+        current_pwd_row = QHBoxLayout(); current_pwd_row.setSpacing(16)
+        current_col = QVBoxLayout(); current_col.setSpacing(4)
+        current_col.addWidget(_field_label("CURRENT PASSWORD", t))
+        self._current_pwd_inp = QLineEdit()
+        self._current_pwd_inp.setPlaceholderText("Enter current password")
+        self._current_pwd_inp.setEchoMode(QLineEdit.EchoMode.Password)
+        self._current_pwd_inp.setFixedHeight(38)
+        current_col.addWidget(self._current_pwd_inp)
+        current_pwd_row.addLayout(current_col, 1)
+        current_pwd_row.addStretch(1)
+        pwd_layout.addLayout(current_pwd_row)
+
         pwd_row = QHBoxLayout(); pwd_row.setSpacing(16)
         for label, placeholder, attr in [
-            ("NEW PASSWORD",     "Leave blank to keep current", "_pwd_inp"),
-            ("CONFIRM PASSWORD", "Confirm new password",        "_pwd_confirm_inp"),
+            ("NEW PASSWORD",     "Enter new password",   "_pwd_inp"),
+            ("CONFIRM PASSWORD", "Confirm new password", "_pwd_confirm_inp"),
         ]:
             col = QVBoxLayout(); col.setSpacing(4)
             col.addWidget(_field_label(label, t))
@@ -265,6 +310,7 @@ class ProfileScreen(QWidget):
         upd_btn.setIconSize(QSize(16, 16))
         upd_btn.clicked.connect(self._update_password)
         pwd_layout.addWidget(upd_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+        self._upd_btn = upd_btn
 
         right_col.addWidget(pwd_card)
         right_col.addStretch()
@@ -278,18 +324,82 @@ class ProfileScreen(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._load_profile_stats()
+
+    def _load_profile_stats(self):
+        try:
+            profile = auth_api.get_me()
+        except (ApiError, NetworkError):
+            self._member_since_lbl.setText("—")
+            self._last_login_lbl.setText("—")
+            return
+        self._member_since_lbl.setText(_format_member_since(profile.get("created_at")))
+        self._last_login_lbl.setText(_format_last_login(profile.get("last_login_at")))
+
     def _save_profile(self):
+        name = self._name_inp.text().strip()
+        email = self._email_inp.text().strip()
+        phone = self._phone_inp.text().strip()
+        if not name or not email or not phone:
+            QMessageBox.warning(self, "Error", "Name, email and phone number are required.")
+            return
+
+        self._save_btn.setEnabled(False)
+        self._save_btn.setText("  Saving...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QTimer.singleShot(0, lambda: self._do_save_profile(name, email, phone))
+
+    def _do_save_profile(self, name, email, phone):
+        try:
+            result = auth_api.update_profile(name, email, phone)
+        except (ApiError, NetworkError) as exc:
+            show_api_error(self._controller.theme, self, exc)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._save_btn.setEnabled(True)
+            self._save_btn.setText("  Save Changes")
+
+        token_manager.update_access_token(result["access_token"])
+        self._controller.refresh_user_display()
+        self._avatar_lbl.setText(_initials(name))
+        self._card_name_lbl.setText(name)
+        self._card_email_lbl.setText(email)
         QMessageBox.information(self, "Saved", "Profile saved successfully.")
 
     def _update_password(self):
-        pwd = self._pwd_inp.text()
+        current = self._current_pwd_inp.text()
+        new = self._pwd_inp.text()
         confirm = self._pwd_confirm_inp.text()
-        if not pwd:
+        if not current:
+            QMessageBox.warning(self, "Error", "Please enter your current password.")
+            return
+        if not new:
             QMessageBox.warning(self, "Error", "Please enter a new password.")
             return
-        if pwd != confirm:
+        if new != confirm:
             QMessageBox.warning(self, "Error", "Passwords do not match.")
             return
+
+        self._upd_btn.setEnabled(False)
+        self._upd_btn.setText("  Updating...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QTimer.singleShot(0, lambda: self._do_update_password(current, new))
+
+    def _do_update_password(self, current, new):
+        try:
+            auth_api.change_password(current, new)
+        except (ApiError, NetworkError) as exc:
+            show_api_error(self._controller.theme, self, exc)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._upd_btn.setEnabled(True)
+            self._upd_btn.setText("  Update Password")
+
+        self._current_pwd_inp.clear()
         self._pwd_inp.clear()
         self._pwd_confirm_inp.clear()
         QMessageBox.information(self, "Success", "Password updated successfully.")

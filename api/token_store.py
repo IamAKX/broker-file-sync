@@ -43,6 +43,14 @@ class TokenManager:
     def get_access_token(self) -> str | None:
         return self._access_token
 
+    def update_access_token(self, access_token: str) -> None:
+        """Swaps in a fresh access token (e.g. after a profile update changes its
+        claims) without touching the refresh token or persistence setting.
+        """
+        self._access_token = access_token
+        if self._persist:
+            self._save_to_disk()
+
     def get_refresh_token(self) -> str | None:
         return self._refresh_token
 
