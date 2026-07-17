@@ -90,6 +90,9 @@ class MainWindow(QMainWindow):
             self._screens[name] = widget
             self._stack.addWidget(widget)
 
+    def refresh_user(self):
+        self._sidebar.refresh_user()
+
     def navigate(self, screen_name: str):
         if screen_name in self._screens:
             self._stack.setCurrentWidget(self._screens[screen_name])

@@ -8,8 +8,18 @@ from PySide6.QtCore import Signal, Qt, QByteArray, QSize
 from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter
 from PySide6.QtSvg import QSvgRenderer
 from theme import ThemeManager
+from api.token_store import token_manager
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
+
+
+def _initials(name: str) -> str:
+    parts = [p for p in name.strip().split() if p]
+    if not parts:
+        return "?"
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[1][0]).upper()
 
 NAV_ITEMS = [
     ("dashboard",        "Dashboard",       "dashboard.svg"),
@@ -133,7 +143,7 @@ class Sidebar(QWidget):
         user_layout.setContentsMargins(10, 6, 10, 6)
         user_layout.setSpacing(8)
 
-        avatar = QLabel("SP")
+        avatar = QLabel()
         avatar.setFixedSize(28, 28)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         avatar.setFont(font_scale.font(font_scale.SMALL, True))
@@ -145,10 +155,10 @@ class Sidebar(QWidget):
 
         user_info = QVBoxLayout()
         user_info.setSpacing(0)
-        name_lbl2 = QLabel("Sunder P.")
+        name_lbl2 = QLabel()
         name_lbl2.setFont(font_scale.font(font_scale.SMALL, False))
         name_lbl2.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
-        email_lbl = QLabel("sunder@gmail.com")
+        email_lbl = QLabel()
         email_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         email_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
         self._user_name_lbl = name_lbl2
@@ -159,6 +169,15 @@ class Sidebar(QWidget):
         user_layout.addWidget(avatar)
         user_layout.addLayout(user_info)
         layout.addWidget(user_widget)
+
+        self.refresh_user()
+
+    def refresh_user(self):
+        name = token_manager.get_user_name() or "Unknown User"
+        email = token_manager.get_user_email() or ""
+        self._avatar_label.setText(_initials(name))
+        self._user_name_lbl.setText(name)
+        self._user_email_lbl.setText(email)
 
     def set_broker_active(self, name: str, active: bool):
         if active:

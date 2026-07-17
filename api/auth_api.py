@@ -7,10 +7,12 @@ def login(email: str, password: str) -> dict:
     return api_client.post(LOGIN, json_body={"email": email, "password": password}, auth=False)
 
 
-def signup(name: str, email: str, password: str) -> dict:
+def signup(name: str, email: str, phone_number: str, password: str) -> dict:
     return api_client.post(
         SIGNUP,
-        json_body={"name": name, "email": email, "password": password},
+        json_body={
+            "name": name, "email": email, "phone_number": phone_number, "password": password,
+        },
         auth=False,
     )
 

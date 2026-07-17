@@ -5,10 +5,24 @@ In-memory JWT storage, with optional disk persistence for "keep me logged in".
 File layout (auth_session.json): {"access_token": "...", "refresh_token": "..."}
 """
 
+import base64
 import json
 import os
 
 _STORE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "auth_session.json")
+
+
+def _decode_jwt_payload(token: str) -> dict:
+    """Reads the claims out of a JWT for display purposes only — the signature
+    is already verified server-side on every request, so no need to re-verify
+    it here just to show the user's name/email in the UI.
+    """
+    try:
+        payload_b64 = token.split(".")[1]
+        padded = payload_b64 + "=" * (-len(payload_b64) % 4)
+        return json.loads(base64.urlsafe_b64decode(padded))
+    except Exception:
+        return {}
 
 
 class TokenManager:
@@ -31,6 +45,21 @@ class TokenManager:
 
     def get_refresh_token(self) -> str | None:
         return self._refresh_token
+
+    def get_user_name(self) -> str | None:
+        if not self._access_token:
+            return None
+        return _decode_jwt_payload(self._access_token).get("name")
+
+    def get_user_email(self) -> str | None:
+        if not self._access_token:
+            return None
+        return _decode_jwt_payload(self._access_token).get("email")
+
+    def get_user_phone_number(self) -> str | None:
+        if not self._access_token:
+            return None
+        return _decode_jwt_payload(self._access_token).get("phone_number")
 
     def is_logged_in(self) -> bool:
         return self._access_token is not None

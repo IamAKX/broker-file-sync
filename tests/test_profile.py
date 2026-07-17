@@ -37,13 +37,7 @@ def test_has_change_password_button(screen):
     assert any("Password" in t for t in btns)
 
 
-def test_has_output_dir_input(screen):
+def test_has_account_fields(screen):
     from PySide6.QtWidgets import QLineEdit
     inputs = screen.findChildren(QLineEdit)
     assert len(inputs) >= 1
-
-
-def test_has_watcher_interval_spinbox(screen):
-    from PySide6.QtWidgets import QSpinBox
-    spinboxes = screen.findChildren(QSpinBox)
-    assert len(spinboxes) >= 1

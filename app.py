@@ -11,7 +11,6 @@ class AppController:
         self._login = None
         self._signup = None
         self._main_window = None
-        self.output_dir = ""    # set from Profile → Preferences
         from services.watcher import FileWatcher
         self.watcher = FileWatcher()
         api_client.set_session_expired_callback(self.show_login)
@@ -33,6 +32,8 @@ class AppController:
             self._signup.hide()
         if self._main_window is None:
             self._main_window = MainWindow(self)
+        else:
+            self._main_window.refresh_user()
         self._main_window.show()
         self._main_window.navigate("dashboard")
 

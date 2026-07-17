@@ -59,6 +59,7 @@ class SignupScreen(QWidget):
         for key, field_label, placeholder, echo in [
             ("name",     "FULL NAME",        "Enter your full name",  False),
             ("email",    "EMAIL",             "Enter your email",      False),
+            ("phone",    "PHONE NUMBER",      "Enter your phone number", False),
             ("password", "PASSWORD",          "Create a password",     True),
             ("confirm",  "CONFIRM PASSWORD",  "Confirm your password", True),
         ]:
@@ -117,9 +118,13 @@ class SignupScreen(QWidget):
         outer.addStretch()
 
     def _on_create_clicked(self):
+        phone = self._fields["phone"].text().strip()
         password = self._fields["password"].text()
         confirm = self._fields["confirm"].text()
 
+        if not phone:
+            self._status_lbl.setText("Please enter your phone number.")
+            return
         if password != confirm:
             self._status_lbl.setText("Passwords do not match.")
             return
@@ -133,9 +138,10 @@ class SignupScreen(QWidget):
     def _do_create(self):
         name = self._fields["name"].text().strip()
         email = self._fields["email"].text().strip()
+        phone = self._fields["phone"].text().strip()
         password = self._fields["password"].text()
         try:
-            result = auth_api.signup(name, email, password)
+            result = auth_api.signup(name, email, phone, password)
         except (ApiError, NetworkError) as exc:
             show_api_error(self._controller.theme, self, exc)
             return

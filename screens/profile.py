@@ -3,12 +3,13 @@ import re
 import os
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QLineEdit, QScrollArea, QSizePolicy, QFileDialog, QMessageBox,
-    QSpinBox
+    QFrame, QLineEdit, QScrollArea, QSizePolicy, QMessageBox
 )
 from PySide6.QtCore import Qt, QByteArray, QSize
 from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QBrush
 from PySide6.QtSvg import QSvgRenderer
+from api.token_store import token_manager
+from components.sidebar import _initials
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
 
@@ -110,7 +111,11 @@ class ProfileScreen(QWidget):
         left_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
         # Avatar
-        avatar = QLabel("SP")
+        user_name = token_manager.get_user_name() or "Unknown User"
+        user_email = token_manager.get_user_email() or ""
+        user_phone = token_manager.get_user_phone_number() or ""
+
+        avatar = QLabel(_initials(user_name))
         avatar.setFixedSize(72, 72)
         avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
         avatar.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
@@ -120,12 +125,12 @@ class ProfileScreen(QWidget):
         )
         left_layout.addWidget(avatar, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        name_lbl = QLabel("Sunder P.")
+        name_lbl = QLabel(user_name)
         name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
         name_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         left_layout.addWidget(name_lbl)
 
-        email_lbl = QLabel("sunder@gmail.com")
+        email_lbl = QLabel(user_email)
         email_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         email_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         email_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -140,8 +145,6 @@ class ProfileScreen(QWidget):
 
         for stat_label, stat_value in [
             ("Member since",  "Jan 2024"),
-            ("Total imports", "0"),
-            ("Last session",  "Today"),
         ]:
             row = QHBoxLayout()
             sl = QLabel(stat_label)
@@ -198,13 +201,13 @@ class ProfileScreen(QWidget):
         row1 = QHBoxLayout(); row1.setSpacing(16)
         name_col = QVBoxLayout(); name_col.setSpacing(4)
         name_col.addWidget(_field_label("FULL NAME", t))
-        self._name_inp = QLineEdit("Sunder P.")
+        self._name_inp = QLineEdit(user_name)
         self._name_inp.setFixedHeight(38)
         name_col.addWidget(self._name_inp)
 
         email_col = QVBoxLayout(); email_col.setSpacing(4)
         email_col.addWidget(_field_label("EMAIL ADDRESS", t))
-        self._email_inp = QLineEdit("sunder@gmail.com")
+        self._email_inp = QLineEdit(user_email)
         self._email_inp.setFixedHeight(38)
         email_col.addWidget(self._email_inp)
 
@@ -212,15 +215,14 @@ class ProfileScreen(QWidget):
         row1.addLayout(email_col, 1)
         acc_layout.addLayout(row1)
 
-        # Organisation (single field)
+        # Phone number
         row2 = QHBoxLayout(); row2.setSpacing(16)
-        org_col = QVBoxLayout(); org_col.setSpacing(4)
-        org_col.addWidget(_field_label("ORGANISATION / FIRM", t))
-        self._org_inp = QLineEdit()
-        self._org_inp.setPlaceholderText("Optional")
-        self._org_inp.setFixedHeight(38)
-        org_col.addWidget(self._org_inp)
-        row2.addLayout(org_col, 1)
+        phone_col = QVBoxLayout(); phone_col.setSpacing(4)
+        phone_col.addWidget(_field_label("PHONE NUMBER", t))
+        self._phone_inp = QLineEdit(user_phone)
+        self._phone_inp.setFixedHeight(38)
+        phone_col.addWidget(self._phone_inp)
+        row2.addLayout(phone_col, 1)
         row2.addStretch(1)
         acc_layout.addLayout(row2)
 
@@ -265,57 +267,6 @@ class ProfileScreen(QWidget):
         pwd_layout.addWidget(upd_btn, alignment=Qt.AlignmentFlag.AlignLeft)
 
         right_col.addWidget(pwd_card)
-
-        # Preferences card
-        pref_card = QFrame()
-        pref_card.setObjectName("brokerPanel")
-        pref_layout = QVBoxLayout(pref_card)
-        pref_layout.setContentsMargins(24, 20, 24, 20)
-        pref_layout.setSpacing(14)
-
-        pref_layout.addWidget(_section_label("PREFERENCES", t))
-
-        div_pref = QWidget(); div_pref.setFixedHeight(1)
-        div_pref.setStyleSheet(f"background-color: {t.get('divider')};")
-        pref_layout.addWidget(div_pref)
-
-        pref_row = QHBoxLayout(); pref_row.setSpacing(16)
-
-        # Output directory
-        dir_col = QVBoxLayout(); dir_col.setSpacing(4)
-        dir_col.addWidget(_field_label("DEFAULT OUTPUT DIRECTORY", t))
-        dir_row = QHBoxLayout(); dir_row.setSpacing(8)
-        self._dir_inp = QLineEdit(getattr(self._controller, "output_dir", "") or "./output")
-        self._dir_inp.setFixedHeight(38)
-        browse_btn = QPushButton()
-        browse_btn.setFixedSize(38, 38)
-        browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        browse_btn.setIcon(_svg_icon("folder.svg", t.get("accent")))
-        browse_btn.setIconSize(QSize(18, 18))
-        browse_btn.setStyleSheet(
-            f"QPushButton {{ background: transparent; border: 1px solid {t.get('accent')}; border-radius: 4px; }}"
-            f"QPushButton:hover {{ background: {t.get('accent')}20; }}"
-        )
-        browse_btn.clicked.connect(self._browse_dir)
-        dir_row.addWidget(self._dir_inp, 1)
-        dir_row.addWidget(browse_btn)
-        dir_col.addLayout(dir_row)
-
-        # Watch interval
-        interval_col = QVBoxLayout(); interval_col.setSpacing(4)
-        interval_col.addWidget(_field_label("WATCHER INTERVAL (SECONDS)", t))
-        self._interval_spin = QSpinBox()
-        self._interval_spin.setRange(1, 3600)
-        self._interval_spin.setValue(getattr(self._controller, "watch_interval", 5))
-        self._interval_spin.setFixedHeight(38)
-        self._interval_spin.setSuffix("  sec")
-        interval_col.addWidget(self._interval_spin)
-
-        pref_row.addLayout(dir_col, 2)
-        pref_row.addLayout(interval_col, 1)
-        pref_layout.addLayout(pref_row)
-
-        right_col.addWidget(pref_card)
         right_col.addStretch()
 
         body.addLayout(right_col, 1)
@@ -328,13 +279,7 @@ class ProfileScreen(QWidget):
         outer.addWidget(scroll)
 
     def _save_profile(self):
-        self._controller.output_dir = self._dir_inp.text().strip()
         QMessageBox.information(self, "Saved", "Profile saved successfully.")
-
-    def _browse_dir(self):
-        path = QFileDialog.getExistingDirectory(self, "Select Output Directory", self._dir_inp.text())
-        if path:
-            self._dir_inp.setText(path)
 
     def _update_password(self):
         pwd = self._pwd_inp.text()
