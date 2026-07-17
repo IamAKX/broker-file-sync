@@ -71,20 +71,25 @@ def _strip_rolling_suffix(name: str) -> str:
     """
     Strip a trailing rolling-expiry suffix from a ReliableSoftware ScripName.
 
-    The suffix looks like ``.rolling.12D`` (or .11D, .10D, …) — i.e. the two
-    dot-separated segments after the last two dots. We remove everything from
-    the second-last dot onward, so any rolling duration is handled on the fly:
+    The suffix looks like ``.rolling.12D`` (or .11D, .10D, …) appended to the
+    company name. We cut at the ".rolling" marker itself (case-insensitive)
+    rather than assuming it's always exactly the last two dot-separated
+    segments — a fixed-position rsplit silently leaves a ".rolling" fragment
+    behind whenever the suffix isn't the very last two segments (e.g. an
+    extra trailing segment after the expiry code), which then fails to match
+    the Script Name config and leaks into the saved display name:
 
         "ABB LTD.rolling.12D"          -> "ABB LTD"
         "ADANIENT.rolling.11D"         -> "ADANIENT"
         "BIOCON LIMITED..rolling.12D"  -> "BIOCON LIMITED."
 
-    Names with fewer than two dots are returned unchanged.
+    Names without a rolling suffix are returned unchanged.
     """
     s = str(name).strip() if name is not None else ""
-    if s.count(".") < 2:
+    idx = s.lower().find(".rolling")
+    if idx == -1:
         return s
-    return s.rsplit(".", 2)[0]
+    return s[:idx]
 
 
 def generate_master(
