@@ -189,7 +189,7 @@ class BrokerImportCard(QFrame):
 
         # Browse button
         self._browse_btn = QPushButton("Browse")
-        self._browse_btn.setFixedHeight(30)
+        self._browse_btn.setFixedSize(80, 30)
         self._browse_btn.setFont(font_scale.font(font_scale.SMALL, False))
         self._browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         accent = t.get('accent')
