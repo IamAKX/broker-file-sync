@@ -22,12 +22,18 @@ def test_navigate_does_not_raise(controller):
     for name in ["dashboard", "data_import", "config_editor", "notifications", "profile", "formula_builder"]:
         w.navigate(name)
 
-def test_theme_toggle_refreshes_formula_builder(controller):
+def test_theme_toggle_refreshes_formula_builder(controller, monkeypatch):
     # Regression: formula_builder must be wired into _on_theme_toggled like
     # every other inline-styled screen, or it shows stale colors after a
     # theme switch since its styles are baked into widgets at build time.
     from app_window import MainWindow
     from unittest.mock import MagicMock
+    from api import holidays_api
+    # _on_theme_toggled also refreshes the (real, not mocked) holidays screen,
+    # whose refresh_theme() reloads via the API — mock it so this test never
+    # makes a real network call (which, on failure, pops a blocking QMessageBox
+    # that hangs a local test run waiting for a manual click).
+    monkeypatch.setattr(holidays_api, "list_holidays", lambda year: [])
     w = MainWindow(controller)
     fake = MagicMock()
     w._screens["formula_builder"] = fake
