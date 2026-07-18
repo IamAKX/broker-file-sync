@@ -36,11 +36,18 @@ def _svg_icon(filename: str, color: str) -> QIcon:
 class ToggleSwitch(QWidget):
     toggled = Signal(bool)
 
+    _WIDTH = 44
+    _HEIGHT = 24
+    _THUMB_MARGIN = 3
+
     def __init__(self, checked: bool = False, parent=None):
         super().__init__(parent)
         self._checked = checked
-        self.setFixedSize(50, 28)
+        self.setFixedSize(self._WIDTH, self._HEIGHT)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+        # Without this the widget paints an opaque background rectangle
+        # behind the rounded track, showing as a hard-edged box around it.
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
     def isChecked(self) -> bool:
         return self._checked
@@ -55,17 +62,22 @@ class ToggleSwitch(QWidget):
         self.update()
 
     def paintEvent(self, event):
+        from PySide6.QtCore import QRectF
+
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
 
+        track_rect = QRectF(0, 0, self._WIDTH, self._HEIGHT)
         track_color = QColor("#39d353") if self._checked else QColor("#555e68")
         p.setBrush(QBrush(track_color))
-        p.setPen(Qt.PenStyle.NoPen)
-        p.drawRoundedRect(0, 4, 50, 20, 10, 10)
+        p.drawRoundedRect(track_rect, self._HEIGHT / 2, self._HEIGHT / 2)
 
-        thumb_x = 26 if self._checked else 2
+        thumb_d = self._HEIGHT - 2 * self._THUMB_MARGIN
+        thumb_x = (self._WIDTH - self._THUMB_MARGIN - thumb_d) if self._checked else self._THUMB_MARGIN
+        thumb_rect = QRectF(thumb_x, self._THUMB_MARGIN, thumb_d, thumb_d)
         p.setBrush(QBrush(QColor("#ffffff")))
-        p.drawEllipse(thumb_x, 2, 22, 22)
+        p.drawEllipse(thumb_rect)
         p.end()
 
 
