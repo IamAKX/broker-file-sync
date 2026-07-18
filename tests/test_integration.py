@@ -14,7 +14,7 @@ def controller(qapp):
 def test_full_navigation_cycle(controller):
     from app_window import MainWindow
     w = MainWindow(controller)
-    for screen in ["dashboard", "data_import", "config_editor", "notifications", "profile"]:
+    for screen in ["dashboard", "data_import", "config_editor", "notifications", "profile", "formula_builder"]:
         w.navigate(screen)
 
 def test_theme_toggle_does_not_crash(controller):

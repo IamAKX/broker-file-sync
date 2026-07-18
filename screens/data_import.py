@@ -37,6 +37,12 @@ BROKERS = [
     ("MarketProfile",    "status_pink",   "Market Profile export (.csv / .xlsx)",   (".csv", ".xlsx", ".xls"), False, False),
 ]
 
+# How far back to pull historic snapshots when calculating the ExternalImport
+# database view — must cover MT/MB's "last 2 completed months" even when the
+# target date is early in its own month (worst case ~2 months back + current
+# month to date), with margin.
+_FORMULA_LOOKBACK_DAYS = 100
+
 
 def _svg_icon(filename: str, color: str) -> QIcon:
     path = os.path.join(ASSETS_DIR, filename)
@@ -226,12 +232,48 @@ class BrokerImportCard(QFrame):
         layout.addWidget(self._delete_btn)
 
     def _on_file_dropped(self, path: str):
+        if self._broker == "ExternalImport" and not self._validate_external_import_headers(path):
+            return
         self._selected_file = path
         counter = _BROKER_ROW_COUNTERS.get(self._broker, count_rows_sharekhan)
         self._row_count = counter(path)
         self._file_lbl.setText(f"Selected: {os.path.basename(path)}")
         self._file_lbl.setStyleSheet(f"color: {self._theme.get('accent')};")
         self._start_import()
+
+    def _validate_external_import_headers(self, path: str) -> bool:
+        """ExternalImport's file source must match the same column set the
+        database source calculates — reject anything else up front rather
+        than silently importing a mismatched sheet."""
+        from PySide6.QtWidgets import QMessageBox
+        from services.file_reader import read_external_import
+        from services import formula_engine
+
+        expected = ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES
+        try:
+            headers, _rows = read_external_import(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Invalid File", f"Could not read {os.path.basename(path)}:\n\n{exc}")
+            return False
+
+        actual = [str(h).strip() if h is not None else "" for h in headers]
+        if actual != expected:
+            missing = [h for h in expected if h not in actual]
+            extra = [h for h in actual if h not in expected]
+            detail_lines = []
+            if missing:
+                detail_lines.append("Missing: " + ", ".join(missing))
+            if extra:
+                detail_lines.append("Unexpected: " + ", ".join(extra))
+            if not detail_lines:
+                detail_lines.append("Column order doesn't match the required order.")
+            QMessageBox.critical(
+                self, "Column Mismatch",
+                f"{os.path.basename(path)}'s first row doesn't match the required "
+                f"ExternalImport columns.\n\n" + "\n".join(detail_lines)
+            )
+            return False
+        return True
 
     def _browse(self):
         if self._exts == (".csv",):
@@ -269,15 +311,98 @@ class BrokerImportCard(QFrame):
         self._db_mode_lbl.setStyleSheet(f"color: {inactive if is_file else active};")
 
     def _open_formula_viewer(self):
-        """Open the (placeholder) stock/formula list for the database source."""
-        from screens.formula_config import FormulaConfigWindow
+        """Fetch stored historic data, run it through the formula engine, and
+        show the calculated per-stock table for the database source."""
         if self._formula_viewer is not None and not self._formula_viewer.isHidden():
             self._formula_viewer.raise_()
             self._formula_viewer.activateWindow()
             return
-        self._formula_viewer = FormulaConfigWindow(self._theme, self)
-        self._formula_viewer.setWindowFlag(Qt.WindowType.Window)
-        self._formula_viewer.show()
+
+        from datetime import date, timedelta
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from api import historic_api, holidays_api
+        from api.exceptions import ApiError, NetworkError
+        from components.error_popup import show_api_error
+        from services import formula_engine
+        from screens.historic_viewer import HistoricDataViewer
+
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self._browse_btn.setEnabled(False)
+        original_text = self._browse_btn.text()
+        self._browse_btn.setText("Loading...")
+        try:
+            today = date.today()
+            date_from = today - timedelta(days=_FORMULA_LOOKBACK_DAYS)
+            try:
+                availability = historic_api.get_availability(date_from, today)
+                holidays = {
+                    date.fromisoformat(h["holiday_date"])
+                    for year in range(date_from.year, today.year + 1)
+                    for h in holidays_api.list_holidays(year)
+                }
+            except (ApiError, NetworkError) as exc:
+                show_api_error(self._theme, self, exc)
+                return
+
+            available_dates = sorted(
+                date.fromisoformat(d["trade_date"])
+                for d in availability.get("dates", []) if d.get("has_data")
+            )
+            if not available_dates:
+                QMessageBox.information(
+                    self, "No Data",
+                    "No historic data has been saved yet — upload some via "
+                    "Historic Upload first."
+                )
+                return
+
+            # Always calculate as of today — CWH/CMH/etc. must mean the actual
+            # current week/month, not the week of the last upload. The stock
+            # universe (which symbols to show) still comes from the latest
+            # available snapshot, since today itself may have no upload yet.
+            target = today
+            latest_available = available_dates[-1]
+            raw_by_date = {}
+            display_names = {}
+            try:
+                for d in available_dates:
+                    snapshot = historic_api.get_snapshot(d)
+                    stocks = snapshot.get("stocks", [])
+                    raw_by_date[d] = {s["symbol"]: s.get("metrics", {}) for s in stocks}
+                    if d == latest_available:
+                        display_names = {s["symbol"]: s.get("display_name") or "" for s in stocks}
+            except (ApiError, NetworkError) as exc:
+                show_api_error(self._theme, self, exc)
+                return
+
+            results = formula_engine.compute_all(raw_by_date, target, holidays)
+            if not results:
+                QMessageBox.information(
+                    self, "No Data", f"No stocks found for {target.strftime('%d-%b-%Y')}."
+                )
+                return
+
+            headers = ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES
+            rows = []
+            for symbol in sorted(results.keys()):
+                values = results[symbol]
+                row = [symbol, display_names.get(symbol, "")]
+                for code in formula_engine.FORMULA_CODES:
+                    v = values.get(code)
+                    row.append("" if v is None else round(v, 4))
+                rows.append(row)
+
+            target_str = target.strftime("%d-%b-%Y")
+            self._formula_viewer = HistoricDataViewer(
+                headers, rows, target_str, theme=self._theme,
+                title=f"External Import — as of {target_str}",
+            )
+            self._formula_viewer.setWindowFlag(Qt.WindowType.Window)
+            self._formula_viewer.show()
+        finally:
+            self._browse_btn.setEnabled(True)
+            self._browse_btn.setText(original_text)
+            QApplication.restoreOverrideCursor()
 
     def _start_import(self):
         if hasattr(self, "_timer") and self._timer.isActive():

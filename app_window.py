@@ -8,6 +8,7 @@ class MainWindow(QMainWindow):
     def __init__(self, controller):
         super().__init__()
         self._controller = controller
+        self._navigation_locked = False
         self.setWindowTitle("Broker File Sync")
         self.resize(1280, 800)
         self.setMinimumSize(1100, 700)
@@ -53,6 +54,8 @@ class MainWindow(QMainWindow):
         from screens.profile import ProfileScreen
         from screens.strategy_builder import StrategyBuilderScreen
         from screens.historic_upload import HistoricUploadScreen
+        from screens.formula_builder import FormulaBuilderScreen
+        from screens.holidays import HolidaysScreen
 
         dashboard        = DashboardScreen(self._controller)
         data_import      = DataImportScreen(self._controller)
@@ -85,6 +88,8 @@ class MainWindow(QMainWindow):
             ("notifications",    NotificationsScreen(self._controller)),
             ("profile",          ProfileScreen(self._controller)),
             ("historic_upload",  HistoricUploadScreen(self._controller)),
+            ("formula_builder",  FormulaBuilderScreen(self._controller)),
+            ("holidays",         HolidaysScreen(self._controller)),
         ]
         for name, widget in screens:
             self._screens[name] = widget
@@ -94,9 +99,43 @@ class MainWindow(QMainWindow):
         self._sidebar.refresh_user()
 
     def navigate(self, screen_name: str):
+        if self._navigation_locked and screen_name != "holidays":
+            return
         if screen_name in self._screens:
             self._stack.setCurrentWidget(self._screens[screen_name])
             self._sidebar.set_active(screen_name)
+
+    # ── Current-year holiday gate ───────────────────────────────────────────
+    # On every login/session start, and again whenever the holidays screen
+    # saves or deletes a row, verify the current year has at least one
+    # holiday on file. If not, force the user onto Market Holidays and lock
+    # the rest of the app (sidebar + topbar disabled) until it does.
+
+    def check_holiday_gate(self, initial: bool = False):
+        from datetime import date
+        from api import holidays_api
+        from api.exceptions import ApiError, NetworkError
+        try:
+            holidays = holidays_api.list_holidays(date.today().year)
+        except (ApiError, NetworkError):
+            # Can't verify right now — don't lock the user out over a
+            # transient network issue.
+            self._set_navigation_locked(False)
+            if initial:
+                self.navigate("dashboard")
+            return
+        if holidays:
+            self._set_navigation_locked(False)
+            if initial:
+                self.navigate("dashboard")
+        else:
+            self._set_navigation_locked(True)
+            self.navigate("holidays")
+
+    def _set_navigation_locked(self, locked: bool):
+        self._navigation_locked = locked
+        self._sidebar.setEnabled(not locked)
+        self._topbar.setEnabled(not locked)
 
     def closeEvent(self, event):
         self._controller.watcher.stop()
@@ -139,3 +178,9 @@ class MainWindow(QMainWindow):
         historic_upload = self._screens.get("historic_upload")
         if historic_upload is not None:
             historic_upload.refresh_theme()
+        formula_builder = self._screens.get("formula_builder")
+        if formula_builder is not None:
+            formula_builder.refresh_theme()
+        holidays = self._screens.get("holidays")
+        if holidays is not None:
+            holidays.refresh_theme()

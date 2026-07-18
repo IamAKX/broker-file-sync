@@ -498,3 +498,4 @@ MAIN_COLUMN_ORDER_DATA = [
     ("Symbol",),
     ("Max Pain",),
 ]
+

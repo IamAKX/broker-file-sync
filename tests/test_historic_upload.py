@@ -113,6 +113,18 @@ def test_historic_data_viewer_populates_table(qapp):
     assert viewer._table.item(1, 1).text() == "3500"
 
 
+def test_historic_data_viewer_default_title_uses_date_str(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(["Symbol"], [["INFY"]], "05-Jul-2026")
+    assert viewer.windowTitle() == "Historic Data — 05-Jul-2026"
+
+
+def test_historic_data_viewer_custom_title_overrides_default(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(["Symbol"], [["INFY"]], "05-Jul-2026", title="Custom Title")
+    assert viewer.windowTitle() == "Custom Title"
+
+
 def test_historic_viewer_symbol_search_filters_rows(qapp):
     from screens.historic_viewer import HistoricDataViewer
     viewer = HistoricDataViewer(

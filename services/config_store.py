@@ -39,6 +39,20 @@ def _save_raw(data: dict):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def save_json(key: str, value) -> None:
+    """Persist any JSON-serializable value under *key* (for data that isn't
+    a flat row-table, e.g. the ExternalImport formula list)."""
+    data = _load_raw()
+    data[key] = value
+    _save_raw(data)
+
+
+def load_json(key: str, default):
+    """Return the saved value for *key*, or *default* when none saved."""
+    data = _load_raw()
+    return data.get(key, default)
+
+
 def load_tab(key: str, default: list) -> list:
     """Return saved rows for *key*, or *default* (as lists) when none saved."""
     data = _load_raw()

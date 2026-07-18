@@ -11,13 +11,14 @@ from components.column_filter_popup import ColumnFilterPopup
 class HistoricDataViewer(QWidget):
     """Read-only popup showing the saved historic rows/columns for one date."""
 
-    def __init__(self, headers: list, rows: list, date_str: str, theme=None, parent=None):
+    def __init__(self, headers: list, rows: list, date_str: str, theme=None,
+                 parent=None, title: str = None):
         super().__init__(parent)
         self._theme = theme
         self._headers = headers
         self._symbol_col = headers.index("Symbol") if "Symbol" in headers else -1
         self._visible_cols = set(range(len(headers)))
-        self.setWindowTitle(f"Historic Data — {date_str}")
+        self.setWindowTitle(title if title is not None else f"Historic Data — {date_str}")
         self.resize(1000, 600)
         self._build(headers, rows)
 

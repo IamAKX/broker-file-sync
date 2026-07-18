@@ -13,7 +13,7 @@ from config_defaults import SCRIPT_NAME_DATA
 from services import config_store
 from services.file_reader import read_historic_sheet
 from services.master_generator import _build_script_name_lookup, _strip_rolling_suffix
-from api import historic_api
+from api import historic_api, holidays_api
 from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
 from screens.historic_viewer import HistoricDataViewer
@@ -121,6 +121,38 @@ class _AvailabilityCalendar(QCalendarWidget):
             dot_r = 3
             cx = rect.center().x()
             cy = rect.bottom() - 8
+            painter.drawEllipse(cx - dot_r, cy - dot_r, dot_r * 2, dot_r * 2)
+            painter.restore()
+
+
+class _HolidayCalendar(QCalendarWidget):
+    """QCalendarWidget that draws a red dot under market holidays."""
+
+    def __init__(self, theme, parent=None):
+        super().__init__(parent)
+        self._theme = theme
+        self._holiday_days: set = set()
+
+    def set_holiday_days(self, days: set):
+        self._holiday_days = days
+        self.updateCells()
+
+    def paintCell(self, painter, rect, date_obj):
+        super().paintCell(painter, rect, date_obj)
+        if (date_obj.year() == self.yearShown() and
+                date_obj.month() == self.monthShown() and
+                date_obj.day() in self._holiday_days):
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setBrush(QBrush(QColor(self._theme.get("status_red"))))
+            painter.setPen(Qt.PenStyle.NoPen)
+            # Proportional to cell height (not a fixed pixel offset) — this
+            # popup calendar's cells are much shorter than the embedded
+            # Browse-by-Date calendar's, so a fixed offset placed the dot on
+            # top of the date digit instead of clearly below it.
+            dot_r = max(2, min(3, rect.height() // 10))
+            cx = rect.center().x()
+            cy = rect.bottom() - dot_r - 2
             painter.drawEllipse(cx - dot_r, cy - dot_r, dot_r * 2, dot_r * 2)
             painter.restore()
 
@@ -416,7 +448,7 @@ class HistoricUploadScreen(QWidget):
 
     def _show_date_picker(self):
         t = self._controller.theme
-        cal = QCalendarWidget()
+        cal = _HolidayCalendar(t)
         cal.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         cal.setFont(font_scale.font(font_scale.SMALL, False))
         cal.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -426,12 +458,34 @@ class HistoricUploadScreen(QWidget):
         cal.setSelectedDate(qd)
         cal.setCurrentPage(qd.year(), qd.month())
 
+        self._picker_holidays: set = set()
+
+        def refresh_holidays(year, month):
+            try:
+                rows = holidays_api.list_holidays(year)
+            except (ApiError, NetworkError):
+                self._picker_holidays = set()
+                cal.set_holiday_days(set())
+                return
+            self._picker_holidays = {date.fromisoformat(r["holiday_date"]) for r in rows}
+            days_this_month = {d.day for d in self._picker_holidays if d.month == month}
+            cal.set_holiday_days(days_this_month)
+
         def on_date_selected(date_obj):
-            self._upload_date = date(date_obj.year(), date_obj.month(), date_obj.day())
+            selected = date(date_obj.year(), date_obj.month(), date_obj.day())
+            if selected in self._picker_holidays:
+                self._status_lbl.setText(
+                    f"{selected.strftime('%d-%b-%Y')} is a market holiday — pick another date."
+                )
+                self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
+                return
+            self._upload_date = selected
             self._date_btn.setText(self._upload_date.strftime("%d-%b-%Y"))
             self._close_date_picker()
 
+        cal.currentPageChanged.connect(refresh_holidays)
         cal.clicked.connect(on_date_selected)
+        refresh_holidays(qd.year(), qd.month())
         cal.show()
         self._date_picker = cal
         self._date_picker_outside_timer = QTimer()

@@ -318,13 +318,79 @@ def test_toggling_to_database_renames_browse_button_to_view(qapp):
     assert card._browse_btn.text() == "Browse"
 
 
-def test_database_mode_opens_formula_viewer_popup(qapp):
+def test_database_mode_calculates_and_shows_table(qapp, monkeypatch):
     from app import AppController
     from screens.data_import import DataImportScreen
-    from screens.formula_config import FormulaConfigWindow
+    from screens.historic_viewer import HistoricDataViewer
+    from services import formula_engine
+    from api import historic_api
+
+    d1, d2 = "2026-06-01", "2026-06-02"
+    monkeypatch.setattr(
+        historic_api, "get_availability",
+        lambda date_from, date_to: {
+            "dates": [
+                {"trade_date": d1, "has_data": True},
+                {"trade_date": d2, "has_data": True},
+            ]
+        },
+    )
+
+    def fake_snapshot(trade_date):
+        day = trade_date.isoformat()
+        base = 10 if day == d1 else 11
+        return {
+            "trade_date": day,
+            "stocks": [
+                {
+                    "symbol": "INFY",
+                    "display_name": "Infosys",
+                    "metrics": {
+                        "Open": base, "High": base + 2, "Low": base - 1, "Close": base + 1,
+                        "pdh": base + 1, "pdl": base - 2, "PClose": base,
+                        "AvgRate": base + 0.5, "Quantity": 1000, "DiffPcnt": 1.0,
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(historic_api, "get_snapshot", fake_snapshot)
+
     screen = DataImportScreen(AppController(qapp))
     card = screen._cards["ExternalImport"]
     card._on_source_toggled(True)
     card._on_primary_action()
-    assert isinstance(card._formula_viewer, FormulaConfigWindow)
-    assert card._formula_viewer.isVisible()
+
+    assert isinstance(card._formula_viewer, HistoricDataViewer)
+    assert card._formula_viewer._headers == ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES
+    assert card._formula_viewer._table.rowCount() == 1
+    assert card._formula_viewer._table.item(0, 0).text() == "INFY"
+    # DAY TO must be non-blank — (Quantity*AvgRate)/1e7 * abs(DiffPcnt)/100 is fully known
+    day_to_col = card._formula_viewer._headers.index("DAY TO")
+    assert card._formula_viewer._table.item(0, day_to_col).text() != ""
+    # Browse button restored to "View" after the (synchronous) load completes
+    assert card._browse_btn.text() == "View"
+    assert card._browse_btn.isEnabled()
+    # Title must say ExternalImport and clearly mark the reference date as
+    # "as of" — the target is the latest date WITH data, not necessarily
+    # today, and a plain date was previously mistaken for "current" data.
+    assert card._formula_viewer.windowTitle() == "External Import — as of 02-Jun-2026"
+
+
+def test_database_mode_no_data_shows_message(qapp, monkeypatch):
+    from app import AppController
+    from screens.data_import import DataImportScreen
+    from api import historic_api
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(historic_api, "get_availability", lambda date_from, date_to: {"dates": []})
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: shown.append(a)))
+
+    screen = DataImportScreen(AppController(qapp))
+    card = screen._cards["ExternalImport"]
+    card._on_source_toggled(True)
+    card._on_primary_action()
+
+    assert card._formula_viewer is None
+    assert len(shown) == 1

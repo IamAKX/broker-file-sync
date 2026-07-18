@@ -35,7 +35,7 @@ class AppController:
         else:
             self._main_window.refresh_user()
         self._main_window.show()
-        self._main_window.navigate("dashboard")
+        self._main_window.check_holiday_gate(initial=True)
 
     def show_login(self):
         from screens.login import LoginScreen
@@ -71,3 +71,7 @@ class AppController:
     def refresh_user_display(self):
         if self._main_window is not None:
             self._main_window.refresh_user()
+
+    def recheck_holiday_gate(self):
+        if self._main_window is not None:
+            self._main_window.check_holiday_gate(initial=False)
