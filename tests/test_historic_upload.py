@@ -49,9 +49,11 @@ def test_populate_columns_creates_checkboxes(qapp):
     from app import AppController
     from screens.historic_upload import HistoricUploadScreen
     screen = HistoricUploadScreen(AppController(qapp))
-    screen._headers = ["Symbol", "Close", "Volume"]
-    screen._rows = [["INFY", 1800, 100]]
+    # A=DataTime, B=ScripName (structural, excluded), C-E fall in the C-M metric range
+    screen._headers = ["DataTime", "ScripName", "DiffPcnt", "Open", "High"]
+    screen._rows = [[46204, "INFY", -0.03, 1800, 1810]]
     screen._selected_file = "dummy.csv"
+    screen._structural_cols = {0, 1}
     screen._populate_columns()
     assert len(screen._checkboxes) == 3
     screen._update_save_enabled()
@@ -62,6 +64,27 @@ def test_populate_columns_creates_checkboxes(qapp):
     screen._checkboxes[2].setChecked(False)
     screen._update_save_enabled()
     assert not screen._save_btn.isEnabled()
+
+
+def test_populate_columns_excludes_outside_c_to_m_range(qapp):
+    from app import AppController
+    from screens.historic_upload import HistoricUploadScreen
+    screen = HistoricUploadScreen(AppController(qapp))
+    # 14 headers: A/B structural, C-M (indices 2-12) are the 11 eligible metric
+    # columns, N (index 13) is beyond the range and must not get a checkbox.
+    screen._headers = [
+        "DataTime", "ScripName",
+        "DiffPcnt", "Open", "High", "Low", "Close", "pdh", "pdl",
+        "PClose", "AvgRate", "Quantity", "PQuantity",
+        "PMHL_High",
+    ]
+    screen._rows = [[46204, "INFY"] + [0] * 11 + [999]]
+    screen._selected_file = "dummy.csv"
+    screen._structural_cols = {0, 1}
+    screen._populate_columns()
+    assert len(screen._checkboxes) == 11
+    assert "PMHL_High" not in [cb.text() for cb in screen._checkboxes]
+    assert "DataTime" not in [cb.text() for cb in screen._checkboxes]
 
 
 def test_view_button_enabled_only_on_available_day(qapp):

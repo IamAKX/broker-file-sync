@@ -18,6 +18,12 @@ from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
 from screens.historic_viewer import HistoricDataViewer
 
+# Only columns C through M (0-based indices 2-12, inclusive) of the historic upload
+# sheet are eligible for the metrics checkboxes — everything else (A/B structural
+# columns, and N onward) is never offered for upload.
+_METRIC_COL_START = 2   # column C
+_METRIC_COL_END = 12    # column M (inclusive)
+
 
 def _themed_calendar_stylesheet(theme) -> str:
     bg     = theme.get('card_bg')
@@ -298,6 +304,8 @@ class HistoricUploadScreen(QWidget):
         self._checkboxes = []
         self._checkbox_col_indices = []
         for i, header in enumerate(self._headers):
+            if i < _METRIC_COL_START or i > _METRIC_COL_END:
+                continue
             if i in self._structural_cols:
                 continue
             cb = QCheckBox(str(header) if header else "(unnamed)")
