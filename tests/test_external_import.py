@@ -280,3 +280,51 @@ def test_live_viewer_accepts_external_path(qapp, tmp_path, monkeypatch):
     from screens.live_viewer import LiveViewerWindow
     lmv = LiveViewerWindow("", "", "", [], external_path=str(tmp_path / "ext.csv"))
     assert lmv._external_path is not None
+
+
+# ── ExternalImport file/database source toggle ─────────────────────────────────
+
+def test_external_import_card_has_source_toggle(qapp):
+    from app import AppController
+    from screens.data_import import DataImportScreen
+    screen = DataImportScreen(AppController(qapp))
+    card = screen._cards["ExternalImport"]
+    assert card._show_source_toggle is True
+    assert card._source_mode == "file"
+    assert card._browse_btn.text() == "Browse"
+
+
+def test_other_cards_have_no_source_toggle(qapp):
+    from app import AppController
+    from screens.data_import import DataImportScreen
+    screen = DataImportScreen(AppController(qapp))
+    for broker in ["Sharekhan", "ReliableSoftware", "NiftyInvest", "MarketProfile"]:
+        card = screen._cards[broker]
+        assert card._show_source_toggle is False
+        assert not hasattr(card, "_source_toggle")
+
+
+def test_toggling_to_database_renames_browse_button_to_view(qapp):
+    from app import AppController
+    from screens.data_import import DataImportScreen
+    screen = DataImportScreen(AppController(qapp))
+    card = screen._cards["ExternalImport"]
+    card._on_source_toggled(True)
+    assert card._source_mode == "database"
+    assert card._browse_btn.text() == "View"
+
+    card._on_source_toggled(False)
+    assert card._source_mode == "file"
+    assert card._browse_btn.text() == "Browse"
+
+
+def test_database_mode_opens_formula_viewer_popup(qapp):
+    from app import AppController
+    from screens.data_import import DataImportScreen
+    from screens.formula_config import FormulaConfigWindow
+    screen = DataImportScreen(AppController(qapp))
+    card = screen._cards["ExternalImport"]
+    card._on_source_toggled(True)
+    card._on_primary_action()
+    assert isinstance(card._formula_viewer, FormulaConfigWindow)
+    assert card._formula_viewer.isVisible()
