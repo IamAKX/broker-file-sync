@@ -244,7 +244,11 @@ def test_missing_data_returns_none_not_crash():
     assert set(out.keys()) == set(fe.FORMULA_CODES)
 
 
-def test_compute_all_only_includes_target_date_symbols():
+def test_compute_all_stock_universe_comes_from_latest_date_not_target():
+    # target is always real "today", which may differ from the most recent
+    # date with data — the stock universe must reflect whichever date is
+    # latest in raw_by_date, not target itself (target only drives the
+    # window math inside compute_for_symbol).
     d1, d2 = date(2026, 6, 1), date(2026, 6, 2)
     raw_by_date = {
         d1: {"AAA": {"High": 10, "Low": 5, "Close": 8, "Open": 6}},
@@ -252,6 +256,17 @@ def test_compute_all_only_includes_target_date_symbols():
              "BBB": {"High": 20, "Low": 15, "Close": 18, "Open": 16}},
     }
     results = fe.compute_all(raw_by_date, d1)
+    assert set(results.keys()) == {"AAA", "BBB"}
+
+
+def test_compute_all_excludes_symbols_not_on_latest_date():
+    d1, d2 = date(2026, 6, 1), date(2026, 6, 2)
+    raw_by_date = {
+        d1: {"AAA": {"High": 10, "Low": 5, "Close": 8, "Open": 6},
+             "ZZZ": {"High": 1, "Low": 1, "Close": 1, "Open": 1}},
+        d2: {"AAA": {"High": 11, "Low": 6, "Close": 9, "Open": 7}},
+    }
+    results = fe.compute_all(raw_by_date, d2)
     assert set(results.keys()) == {"AAA"}
 
 

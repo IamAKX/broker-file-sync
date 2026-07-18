@@ -319,13 +319,18 @@ def test_toggling_to_database_renames_browse_button_to_view(qapp):
 
 
 def test_database_mode_calculates_and_shows_table(qapp, monkeypatch):
+    from datetime import date, timedelta
     from app import AppController
     from screens.data_import import DataImportScreen
     from screens.historic_viewer import HistoricDataViewer
     from services import formula_engine
-    from api import historic_api
+    from api import historic_api, holidays_api
 
-    d1, d2 = "2026-06-01", "2026-06-02"
+    # target is always real "today" now — the fixture's latest date must BE
+    # today, or today-dependent formulas (DAY TO, camarilla, ...) come back
+    # blank since there's no row for target at all.
+    today = date.today()
+    d1, d2 = (today - timedelta(days=1)).isoformat(), today.isoformat()
     monkeypatch.setattr(
         historic_api, "get_availability",
         lambda date_from, date_to: {
@@ -335,6 +340,7 @@ def test_database_mode_calculates_and_shows_table(qapp, monkeypatch):
             ]
         },
     )
+    monkeypatch.setattr(holidays_api, "list_holidays", lambda year: [])
 
     def fake_snapshot(trade_date):
         day = trade_date.isoformat()
@@ -372,18 +378,19 @@ def test_database_mode_calculates_and_shows_table(qapp, monkeypatch):
     assert card._browse_btn.text() == "View"
     assert card._browse_btn.isEnabled()
     # Title must say ExternalImport and clearly mark the reference date as
-    # "as of" — the target is the latest date WITH data, not necessarily
-    # today, and a plain date was previously mistaken for "current" data.
-    assert card._formula_viewer.windowTitle() == "External Import — as of 02-Jun-2026"
+    # "as of" today (the calculation is always anchored to today, not the
+    # latest date with data).
+    assert card._formula_viewer.windowTitle() == f"External Import — as of {today.strftime('%d-%b-%Y')}"
 
 
 def test_database_mode_no_data_shows_message(qapp, monkeypatch):
     from app import AppController
     from screens.data_import import DataImportScreen
-    from api import historic_api
+    from api import historic_api, holidays_api
     from PySide6.QtWidgets import QMessageBox
 
     monkeypatch.setattr(historic_api, "get_availability", lambda date_from, date_to: {"dates": []})
+    monkeypatch.setattr(holidays_api, "list_holidays", lambda year: [])
     shown = []
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: shown.append(a)))
 
