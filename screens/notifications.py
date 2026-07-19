@@ -1,13 +1,18 @@
 import font_scale
 import re
 import os
+from datetime import time as dtime
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QFrame, QLineEdit, QScrollArea, QSizePolicy
+    QFrame, QLineEdit, QScrollArea, QSizePolicy, QTableWidget,
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QCheckBox,
+    QDialog, QTimeEdit, QToolButton
 )
-from PySide6.QtCore import Qt, QByteArray, QSize, Signal, QPropertyAnimation, QEasingCurve, Property
+from PySide6.QtCore import Qt, QByteArray, QSize, Signal, QPropertyAnimation, QEasingCurve, Property, QTime
 from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QPen, QBrush
 from PySide6.QtSvg import QSvgRenderer
+
+from services import trigger_config
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
 
@@ -156,13 +161,44 @@ class ChannelCard(QFrame):
         self._toggle.toggled.connect(slot)
 
 
-class _TriggerRow:
-    """Thin wrapper so status counting works the same way."""
-    def __init__(self, toggle: ToggleSwitch):
-        self._toggle = toggle
+class _TriggerTimeDialog(QDialog):
+    def __init__(self, trigger_name: str, current_time: dtime, theme, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Edit Time — {trigger_name}")
+        from screens.strategy_builder import _apply_dialog_bg
+        _apply_dialog_bg(self, theme)
 
-    def is_enabled(self) -> bool:
-        return self._toggle.isChecked()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        lbl = QLabel("Trigger time")
+        lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        layout.addWidget(lbl)
+
+        self._time_edit = QTimeEdit(QTime(current_time.hour, current_time.minute))
+        self._time_edit.setDisplayFormat("hh:mm AP")
+        self._time_edit.setFixedHeight(36)
+        layout.addWidget(self._time_edit)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton("Save")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.setStyleSheet(
+            f"background: {theme.get('accent')}; color: {theme.get('background')}; border: none;"
+        )
+        save_btn.clicked.connect(self.accept)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+    def result_time(self) -> dtime:
+        qt = self._time_edit.time()
+        return dtime(qt.hour(), qt.minute())
 
 
 class NotificationsScreen(QWidget):
@@ -171,7 +207,8 @@ class NotificationsScreen(QWidget):
         self._controller = controller
         self._sms_card: ChannelCard = None
         self._telegram_card: ChannelCard = None
-        self._trigger_cards: list[TriggerCard] = []
+        self._configs: list = []
+        self._table: QTableWidget = None
         self._sms_status_lbl: QLabel = None
         self._telegram_status_lbl: QLabel = None
         self._triggers_status_lbl: QLabel = None
@@ -238,70 +275,34 @@ class NotificationsScreen(QWidget):
         div0.setStyleSheet(f"background-color: {t.get('divider')};")
         tp_layout.addWidget(div0)
 
-        trigger_defs = [
-            ("High Value Met",          "Alert when a stock hits its configured high target price",                          True),
-            ("Low Value Met",           "Alert when a stock falls to its configured low threshold price",                    True),
-            ("End of Day Report",       "Daily summary of all trades, imports, and processing activity for the day",         True),
-            ("Weekly Summary",          "Weekly digest of portfolio activity, import stats, and error counts",               False),
-            ("Monthly Report",          "Monthly consolidated report of all broker imports, rows processed, and anomalies",  False),
-            ("File Imported",           "Alert when a broker file is successfully uploaded and read",                        True),
-            ("Processing Complete",     "Alert when all broker files have been processed and the output is ready",           True),
-            ("Import Error",            "Alert immediately when a file fails to import or cannot be parsed",                 True),
-            ("Duplicate File Detected", "Alert when the same broker file is submitted for import more than once",            False),
-            ("Config Mapping Missing",  "Alert when a required column or script mapping is absent from the config",          False),
-            ("Row Count Anomaly",       "Alert when imported row count deviates significantly from the previous import",     False),
-            ("New Broker Added",        "Alert when a new broker source is registered or activated in the system",           False),
-        ]
+        self._configs = trigger_config.load_trigger_configs()
 
-        # Scrollable list
-        trigger_scroll = QScrollArea()
-        trigger_scroll.setWidgetResizable(True)
-        trigger_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        trigger_scroll.setFixedHeight(260)
-        trigger_scroll.setContentsMargins(0, 0, 4, 0)
+        table = QTableWidget(0, 5)
+        table.setHorizontalHeaderLabels(["Trigger", "Time", "System", "Telegram", "SMS"])
+        table.verticalHeader().setVisible(False)
+        table.setShowGrid(False)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        table.setFixedHeight(3 * 64 + 40)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        for col in (1, 2, 3, 4):
+            header.setSectionResizeMode(col, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(1, 140)
+        table.setColumnWidth(2, 80)
+        table.setColumnWidth(3, 80)
+        table.setColumnWidth(4, 80)
+        table.setStyleSheet(
+            f"QTableWidget {{ background: transparent; border: none;"
+            f"gridline-color: {t.get('divider')}; }}"
+            f"QHeaderView::section {{ background: transparent; color: {t.get('text_secondary')};"
+            f"border: none; border-bottom: 1px solid {t.get('divider')}; padding: 6px; }}"
+        )
 
-        trigger_container = QWidget()
-        tc_layout = QVBoxLayout(trigger_container)
-        tc_layout.setContentsMargins(0, 0, 0, 0)
-        tc_layout.setSpacing(0)
-
-        for i, (title_text, desc, checked) in enumerate(trigger_defs):
-            # Row tile
-            tile = QWidget()
-            tile_layout = QHBoxLayout(tile)
-            tile_layout.setContentsMargins(12, 12, 12, 12)
-            tile_layout.setSpacing(16)
-
-            text_col = QVBoxLayout()
-            text_col.setSpacing(3)
-            t_title = QLabel(title_text)
-            t_title.setFont(font_scale.font(font_scale.MEDIUM, True))
-            t_desc = QLabel(desc)
-            t_desc.setFont(font_scale.font(font_scale.SMALL, False))
-            t_desc.setStyleSheet(f"color: {t.get('text_secondary')};")
-            text_col.addWidget(t_title)
-            text_col.addWidget(t_desc)
-
-            toggle = ToggleSwitch(checked)
-            toggle.toggled.connect(self._on_toggle_changed)
-
-            tile_layout.addLayout(text_col, 1)
-            tile_layout.addWidget(toggle)
-            tc_layout.addWidget(tile)
-
-            # Store toggle for status counting
-            card = _TriggerRow(toggle)
-            self._trigger_cards.append(card)
-
-            # Divider between rows (not after last)
-            if i < len(trigger_defs) - 1:
-                sep = QWidget(); sep.setFixedHeight(1)
-                sep.setStyleSheet(f"background-color: {t.get('divider')};")
-                tc_layout.addWidget(sep)
-
-        tc_layout.addStretch()
-        trigger_scroll.setWidget(trigger_container)
-        tp_layout.addWidget(trigger_scroll)
+        self._table = table
+        self._populate_trigger_table()
+        tp_layout.addWidget(table)
         layout.addWidget(triggers_panel)
 
         layout.addStretch()
@@ -355,8 +356,87 @@ class NotificationsScreen(QWidget):
             f"color: {t.get('accent') if tg_on else t.get('text_secondary')};"
         )
 
-        active = sum(1 for c in self._trigger_cards if c.is_enabled())
-        total = len(self._trigger_cards)
+        active = sum(1 for c in self._configs if c.system_enabled)
+        total = len(self._configs)
         color = t.get("accent") if active == total else t.get("text_secondary")
         self._triggers_status_lbl.setText(f"{active} of {total} triggers active")
         self._triggers_status_lbl.setStyleSheet(f"color: {color};")
+
+    # ── Trigger table ────────────────────────────────────────────────────────
+
+    def _populate_trigger_table(self):
+        t = self._controller.theme
+        table = self._table
+        table.setRowCount(len(self._configs))
+        for row, cfg in enumerate(self._configs):
+            table.setRowHeight(row, 64)
+            table.setCellWidget(row, 0, self._make_name_widget(cfg, t))
+            table.setCellWidget(row, 1, self._make_time_widget(cfg, t))
+            table.setCellWidget(row, 2, self._make_checkbox_widget(cfg, "system"))
+            table.setCellWidget(row, 3, self._make_checkbox_widget(cfg, "telegram"))
+            table.setCellWidget(row, 4, self._make_checkbox_widget(cfg, "sms"))
+
+    def _make_name_widget(self, cfg, t) -> QWidget:
+        cell = QWidget()
+        col = QVBoxLayout(cell)
+        col.setContentsMargins(8, 8, 8, 8)
+        col.setSpacing(3)
+        name_lbl = QLabel(cfg.name)
+        name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
+        sub_lbl = QLabel(cfg.subtitle)
+        sub_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        sub_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        sub_lbl.setWordWrap(True)
+        col.addWidget(name_lbl)
+        col.addWidget(sub_lbl)
+        return cell
+
+    def _make_time_widget(self, cfg, t) -> QWidget:
+        cell = QWidget()
+        row = QHBoxLayout(cell)
+        row.setContentsMargins(8, 8, 8, 8)
+        row.setSpacing(6)
+
+        time_lbl = QLabel(cfg.time.strftime("%I:%M %p").lstrip("0"))
+        time_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+
+        edit_btn = QToolButton()
+        edit_btn.setIcon(_svg_icon("config_editor.svg", t.get("text_secondary")))
+        edit_btn.setIconSize(QSize(14, 14))
+        edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        edit_btn.setStyleSheet("QToolButton { background: transparent; border: none; }")
+        edit_btn.setToolTip("Edit trigger time")
+        edit_btn.clicked.connect(lambda: self._open_edit_time(cfg, time_lbl))
+
+        row.addWidget(time_lbl)
+        row.addWidget(edit_btn)
+        row.addStretch()
+        return cell
+
+    def _make_checkbox_widget(self, cfg, channel: str) -> QWidget:
+        cell = QWidget()
+        row = QHBoxLayout(cell)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        cb = QCheckBox()
+        cb.setChecked(getattr(cfg, f"{channel}_enabled"))
+        cb.setCursor(Qt.CursorShape.PointingHandCursor)
+        cb.stateChanged.connect(lambda state, c=cfg, ch=channel: self._on_checkbox_changed(c, ch, bool(state)))
+        row.addWidget(cb)
+        return cell
+
+    def _on_checkbox_changed(self, cfg, channel: str, checked: bool):
+        setattr(cfg, f"{channel}_enabled", checked)
+        self._save_configs()
+
+    def _open_edit_time(self, cfg, time_lbl: QLabel):
+        dlg = _TriggerTimeDialog(cfg.name, cfg.time, self._controller.theme, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            cfg.time = dlg.result_time()
+            time_lbl.setText(cfg.time.strftime("%I:%M %p").lstrip("0"))
+            self._save_configs()
+
+    def _save_configs(self):
+        trigger_config.save_trigger_configs(self._configs)
+        self._on_toggle_changed()

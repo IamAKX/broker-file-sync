@@ -499,3 +499,16 @@ MAIN_COLUMN_ORDER_DATA = [
     ("Max Pain",),
 ]
 
+# Background scheduler triggers: (id, name, subtitle, default_time "HH:MM")
+SCHEDULER_TRIGGER_DEFAULTS = [
+    ("availability_check", "Historic Availability Check",
+     "Checks that the previous trading day's historic data was saved; alerts if it's missing.",
+     "08:55"),
+    ("lmv_check", "LMV Load Check",
+     "Reminds you to load the Live Master View before today's historic save runs.",
+     "15:40"),
+    ("historic_save", "Daily Historic Save",
+     "Saves today's Live Master View data to Historic records automatically.",
+     "15:45"),
+]
+

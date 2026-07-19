@@ -22,7 +22,24 @@ def test_navigate_does_not_raise(controller):
     for name in ["dashboard", "data_import", "config_editor", "notifications", "profile", "formula_builder"]:
         w.navigate(name)
 
-def test_close_event_closes_child_windows(controller):
+def test_close_event_hides_instead_of_quitting_by_default(controller):
+    """Tray-resident: the X button hides the window rather than tearing it
+    down, so the background scheduler keeps running."""
+    from app_window import MainWindow
+    from PySide6.QtGui import QCloseEvent
+    from unittest.mock import MagicMock
+
+    w = MainWindow(controller)
+    live_viewer = MagicMock()
+    w._screens["data_import"]._live_viewer = live_viewer
+
+    assert controller.is_quitting is False
+    w.closeEvent(QCloseEvent())
+
+    live_viewer.close.assert_not_called()
+
+
+def test_close_event_closes_child_windows_when_really_quitting(controller):
     from app_window import MainWindow
     from PySide6.QtGui import QCloseEvent
     from unittest.mock import MagicMock
@@ -36,6 +53,7 @@ def test_close_event_closes_child_windows(controller):
     historic_viewer_2 = MagicMock()
     w._screens["historic_upload"]._viewers = [historic_viewer_1, historic_viewer_2]
 
+    controller.is_quitting = True
     w.closeEvent(QCloseEvent())
 
     live_viewer.close.assert_called_once()

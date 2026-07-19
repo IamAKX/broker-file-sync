@@ -25,7 +25,7 @@ class MainWindow(QMainWindow):
         self._topbar.theme_toggled.connect(self._on_theme_toggled)
         self._topbar.restart_requested.connect(lambda: self.navigate("dashboard"))
         self._topbar.navigate.connect(self.navigate)
-        self._topbar.quit_requested.connect(QApplication.quit)
+        self._topbar.quit_requested.connect(self._controller.request_quit)
         self._topbar.logout_requested.connect(self._controller.show_login)
         self._topbar.fullscreen_requested.connect(self._toggle_fullscreen)
         root.addWidget(self._topbar)
@@ -143,6 +143,15 @@ class MainWindow(QMainWindow):
         self._topbar.setEnabled(not locked)
 
     def closeEvent(self, event):
+        if not self._controller.is_quitting:
+            # Tray-resident: closing the window (X button) hides it instead
+            # of quitting, so the background scheduler keeps running. Real
+            # exit only happens via AppController.request_quit() (tray
+            # menu's Quit, or File > Quit).
+            event.ignore()
+            self.hide()
+            return
+
         self._controller.watcher.stop()
         # Close live viewer if open
         data_import = self._screens.get("data_import")

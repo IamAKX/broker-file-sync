@@ -14,6 +14,8 @@ from api.token_store import token_manager
 from api.exceptions import ApiError, NetworkError
 from components.sidebar import _initials
 from components.error_popup import show_api_error
+from screens.notifications import ToggleSwitch
+from services import autostart
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
 
@@ -193,6 +195,24 @@ class ProfileScreen(QWidget):
 
         left_layout.addSpacing(8)
 
+        # Start on login
+        if autostart.is_supported():
+            div_autostart = QWidget(); div_autostart.setFixedHeight(1)
+            div_autostart.setStyleSheet(f"background-color: {t.get('divider')};")
+            left_layout.addWidget(div_autostart)
+
+            autostart_row = QHBoxLayout()
+            autostart_lbl = QLabel("Start on login")
+            autostart_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+            self._autostart_toggle = ToggleSwitch(autostart.is_enabled())
+            self._autostart_toggle.toggled.connect(self._on_autostart_toggled)
+            autostart_row.addWidget(autostart_lbl)
+            autostart_row.addStretch()
+            autostart_row.addWidget(self._autostart_toggle)
+            left_layout.addLayout(autostart_row)
+
+            left_layout.addSpacing(8)
+
         # Sign Out
         signout_btn = QPushButton("  Sign Out")
         signout_btn.setFixedHeight(38)
@@ -323,6 +343,13 @@ class ProfileScreen(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
+
+    def _on_autostart_toggled(self, enabled: bool):
+        try:
+            autostart.set_enabled(enabled)
+        except OSError as exc:
+            QMessageBox.warning(self, "Error", f"Couldn't update login startup setting: {exc}")
+            self._autostart_toggle.setChecked(not enabled)
 
     def showEvent(self, event):
         super().showEvent(event)

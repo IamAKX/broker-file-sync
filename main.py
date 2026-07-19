@@ -59,11 +59,31 @@ def main():
     )
 
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)   # tray-resident: hiding the window must not exit the process
     app.setFont(font_scale.F_MEDIUM())   # now uses Segoe UI + scaled size on Windows
     _apply_app_icon(app)
 
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--minimized", action="store_true")
+    args, _ = parser.parse_known_args()
+
+    from services.single_instance import SingleInstanceGuard
+    guard = SingleInstanceGuard()
+
     controller = AppController(app)
-    controller.start()
+
+    def _activate_existing():
+        controller.show_and_navigate("dashboard")
+
+    if not guard.try_acquire(_activate_existing):
+        return   # another instance is already running and has been pinged to activate itself
+
+    from services.tray import AppTray
+    tray = AppTray(controller, APP_ICON_PATH)
+    controller.attach_tray(tray)
+
+    controller.start(minimized=args.minimized)
     sys.exit(app.exec())
 
 
