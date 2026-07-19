@@ -322,6 +322,33 @@ class DashboardScreen(QWidget):
             )
         self._refresh_stat_cards()
 
+    def on_broker_source_active(self, broker: str, active: bool, rows: int):
+        """Reflect a source-mode selection (e.g. ExternalImport's File/DB
+        toggle) as active/glowing without touching the imported-files
+        counters — those stay driven solely by on_broker_imported/reset."""
+        t = self._controller.theme
+        if broker not in self._broker_widgets:
+            return
+        stats_lbl, status_lbl = self._broker_widgets[broker]
+        if not active:
+            stats_lbl.setText("0 files – 0 imported")
+            status_lbl.setText("Awaiting")
+            status_lbl.setStyleSheet(
+                f"color: {t.get('text_secondary')}; border: 1px solid {t.get('text_secondary')};"
+                "border-radius: 4px; padding: 2px 8px;"
+            )
+            return
+        if rows >= 0:
+            stats_lbl.setText(f"1 file – {rows:,} rows imported")
+            status_lbl.setText("Imported")
+        else:
+            stats_lbl.setText("Live database source selected")
+            status_lbl.setText("Selected")
+        status_lbl.setStyleSheet(
+            f"color: {t.get('accent')}; border: 1px solid {t.get('accent')};"
+            "border-radius: 4px; padding: 2px 8px;"
+        )
+
     def _wire_watcher(self):
         w = self._controller.watcher
         w.started.connect(self._on_watcher_started)

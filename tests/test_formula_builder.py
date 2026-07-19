@@ -138,6 +138,6 @@ def test_edit_menu_has_formula_builder(qapp):
         menu = btn.menu()
         if menu is not None:
             for action in menu.actions():
-                if action.text() == "ExternalImport Formula Builder":
+                if action.text() == "Formula Builder":
                     found = True
     assert found

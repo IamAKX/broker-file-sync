@@ -1,4 +1,4 @@
-"""Edit menu -> ExternalImport Formula Builder.
+"""Data menu -> Formula Builder.
 
 List + editor screen (same shape as Strategy Builder) for the 56 built-in
 ExternalImport formulas. Each formula's expression is edited with a
@@ -298,7 +298,7 @@ class FormulaBuilderScreen(QWidget):
         self._topbar = topbar
         top_lay = QHBoxLayout(topbar)
         top_lay.setContentsMargins(20, 0, 20, 0)
-        title = QLabel("ExternalImport Formula Builder")
+        title = QLabel("Formula Builder")
         title.setFont(font_scale.font(font_scale.LARGE, True))
         top_lay.addWidget(title)
         top_lay.addStretch()

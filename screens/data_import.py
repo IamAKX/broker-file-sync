@@ -67,6 +67,9 @@ def _svg_icon(filename: str, color: str) -> QIcon:
 class BrokerImportCard(QFrame):
     import_done = Signal(str, int)  # broker name, row count
     import_reset = Signal(str)      # broker name when file is deleted
+    # broker name, active, rows (-1 when active due to database-mode selection,
+    # not an actual file import)
+    source_active = Signal(str, bool, int)
 
     def __init__(self, broker: str, color_token: str, hint: str, theme,
                  exts: tuple = (".xlsx", ".xls"), show_date_picker: bool = False,
@@ -299,6 +302,17 @@ class BrokerImportCard(QFrame):
         self._source_mode = "database" if checked else "file"
         self._browse_btn.setText("View" if checked else "Browse")
         self._update_source_mode_style()
+        if self._source_mode == "database":
+            # Selecting the database source is itself "configured" — glow
+            # regardless of whether a file was ever picked in file mode.
+            self.source_active.emit(self._broker, True, -1)
+        else:
+            # Back to file mode: glow only if a file is actually selected,
+            # showing its real imported-row count so we don't clobber the
+            # "Imported" display with the generic database-selected one.
+            self.source_active.emit(
+                self._broker, bool(self._selected_file), self._row_count
+            )
 
     def _update_source_mode_style(self):
         t = self._theme
@@ -618,6 +632,7 @@ class BrokerImportCard(QFrame):
 class DataImportScreen(QWidget):
     broker_imported    = Signal(str, int)   # broker name, row count
     broker_reset       = Signal(str)
+    broker_source_active = Signal(str, bool, int)  # broker, active, rows (-1 = db-selected)
     lmv_headers_ready  = Signal(list)       # emitted when LMV loads headers
     lmv_data_ready     = Signal(list, list)  # headers, data rows (list[list])
     _REQUIRED_BROKERS = {"Sharekhan", "ReliableSoftware", "NiftyInvest",
@@ -669,6 +684,7 @@ class DataImportScreen(QWidget):
             card.import_reset.connect(self.broker_reset)
             card.import_done.connect(self._on_card_imported)
             card.import_reset.connect(self._on_card_reset)
+            card.source_active.connect(self.broker_source_active)
             self._cards[broker] = card
             cards_col.addWidget(card)
         layout.addLayout(cards_col)

@@ -70,6 +70,11 @@ class MainWindow(QMainWindow):
         data_import.broker_imported.connect(dashboard.on_broker_imported)
         data_import.broker_reset.connect(dashboard.on_broker_reset)
 
+        data_import.broker_source_active.connect(
+            lambda name, active, rows: self._sidebar.set_broker_active(name, active)
+        )
+        data_import.broker_source_active.connect(dashboard.on_broker_source_active)
+
         # When LMV opens: push headers to strategy builder, push strategies to LMV
         def _on_lmv_ready(headers):
             strategy_builder.set_lmv_headers(headers)

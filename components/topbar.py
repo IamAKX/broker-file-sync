@@ -66,10 +66,11 @@ class TopBar(QWidget):
             ]),
             ("Edit", [
                 ("Configs",         lambda: self.navigate.emit("config_editor")),
-                ("Output Path",     lambda: self.navigate.emit("profile")),
+            ]),
+            ("Data", [
                 ("Data Import",     lambda: self.navigate.emit("data_import")),
                 ("Historic Upload", lambda: self.navigate.emit("historic_upload")),
-                ("ExternalImport Formula Builder", lambda: self.navigate.emit("formula_builder")),
+                ("Formula Builder", lambda: self.navigate.emit("formula_builder")),
                 ("Market Holidays", lambda: self.navigate.emit("holidays")),
             ]),
             ("View", [
