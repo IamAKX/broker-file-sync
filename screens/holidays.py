@@ -130,8 +130,12 @@ class HolidaysScreen(QWidget):
         self._theme = controller.theme
         self._build()
         # Defer the initial fetch (blocking network call) so it doesn't hold
-        # up widget construction — same pattern as historic_upload.py.
-        QTimer.singleShot(0, self._load_holidays)
+        # up widget construction — same pattern as historic_upload.py. Quiet
+        # on error: this can fire before the user has navigated here at all
+        # (or from a theme toggle while another screen is visible), and a
+        # blocking QMessageBox popping up unprompted — with no user present
+        # to dismiss it in an automated/headless run — hangs the process.
+        QTimer.singleShot(0, lambda: self._load_holidays(show_popup_on_error=False))
 
     def _build(self):
         t = self._theme
@@ -163,7 +167,7 @@ class HolidaysScreen(QWidget):
         self._year_spin.setValue(date.today().year)
         self._year_spin.setFixedHeight(30)
         self._year_spin.setFixedWidth(90)
-        self._year_spin.valueChanged.connect(self._load_holidays)
+        self._year_spin.valueChanged.connect(lambda _year: self._load_holidays())
         top_row.addWidget(year_lbl)
         top_row.addWidget(self._year_spin)
         top_row.addSpacing(16)
@@ -217,11 +221,15 @@ class HolidaysScreen(QWidget):
 
     # ── Load ─────────────────────────────────────────────────────────────
 
-    def _load_holidays(self):
+    def _load_holidays(self, show_popup_on_error: bool = True):
         try:
             rows = holidays_api.list_holidays(self._year_spin.value())
         except (ApiError, NetworkError) as exc:
-            show_api_error(self._theme, self, exc)
+            if show_popup_on_error:
+                show_api_error(self._theme, self, exc)
+            else:
+                self._status_lbl.setText("Couldn't load holidays — check your connection.")
+                self._status_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
             return
         self._table.setRowCount(0)
         for row in rows:
@@ -418,4 +426,4 @@ class HolidaysScreen(QWidget):
         )
         if not self._status_lbl.text():
             self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
-        self._load_holidays()
+        self._load_holidays(show_popup_on_error=False)
