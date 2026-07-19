@@ -9,7 +9,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._controller = controller
         self._navigation_locked = False
-        self.setWindowTitle("Broker File Sync")
+        self.setWindowTitle("Broker Sync")
         self.resize(1280, 800)
         self.setMinimumSize(1100, 700)
         self._build()

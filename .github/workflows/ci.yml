@@ -78,6 +78,7 @@ jobs:
         shell: pwsh
         run: |
           pyinstaller --windowed --onedir --name "BrokerFileSync" `
+            --icon "assets\icons\app_logo.ico" `
             --add-data "assets;assets" `
             --add-data "screens;screens" `
             --add-data "services;services" `
@@ -135,6 +136,7 @@ jobs:
             --windowed \
             --onedir \
             --name BrokerFileSync \
+            --icon "assets/icons/app_logo.icns" \
             --add-data "assets:assets" \
             --add-data "screens:screens" \
             --add-data "services:services" \

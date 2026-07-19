@@ -1,4 +1,4 @@
-# 📊 Broker File Sync
+# 📊 Broker Sync
 
 > A desktop application for syncing, merging, and analyzing broker Excel exports in real time — with live strategy evaluation and smart notifications.
 

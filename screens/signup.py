@@ -16,7 +16,7 @@ class SignupScreen(QWidget):
     def __init__(self, controller):
         super().__init__()
         self._controller = controller
-        self.setWindowTitle("Broker File Sync — Sign Up")
+        self.setWindowTitle("Broker Sync — Sign Up")
         self.resize(1000, 700)
         self.setMinimumSize(800, 600)
         self._build()
@@ -47,7 +47,7 @@ class SignupScreen(QWidget):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(title)
 
-        subtitle = QLabel("Broker File Sync")
+        subtitle = QLabel("Broker Sync")
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")

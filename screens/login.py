@@ -16,7 +16,7 @@ class LoginScreen(QWidget):
     def __init__(self, controller):
         super().__init__()
         self._controller = controller
-        self.setWindowTitle("Broker File Sync — Login")
+        self.setWindowTitle("Broker Sync — Login")
         self.resize(1000, 650)
         self.setMinimumSize(800, 550)
         self._build()

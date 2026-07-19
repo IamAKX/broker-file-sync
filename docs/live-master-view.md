@@ -39,7 +39,7 @@ python -m pywin32_postinstall -install
 **Setup flow:**
 1. Open TradeTiger → Market Watch → right-click → **Snap to Excel**
 2. Keep the `Snap.xls` Excel window **open**
-3. Open Broker File Sync → Run Watcher
+3. Open Broker Sync → Run Watcher
 4. LMV polls `Snap.xls` live every second
 
 If `Snap.xls` is not open, the status bar shows: `Waiting for Snap.xls in Excel…`

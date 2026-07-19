@@ -2,7 +2,7 @@
 
 ## Overview
 
-Broker File Sync follows a lightweight **MVC-inspired** pattern built on PySide6 (Qt6).
+Broker Sync follows a lightweight **MVC-inspired** pattern built on PySide6 (Qt6).
 
 ```
 ┌─────────────────────────────────────────────────────┐

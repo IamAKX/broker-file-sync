@@ -1,6 +1,6 @@
 # 📦 Building Executables
 
-Broker File Sync uses **PyInstaller** to produce standalone executables. Builds are automated via GitHub Actions and attached as release artifacts.
+Broker Sync uses **PyInstaller** to produce standalone executables. Builds are automated via GitHub Actions and attached as release artifacts.
 
 ---
 
@@ -49,6 +49,7 @@ Every push to `main` triggers the CI pipeline which:
 pip install pyinstaller
 
 pyinstaller --windowed --onedir --name "BrokerFileSync" \
+  --icon "assets/icons/app_logo.icns" \
   --add-data "assets:assets" \
   --add-data "screens:screens" \
   --add-data "services:services" \
@@ -69,6 +70,7 @@ pip install pyinstaller pywin32
 python -m pywin32_postinstall -install
 
 pyinstaller --windowed --onedir --name "BrokerFileSync" ^
+  --icon "assets\icons\app_logo.ico" ^
   --add-data "assets;assets" ^
   --add-data "screens;screens" ^
   --add-data "services;services" ^

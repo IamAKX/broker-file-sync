@@ -98,7 +98,7 @@ For the Live Master View to update in real time, TradeTiger must push data to Ex
 3. Right-click → **Snap to Excel**
 4. Excel opens with a `Snap.xls` workbook — prices will start updating live
 5. **Keep this Excel window open** — do not save or close it
-6. Now open **Broker File Sync** → **Data Import** → drop your broker files → click **Run Watcher**
+6. Now open **Broker Sync** → **Data Import** → drop your broker files → click **Run Watcher**
 7. The Live Master View will poll the open `Snap.xls` every **1 second** and reflect live prices
 
 > 💡 The `Snap.xls` workbook must remain open in Excel while the Live Master View is running. If you close it, the status will show **"Waiting for Snap.xls in Excel…"** until you reopen it.

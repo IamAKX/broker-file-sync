@@ -7,3 +7,7 @@ pytest
 # Windows only — enables COM automation for live TradeTiger data via Snap to Excel
 # Install on Windows: pip install pywin32 && python -m pywin32_postinstall -install
 # pywin32
+
+# macOS only — lets dev runs (python main.py) set the real Dock icon/app name
+# instead of the Python.framework stub's. Not needed for PyInstaller .app builds.
+# pyobjc-framework-Cocoa
