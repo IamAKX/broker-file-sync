@@ -340,10 +340,9 @@ class DashboardScreen(QWidget):
             return
         if rows >= 0:
             stats_lbl.setText(f"1 file – {rows:,} rows imported")
-            status_lbl.setText("Imported")
         else:
-            stats_lbl.setText("Live database source selected")
-            status_lbl.setText("Selected")
+            stats_lbl.setText("Live from database")
+        status_lbl.setText("Imported")
         status_lbl.setStyleSheet(
             f"color: {t.get('accent')}; border: 1px solid {t.get('accent')};"
             "border-radius: 4px; padding: 2px 8px;"

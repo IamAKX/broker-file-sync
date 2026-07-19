@@ -37,12 +37,6 @@ BROKERS = [
     ("MarketProfile",    "status_pink",   "Market Profile export (.csv / .xlsx)",   (".csv", ".xlsx", ".xls"), False, False),
 ]
 
-# How far back to pull historic snapshots when calculating the ExternalImport
-# database view — must cover MT/MB's "last 2 completed months" even when the
-# target date is early in its own month (worst case ~2 months back + current
-# month to date), with margin.
-_FORMULA_LOOKBACK_DAYS = 100
-
 
 def _svg_icon(filename: str, color: str) -> QIcon:
     path = os.path.join(ASSETS_DIR, filename)
@@ -305,14 +299,35 @@ class BrokerImportCard(QFrame):
         if self._source_mode == "database":
             # Selecting the database source is itself "configured" — glow
             # regardless of whether a file was ever picked in file mode.
+            self._set_status_imported()
             self.source_active.emit(self._broker, True, -1)
         else:
-            # Back to file mode: glow only if a file is actually selected,
-            # showing its real imported-row count so we don't clobber the
-            # "Imported" display with the generic database-selected one.
+            # Back to file mode: restore whichever status actually applies —
+            # a real completed import, or Awaiting if none — since the
+            # database-mode toggle may have overwritten it with "Imported".
+            if self._selected_file:
+                self._set_status_imported()
+            else:
+                self._set_status_awaiting()
             self.source_active.emit(
                 self._broker, bool(self._selected_file), self._row_count
             )
+
+    def _set_status_imported(self):
+        acc = self._theme.get('accent')
+        self._status_lbl.setText("Imported")
+        self._status_lbl.setStyleSheet(
+            f"color: {acc}; border: 1px solid {acc};"
+            "border-radius: 4px; padding: 0 8px;"
+        )
+
+    def _set_status_awaiting(self):
+        txt_s = self._theme.get('text_secondary')
+        self._status_lbl.setText("Awaiting")
+        self._status_lbl.setStyleSheet(
+            f"color: {txt_s}; border: 1px solid {txt_s};"
+            "border-radius: 4px; padding: 1px 8px;"
+        )
 
     def _update_source_mode_style(self):
         t = self._theme
@@ -332,12 +347,11 @@ class BrokerImportCard(QFrame):
             self._formula_viewer.activateWindow()
             return
 
-        from datetime import date, timedelta
+        from datetime import date
         from PySide6.QtWidgets import QApplication, QMessageBox
-        from api import historic_api, holidays_api
         from api.exceptions import ApiError, NetworkError
         from components.error_popup import show_api_error
-        from services import formula_engine
+        from services.external_import_source import read_external_import_db
         from screens.historic_viewer import HistoricDataViewer
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -345,66 +359,22 @@ class BrokerImportCard(QFrame):
         original_text = self._browse_btn.text()
         self._browse_btn.setText("Loading...")
         try:
-            today = date.today()
-            date_from = today - timedelta(days=_FORMULA_LOOKBACK_DAYS)
+            # Always calculate as of today — CWH/CMH/etc. must mean the actual
+            # current week/month, not the week of the last upload.
+            target = date.today()
             try:
-                availability = historic_api.get_availability(date_from, today)
-                holidays = {
-                    date.fromisoformat(h["holiday_date"])
-                    for year in range(date_from.year, today.year + 1)
-                    for h in holidays_api.list_holidays(year)
-                }
+                headers, rows = read_external_import_db(target)
             except (ApiError, NetworkError) as exc:
                 show_api_error(self._theme, self, exc)
                 return
 
-            available_dates = sorted(
-                date.fromisoformat(d["trade_date"])
-                for d in availability.get("dates", []) if d.get("has_data")
-            )
-            if not available_dates:
+            if not rows:
                 QMessageBox.information(
                     self, "No Data",
                     "No historic data has been saved yet — upload some via "
                     "Historic Upload first."
                 )
                 return
-
-            # Always calculate as of today — CWH/CMH/etc. must mean the actual
-            # current week/month, not the week of the last upload. The stock
-            # universe (which symbols to show) still comes from the latest
-            # available snapshot, since today itself may have no upload yet.
-            target = today
-            latest_available = available_dates[-1]
-            raw_by_date = {}
-            display_names = {}
-            try:
-                for d in available_dates:
-                    snapshot = historic_api.get_snapshot(d)
-                    stocks = snapshot.get("stocks", [])
-                    raw_by_date[d] = {s["symbol"]: s.get("metrics", {}) for s in stocks}
-                    if d == latest_available:
-                        display_names = {s["symbol"]: s.get("display_name") or "" for s in stocks}
-            except (ApiError, NetworkError) as exc:
-                show_api_error(self._theme, self, exc)
-                return
-
-            results = formula_engine.compute_all(raw_by_date, target, holidays)
-            if not results:
-                QMessageBox.information(
-                    self, "No Data", f"No stocks found for {target.strftime('%d-%b-%Y')}."
-                )
-                return
-
-            headers = ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES
-            rows = []
-            for symbol in sorted(results.keys()):
-                values = results[symbol]
-                row = [symbol, display_names.get(symbol, "")]
-                for code in formula_engine.FORMULA_CODES:
-                    v = values.get(code)
-                    row.append("" if v is None else round(v, 4))
-                rows.append(row)
 
             target_str = target.strftime("%d-%b-%Y")
             self._formula_viewer = HistoricDataViewer(
@@ -427,7 +397,6 @@ class BrokerImportCard(QFrame):
         self._pct_lbl.setText("0%")
         self._pct_lbl.setVisible(True)
         self._delete_btn.setVisible(False)
-        self._browse_btn.setVisible(False)
         self._status_lbl.setText("Importing...")
         self._status_lbl.setStyleSheet(
             f"color: {self._theme.get('accent')}; border: 1px solid {self._theme.get('accent')};"
@@ -445,12 +414,7 @@ class BrokerImportCard(QFrame):
             self._timer.stop()
             self._progress.setVisible(False)
             self._pct_lbl.setVisible(False)
-            self._status_lbl.setText("Imported")
-            acc = self._theme.get('accent')
-            self._status_lbl.setStyleSheet(
-                f"color: {acc}; border: 1px solid {acc};"
-                "border-radius: 4px; padding: 0 8px;"
-            )
+            self._set_status_imported()
             rows = self._row_count
             self._file_lbl.setText(f"1 file imported · {rows:,} rows")
             self._file_lbl.setStyleSheet(f"color: {self._theme.get('accent')};")
@@ -467,11 +431,7 @@ class BrokerImportCard(QFrame):
         self._pct_lbl.setVisible(False)
         self._delete_btn.setVisible(False)
         self._browse_btn.setVisible(True)
-        self._status_lbl.setText("Awaiting")
-        self._status_lbl.setStyleSheet(
-            f"color: {self._theme.get('text_secondary')}; border: 1px solid {self._theme.get('text_secondary')};"
-            "border-radius: 4px; padding: 1px 8px;"
-        )
+        self._set_status_awaiting()
         self._file_lbl.setText(self._hint)
         self._file_lbl.setStyleSheet(f"color: {self._theme.get('text_secondary')};")
         self.import_reset.emit(self._broker)
@@ -685,6 +645,7 @@ class DataImportScreen(QWidget):
             card.import_done.connect(self._on_card_imported)
             card.import_reset.connect(self._on_card_reset)
             card.source_active.connect(self.broker_source_active)
+            card.source_active.connect(self._on_card_source_active)
             self._cards[broker] = card
             cards_col.addWidget(card)
         layout.addLayout(cards_col)
@@ -713,6 +674,11 @@ class DataImportScreen(QWidget):
         self._imported_brokers.discard(broker)
         self._update_watcher_btn()
 
+    def _on_card_source_active(self, broker: str, active: bool, rows: int):
+        # ExternalImport's File/DB toggle can change whether the required
+        # brokers are all "ready" — re-evaluate the Run Watcher gate.
+        self._update_watcher_btn()
+
     def _on_watcher_started(self):
         self._pulse_timer.start()
         self._dot_bright = True
@@ -739,11 +705,24 @@ class DataImportScreen(QWidget):
             "border-radius: 4px; padding: 0 20px; }"
         )
 
+    def _required_brokers_ready(self) -> bool:
+        """A broker is "ready" once it has imported a file — except
+        ExternalImport in database mode, which never fires import_done since
+        there's no file, but is just as valid a source once selected."""
+        for broker in self._REQUIRED_BROKERS:
+            if broker in self._imported_brokers:
+                continue
+            card = self._cards.get(broker)
+            if broker == "ExternalImport" and card is not None and card._source_mode == "database":
+                continue
+            return False
+        return True
+
     def _update_watcher_btn(self):
         if self._watcher_btn is None:
             return
         t        = self._controller.theme
-        all_done = self._REQUIRED_BROKERS.issubset(self._imported_brokers)
+        all_done = self._required_brokers_ready()
         if all_done:
             self._watcher_btn.setText("  Run Watcher")
             self._watcher_btn.setEnabled(True)
@@ -767,7 +746,9 @@ class DataImportScreen(QWidget):
         sharekhan_path = self._cards["Sharekhan"]._selected_file
         reliable_path  = self._cards["ReliableSoftware"]._selected_file
         nifty_path     = self._cards["NiftyInvest"]._selected_file
-        external_path  = self._cards["ExternalImport"]._selected_file
+        external_card  = self._cards["ExternalImport"]
+        external_path  = external_card._selected_file
+        external_mode  = external_card._source_mode
         market_profile_path = self._cards["MarketProfile"]._selected_file
         expiry_date    = self._cards["Sharekhan"].get_expiry_date()
         # Reuse existing window if already open
@@ -781,6 +762,7 @@ class DataImportScreen(QWidget):
             SCRIPT_NAME_DATA,
             expiry_date=expiry_date,
             external_path=external_path,
+            external_mode=external_mode,
             market_profile_path=market_profile_path,
             theme=self._controller.theme,
             controller=self._controller,

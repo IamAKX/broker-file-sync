@@ -24,11 +24,17 @@ class LiveDataReader:
                  script_name_data, expiry_date=None,
                  use_com=False, slow_interval_s: float = 1.0,
                  clock=time.monotonic, external_path=None,
-                 market_profile_path=None):
+                 market_profile_path=None, external_mode: str = "file"):
         self._sharekhan_path   = sharekhan_path
         self._reliable_path    = reliable_path
         self._nifty_path       = nifty_path
         self._external_path    = external_path
+        # "file" reads external_path via read_external_import; "database"
+        # instead computes the same (headers, rows) shape from stored
+        # historic uploads via services.external_import_source — see
+        # _read_slow_sources. Either way the output shape is identical, so
+        # the ext-join logic below never needs to know which mode is active.
+        self._external_mode    = external_mode
         self._market_profile_path = market_profile_path
         self._script_name_data = script_name_data
         self._expiry_date      = expiry_date
@@ -92,8 +98,7 @@ class LiveDataReader:
 
     def _read_slow_sources(self, force: bool = False):
         """Refresh Reliable + Nifty + External if the slow interval has elapsed."""
-        from services.file_reader import (read_nifty_invest, read_external_import,
-                                          read_market_profile)
+        from services.file_reader import read_nifty_invest, read_market_profile
 
         now = self._clock()
         due = (
@@ -104,11 +109,17 @@ class LiveDataReader:
         if due:
             self._rs_cache  = self._read_reliable()
             self._ni_cache  = read_nifty_invest(self._nifty_path)
-            self._ext_cache = (read_external_import(self._external_path)
-                               if self._external_path else ([], []))
+            self._ext_cache = self._read_external()
             self._mp_cache  = (read_market_profile(self._market_profile_path)
                                if self._market_profile_path else ([], []))
             self._slow_stamp = now
+
+    def _read_external(self):
+        if self._external_mode == "database":
+            from services.external_import_source import read_external_import_db
+            return read_external_import_db()
+        from services.file_reader import read_external_import
+        return read_external_import(self._external_path) if self._external_path else ([], [])
 
     def read_merged(self, force_slow: bool = False) -> tuple[list, list[list]]:
         """
