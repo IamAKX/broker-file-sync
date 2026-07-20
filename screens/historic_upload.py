@@ -4,7 +4,7 @@ from datetime import date
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QFileDialog, QTabWidget, QCalendarWidget, QToolButton,
-    QCheckBox, QScrollArea
+    QCheckBox, QScrollArea, QMessageBox
 )
 from PySide6.QtCore import Qt, QDate, QTimer
 from PySide6.QtGui import QPainter, QColor, QBrush
@@ -340,6 +340,10 @@ class HistoricUploadScreen(QWidget):
                 continue
             if i in self._structural_cols:
                 continue
+            # pdh/pdl/PClose/PQuantity are retired — still shown in the Live
+            # Master View, but never offered here for upload to the backend.
+            if header in ("pdh", "pdl", "PClose", "PQuantity"):
+                continue
             cb = QCheckBox(str(header) if header else "(unnamed)")
             cb.setChecked(True)
             cb.setFont(font_scale.font(font_scale.SMALL, False))
@@ -555,6 +559,14 @@ class HistoricUploadScreen(QWidget):
         self._browse_status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         bottom_row.addWidget(self._browse_status_lbl)
         bottom_row.addStretch()
+        self._delete_day_btn = QPushButton("Delete")
+        self._delete_day_btn.setFixedHeight(32)
+        self._delete_day_btn.setFixedWidth(100)
+        self._delete_day_btn.setFont(font_scale.font(font_scale.SMALL, True))
+        self._delete_day_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_delete_day_btn_style()
+        self._delete_day_btn.clicked.connect(self._on_delete_day_clicked)
+        bottom_row.addWidget(self._delete_day_btn)
         self._view_btn = QPushButton("View")
         self._view_btn.setFixedHeight(32)
         self._view_btn.setFixedWidth(100)
@@ -570,9 +582,26 @@ class HistoricUploadScreen(QWidget):
         # doesn't hold up widget construction — this can run during MainWindow
         # construction on the auto-login path, before any window is visible.
         QTimer.singleShot(0, self._refresh_browse_availability)
-        self._update_view_btn_enabled()
+        self._update_browse_buttons_enabled()
         self._browse_refresh_calendar = self._refresh_browse_availability
         return tab
+
+    def _update_delete_day_btn_style(self):
+        t = self._controller.theme
+        red = t.get('status_red')
+        text_s = t.get('text_secondary')
+        border = t.get('border')
+        self._delete_day_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {red};
+                border: 1px solid {red};
+                border-radius: 4px;
+                padding: 0 14px;
+            }}
+            QPushButton:hover {{ background: {red}22; }}
+            QPushButton:disabled {{ color: {text_s}; border-color: {border}; }}
+        """)
 
     def _refresh_browse_availability(self):
         today = date.today()
@@ -609,19 +638,21 @@ class HistoricUploadScreen(QWidget):
                 self._browse_status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
             self._browse_calendar.set_available_days(set())
             self._available_days = set()
-            self._update_view_btn_enabled()
+            self._update_browse_buttons_enabled()
             return
         self._browse_calendar.set_available_days(days)
         self._available_days = days
-        self._update_view_btn_enabled()
+        self._update_browse_buttons_enabled()
 
     def _on_browse_date_selected(self, qdate):
         self._selected_browse_date = date(qdate.year(), qdate.month(), qdate.day())
-        self._update_view_btn_enabled()
+        self._update_browse_buttons_enabled()
 
-    def _update_view_btn_enabled(self):
+    def _update_browse_buttons_enabled(self):
         days = getattr(self, "_available_days", set())
-        self._view_btn.setEnabled(self._selected_browse_date.day in days)
+        has_data = self._selected_browse_date.day in days
+        self._view_btn.setEnabled(has_data)
+        self._delete_day_btn.setEnabled(has_data)
 
     def _on_view_clicked(self):
         t = self._controller.theme
@@ -656,6 +687,37 @@ class HistoricUploadScreen(QWidget):
         self._viewers.append(viewer)
         self._browse_status_lbl.setText("")
 
+    def _on_delete_day_clicked(self):
+        t = self._controller.theme
+        day_str = self._selected_browse_date.strftime("%d-%b-%Y")
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Delete Historic Data")
+        msg.setText(f"Delete all saved data for {day_str}? This cannot be undone.")
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+        if msg.exec() != QMessageBox.StandardButton.Yes:
+            return
+
+        self._delete_day_btn.setEnabled(False)
+        self._view_btn.setEnabled(False)
+        try:
+            result = historic_api.delete_day(self._selected_browse_date)
+        except (ApiError, NetworkError) as exc:
+            show_api_error(t, self, exc)
+            self._update_browse_buttons_enabled()
+            return
+
+        deleted = result.get("values_deleted", 0)
+        self._browse_status_lbl.setText(f"Deleted {deleted} value(s) for {day_str}.")
+        self._browse_status_lbl.setStyleSheet(f"color: {t.get('accent')};")
+
+        # Close any open viewer for this date — its data no longer exists.
+        for viewer in list(self._viewers):
+            if viewer.isVisible() and viewer._date_str == day_str:
+                viewer.close()
+
+        self._refresh_browse_availability()
+
     # ── theme ────────────────────────────────────────────────────────────────
 
     def refresh_theme(self):
@@ -664,6 +726,7 @@ class HistoricUploadScreen(QWidget):
         self._update_date_btn_style()
         self._update_browse_btn_style()
         self._update_columns_toggle_style()
+        self._update_delete_day_btn_style()
         if not self._selected_file:
             self._file_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         if not self._status_lbl.text():

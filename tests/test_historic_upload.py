@@ -72,6 +72,8 @@ def test_populate_columns_excludes_outside_c_to_m_range(qapp):
     screen = HistoricUploadScreen(AppController(qapp))
     # 14 headers: A/B structural, C-M (indices 2-12) are the 11 eligible metric
     # columns, N (index 13) is beyond the range and must not get a checkbox.
+    # Of the 11, pdh/pdl/PClose/PQuantity are retired metrics and must not
+    # get a checkbox either, leaving 7.
     screen._headers = [
         "DataTime", "ScripName",
         "DiffPcnt", "Open", "High", "Low", "Close", "pdh", "pdl",
@@ -82,9 +84,12 @@ def test_populate_columns_excludes_outside_c_to_m_range(qapp):
     screen._selected_file = "dummy.csv"
     screen._structural_cols = {0, 1}
     screen._populate_columns()
-    assert len(screen._checkboxes) == 11
-    assert "PMHL_High" not in [cb.text() for cb in screen._checkboxes]
-    assert "DataTime" not in [cb.text() for cb in screen._checkboxes]
+    assert len(screen._checkboxes) == 7
+    checkbox_texts = [cb.text() for cb in screen._checkboxes]
+    assert "PMHL_High" not in checkbox_texts
+    assert "DataTime" not in checkbox_texts
+    for excluded in ("pdh", "pdl", "PClose", "PQuantity"):
+        assert excluded not in checkbox_texts
 
 
 def test_view_button_enabled_only_on_available_day(qapp):
@@ -94,12 +99,94 @@ def test_view_button_enabled_only_on_available_day(qapp):
     screen = HistoricUploadScreen(AppController(qapp))
     screen._available_days = {1, 2, 3}
     screen._selected_browse_date = date(2026, 7, 2)
-    screen._update_view_btn_enabled()
+    screen._update_browse_buttons_enabled()
     assert screen._view_btn.isEnabled()
 
     screen._selected_browse_date = date(2026, 7, 25)
-    screen._update_view_btn_enabled()
+    screen._update_browse_buttons_enabled()
     assert not screen._view_btn.isEnabled()
+
+
+def test_delete_button_enabled_only_on_available_day(qapp):
+    from app import AppController
+    from screens.historic_upload import HistoricUploadScreen
+    from datetime import date
+    screen = HistoricUploadScreen(AppController(qapp))
+    screen._available_days = {1, 2, 3}
+    screen._selected_browse_date = date(2026, 7, 2)
+    screen._update_browse_buttons_enabled()
+    assert screen._delete_day_btn.isEnabled()
+
+    screen._selected_browse_date = date(2026, 7, 25)
+    screen._update_browse_buttons_enabled()
+    assert not screen._delete_day_btn.isEnabled()
+
+
+def test_delete_day_confirmed_calls_api_and_refreshes(qapp, monkeypatch):
+    from app import AppController
+    from screens.historic_upload import HistoricUploadScreen
+    from datetime import date
+    from PySide6.QtWidgets import QMessageBox
+    from api import historic_api
+
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Yes)
+    calls = []
+    monkeypatch.setattr(
+        historic_api, "delete_day",
+        lambda d: calls.append(d) or {"trade_date": d.isoformat(), "values_deleted": 12},
+    )
+    monkeypatch.setattr(historic_api, "get_availability", lambda date_from, date_to: {"dates": []})
+
+    screen = HistoricUploadScreen(AppController(qapp))
+    screen._selected_browse_date = date(2026, 7, 20)
+    screen._on_delete_day_clicked()
+
+    assert calls == [date(2026, 7, 20)]
+    assert "Deleted 12 value(s)" in screen._browse_status_lbl.text()
+
+
+def test_delete_day_cancelled_does_not_call_api(qapp, monkeypatch):
+    from app import AppController
+    from screens.historic_upload import HistoricUploadScreen
+    from datetime import date
+    from PySide6.QtWidgets import QMessageBox
+    from api import historic_api
+
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.No)
+    calls = []
+    monkeypatch.setattr(historic_api, "delete_day", lambda d: calls.append(d))
+
+    screen = HistoricUploadScreen(AppController(qapp))
+    screen._selected_browse_date = date(2026, 7, 20)
+    screen._on_delete_day_clicked()
+
+    assert calls == []
+
+
+def test_delete_day_closes_matching_open_viewer(qapp, monkeypatch):
+    from app import AppController
+    from screens.historic_upload import HistoricUploadScreen
+    from screens.historic_viewer import HistoricDataViewer
+    from datetime import date
+    from PySide6.QtWidgets import QMessageBox
+    from api import historic_api
+
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(
+        historic_api, "delete_day",
+        lambda d: {"trade_date": d.isoformat(), "values_deleted": 1},
+    )
+    monkeypatch.setattr(historic_api, "get_availability", lambda date_from, date_to: {"dates": []})
+
+    screen = HistoricUploadScreen(AppController(qapp))
+    screen._selected_browse_date = date(2026, 7, 20)
+    viewer = HistoricDataViewer(["Symbol"], [["AAA"]], "20-Jul-2026")
+    viewer.show()
+    screen._viewers.append(viewer)
+
+    screen._on_delete_day_clicked()
+
+    assert not viewer.isVisible()
 
 
 # ── HistoricDataViewer ────────────────────────────────────────────────────────

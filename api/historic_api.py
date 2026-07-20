@@ -1,7 +1,7 @@
 from datetime import date
 
 from api.client import api_client
-from api.endpoints import AVAILABILITY, DAILY_UPLOAD, SNAPSHOT
+from api.endpoints import AVAILABILITY, DAILY_UPLOAD, HISTORIC, SNAPSHOT
 
 
 def upload_daily(trade_date: date, rows: list[dict]) -> dict:
@@ -21,3 +21,7 @@ def get_availability(date_from: date, date_to: date) -> dict:
 def get_snapshot(trade_date: date | None) -> dict:
     params = {"date": trade_date.isoformat()} if trade_date is not None else None
     return api_client.get(SNAPSHOT, params=params)
+
+
+def delete_day(trade_date: date) -> dict:
+    return api_client.delete(f"{HISTORIC}/{trade_date.isoformat()}")

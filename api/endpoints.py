@@ -10,5 +10,6 @@ CHANGE_PASSWORD = "/auth/change-password"
 DAILY_UPLOAD = "/historic/daily-upload"
 AVAILABILITY = "/historic/availability"
 SNAPSHOT = "/historic/snapshot"
+HISTORIC = "/historic"
 
 HOLIDAYS = "/holidays"

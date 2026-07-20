@@ -16,6 +16,7 @@ class HistoricDataViewer(QWidget):
         super().__init__(parent)
         self._theme = theme
         self._headers = headers
+        self._date_str = date_str
         self._symbol_col = headers.index("Symbol") if "Symbol" in headers else -1
         self._visible_cols = set(range(len(headers)))
         self.setWindowTitle(title if title is not None else f"Historic Data — {date_str}")
