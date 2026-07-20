@@ -86,79 +86,128 @@ class ToggleSwitch(QWidget):
         p.end()
 
 
-class ChannelCard(QFrame):
+class _ChannelConfigDialog(QDialog):
+    def __init__(self, title: str, fields: list, values: dict, theme, parent=None):
+        """
+        fields: list of (label, placeholder) tuples
+        values: dict of label -> current text value
+        """
+        super().__init__(parent)
+        self.setWindowTitle(f"Configure {title}")
+        from screens.strategy_builder import _apply_dialog_bg
+        _apply_dialog_bg(self, theme)
+
+        self._inputs: dict[str, QLineEdit] = {}
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        for label_text, placeholder in fields:
+            lbl = QLabel(label_text.upper())
+            lbl.setFont(font_scale.font(font_scale.SMALL, False))
+            lbl.setStyleSheet(f"color: {theme.get('text_secondary')};")
+            layout.addWidget(lbl)
+
+            inp = QLineEdit(values.get(label_text, ""))
+            inp.setPlaceholderText(placeholder)
+            inp.setFont(font_scale.font(font_scale.MEDIUM, False))
+            inp.setFixedHeight(38)
+            self._inputs[label_text] = inp
+            layout.addWidget(inp)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton("Save")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.setStyleSheet(
+            f"background: {theme.get('accent')}; color: {theme.get('background')}; border: none;"
+        )
+        save_btn.clicked.connect(self.accept)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+    def values(self) -> dict:
+        return {label: inp.text() for label, inp in self._inputs.items()}
+
+
+class ChannelRow(QFrame):
+    """Compact single-line channel control — config fields live in a popup
+    dialog instead of being shown inline, to keep the page header short."""
+
     def __init__(self, title: str, icon_file: str, fields: list, send_label: str, theme, parent=None):
         """
         fields: list of (label, placeholder) tuples
         """
         super().__init__(parent)
         self._theme = theme
+        self._title = title
+        self._fields = fields
+        self._values: dict = {}
         self.setObjectName("brokerPanel")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._toggle = ToggleSwitch(False)
-        self._inputs: list[QLineEdit] = []
-        self._build(title, icon_file, fields, send_label)
+        self._build(title, icon_file, send_label)
 
-    def _build(self, title, icon_file, fields, send_label):
+    def _build(self, title, icon_file, send_label):
         t = self._theme
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(20, 16, 20, 16)
-        layout.setSpacing(16)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(16, 10, 16, 10)
+        layout.setSpacing(10)
 
-        # Header: icon + title + toggle
-        header = QHBoxLayout()
         icon_lbl = QLabel()
-        icon_lbl.setFixedSize(20, 20)
-        icon_lbl.setPixmap(_svg_icon(icon_file, t.get("accent")).pixmap(QSize(20, 20)))
+        icon_lbl.setFixedSize(18, 18)
+        icon_lbl.setPixmap(_svg_icon(icon_file, t.get("accent")).pixmap(QSize(18, 18)))
+        layout.addWidget(icon_lbl)
+
         name_lbl = QLabel(title)
         name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
-        header.addWidget(icon_lbl)
-        header.addSpacing(8)
-        header.addWidget(name_lbl)
-        header.addStretch()
-        header.addWidget(self._toggle)
-        layout.addLayout(header)
-
-        # Divider
-        div = QWidget()
-        div.setFixedHeight(1)
-        div.setStyleSheet(f"background-color: {t.get('divider')};")
-        layout.addWidget(div)
-
-        # Input fields
-        for label_text, placeholder in fields:
-            lbl = QLabel(label_text.upper())
-            lbl.setFont(font_scale.font(font_scale.SMALL, False))
-            lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
-            layout.addWidget(lbl)
-
-            inp = QLineEdit()
-            inp.setPlaceholderText(placeholder)
-            inp.setFont(font_scale.font(font_scale.MEDIUM, False))
-            inp.setFixedHeight(38)
-            self._inputs.append(inp)
-            layout.addWidget(inp)
+        layout.addWidget(name_lbl)
 
         layout.addStretch()
 
-        # Send test button
-        send_btn = QPushButton(f"  {send_label}")
-        send_btn.setFixedHeight(36)
+        # Channels with nothing to configure (e.g. System, which just uses
+        # the local OS tray) skip the popup entirely.
+        if self._fields:
+            configure_btn = QToolButton()
+            configure_btn.setIcon(_svg_icon("config_editor.svg", t.get("text_secondary")))
+            configure_btn.setIconSize(QSize(14, 14))
+            configure_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            configure_btn.setStyleSheet("QToolButton { background: transparent; border: none; }")
+            configure_btn.setToolTip(f"Configure {title}")
+            configure_btn.clicked.connect(self._open_configure)
+            layout.addWidget(configure_btn)
+
+        send_btn = QPushButton(send_label)
+        send_btn.setFixedHeight(30)
         send_btn.setFont(font_scale.font(font_scale.SMALL, False))
         send_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        send_btn.setIcon(_svg_icon("import.svg", t.get("text_secondary")))
-        send_btn.setIconSize(QSize(16, 16))
         send_btn.setStyleSheet(
             f"background: transparent; color: {t.get('text_secondary')};"
-            f"border: 1px solid {t.get('border')}; border-radius: 4px; padding: 0 16px;"
+            f"border: 1px solid {t.get('border')}; border-radius: 4px; padding: 0 12px;"
         )
-        layout.addWidget(send_btn, alignment=Qt.AlignmentFlag.AlignHCenter)
+        self._send_btn = send_btn
+        layout.addWidget(send_btn)
+
+        layout.addWidget(self._toggle)
+
+    def _open_configure(self):
+        dlg = _ChannelConfigDialog(self._title, self._fields, self._values, self._theme, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._values = dlg.values()
 
     def is_enabled(self) -> bool:
         return self._toggle.isChecked()
 
     def connect_toggle(self, slot):
         self._toggle.toggled.connect(slot)
+
+    def connect_send(self, slot):
+        self._send_btn.clicked.connect(slot)
 
 
 class _TriggerTimeDialog(QDialog):
@@ -207,10 +256,12 @@ class NotificationsScreen(QWidget):
         self._controller = controller
         self._sms_card: ChannelCard = None
         self._telegram_card: ChannelCard = None
+        self._system_card: ChannelCard = None
         self._configs: list = []
         self._table: QTableWidget = None
         self._sms_status_lbl: QLabel = None
         self._telegram_status_lbl: QLabel = None
+        self._system_status_lbl: QLabel = None
         self._triggers_status_lbl: QLabel = None
         self._build()
 
@@ -231,33 +282,42 @@ class NotificationsScreen(QWidget):
         title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
         layout.addWidget(title)
 
-        subtitle = QLabel("Receive alerts via SMS or Telegram when files are imported or processing completes")
+        subtitle = QLabel("Receive alerts via System, SMS, or Telegram when files are imported or processing completes")
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         layout.addWidget(subtitle)
 
-        # Channel cards row
-        channels_row = QHBoxLayout()
-        channels_row.setSpacing(16)
+        # Channel rows — compact, config fields live behind the "Configure" popup
+        channels_col = QVBoxLayout()
+        channels_col.setSpacing(10)
 
-        self._sms_card = ChannelCard(
+        self._sms_card = ChannelRow(
             "SMS", "notification.svg",
             [("Mobile Number", "+91 98765 43210")],
-            "Send Test SMS", t
+            "Test Notification", t
         )
         self._sms_card.connect_toggle(self._on_toggle_changed)
 
-        self._telegram_card = ChannelCard(
+        self._telegram_card = ChannelRow(
             "Telegram", "notification.svg",
             [("Bot Token", "110201543:AAHdqTcvCH1vGWJxfSeofSAsGK5PALDsaw"),
              ("Chat ID",   "-100123456789")],
-            "Send Test Message", t
+            "Test Notification", t
         )
         self._telegram_card.connect_toggle(self._on_toggle_changed)
 
-        channels_row.addWidget(self._sms_card)
-        channels_row.addWidget(self._telegram_card)
-        layout.addLayout(channels_row)
+        self._system_card = ChannelRow(
+            "System", "notification.svg",
+            [],   # nothing to configure — delivered via the local OS tray
+            "Test Notification", t
+        )
+        self._system_card.connect_toggle(self._on_toggle_changed)
+        self._system_card.connect_send(self._on_test_system_notification)
+
+        channels_col.addWidget(self._sms_card)
+        channels_col.addWidget(self._telegram_card)
+        channels_col.addWidget(self._system_card)
+        layout.addLayout(channels_col)
 
         # Notification Triggers section
         triggers_panel = QFrame()
@@ -317,8 +377,10 @@ class NotificationsScreen(QWidget):
 
         self._sms_status_lbl = self._make_status_dot("SMS: Disabled", t.get("text_secondary"))
         self._telegram_status_lbl = self._make_status_dot("Telegram: Disabled", t.get("text_secondary"))
+        self._system_status_lbl = self._make_status_dot("System: Disabled", t.get("text_secondary"))
         sb_layout.addWidget(self._sms_status_lbl)
         sb_layout.addWidget(self._telegram_status_lbl)
+        sb_layout.addWidget(self._system_status_lbl)
         sb_layout.addStretch()
 
         self._triggers_status_lbl = QLabel("")
@@ -356,11 +418,30 @@ class NotificationsScreen(QWidget):
             f"color: {t.get('accent') if tg_on else t.get('text_secondary')};"
         )
 
+        sys_on = self._system_card.is_enabled()
+        self._system_status_lbl.setText(f"● System: {'Enabled' if sys_on else 'Disabled'}")
+        self._system_status_lbl.setStyleSheet(
+            f"color: {t.get('accent') if sys_on else t.get('text_secondary')};"
+        )
+
         active = sum(1 for c in self._configs if c.system_enabled)
         total = len(self._configs)
         color = t.get("accent") if active == total else t.get("text_secondary")
         self._triggers_status_lbl.setText(f"{active} of {total} triggers active")
         self._triggers_status_lbl.setStyleSheet(f"color: {color};")
+
+    def _on_test_system_notification(self):
+        """Fires a real native notification through the same NotificationService
+        the background scheduler jobs use (see services/scheduled_jobs.py) —
+        so this is a live preview, not a dummy button."""
+        notifier = getattr(self._controller, "_notifier", None)
+        if notifier is None:
+            return
+        notifier.notify(
+            "This is a test notification",
+            "Background job alerts (e.g. missed historic saves) will look like this.",
+            action=lambda: self._controller.show_and_navigate("historic_upload"),
+        )
 
     # ── Trigger table ────────────────────────────────────────────────────────
 

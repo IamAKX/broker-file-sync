@@ -61,7 +61,7 @@ class StatCard(QFrame):
         layout.addLayout(top_row)
 
         self._val_lbl = QLabel(value)
-        self._val_lbl.setStyleSheet("font-size: 36pt; font-weight: bold;")
+        self._val_lbl.setFont(font_scale.font(font_scale.DISPLAY_LG, True))
         layout.addWidget(self._val_lbl)
 
     def set_value(self, value: str):
@@ -153,7 +153,8 @@ class DashboardScreen(QWidget):
 
             dot = QLabel("●")
             dot.setFixedWidth(14)
-            dot.setStyleSheet(f"color: {color}; font-size: 12pt;")
+            dot.setFont(font_scale.font(font_scale.MEDIUM, False))
+            dot.setStyleSheet(f"color: {color};")
 
             info = QVBoxLayout()
             info.setSpacing(2)

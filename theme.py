@@ -203,7 +203,7 @@ class ThemeManager:
             QCheckBox::indicator:checked {{
                 background: {p['accent']};
                 border: 1px solid {p['accent']};
-                image: url({_CHECK_ICON});
+                image: url("{_CHECK_ICON}");
             }}
             QDialog {{
                 background: {p['background']};

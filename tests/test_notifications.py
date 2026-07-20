@@ -26,22 +26,37 @@ def test_notifications_creates(screen):
     assert screen is not None
 
 
-def test_has_send_test_sms_button(screen):
+def test_has_test_notification_button_per_channel(screen):
     from PySide6.QtWidgets import QPushButton
     btns = [b.text() for b in screen.findChildren(QPushButton)]
-    assert any("SMS" in t for t in btns)
-
-
-def test_has_send_test_message_button(screen):
-    from PySide6.QtWidgets import QPushButton
-    btns = [b.text() for b in screen.findChildren(QPushButton)]
-    assert any("Message" in t for t in btns)
+    assert btns.count("Test Notification") == 3
 
 
 def test_has_two_action_buttons(screen):
     from PySide6.QtWidgets import QPushButton
     btns = [b.text() for b in screen.findChildren(QPushButton)]
     assert len([t for t in btns if t.strip()]) >= 2
+
+
+def test_system_test_notification_fires_real_notifier_call(screen):
+    calls = []
+
+    class FakeNotifier:
+        def notify(self, title, message, action=None):
+            calls.append((title, message, action))
+
+    screen._controller._notifier = FakeNotifier()
+    screen._system_card._send_btn.click()
+
+    assert len(calls) == 1
+    title, message, action = calls[0]
+    assert title and message
+    assert callable(action)
+
+
+def test_system_row_has_no_configure_button(screen):
+    from PySide6.QtWidgets import QToolButton
+    assert screen._system_card.findChildren(QToolButton) == []
 
 
 def test_trigger_table_has_three_rows(screen):

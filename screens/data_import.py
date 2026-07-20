@@ -127,7 +127,8 @@ class BrokerImportCard(QFrame):
 
         # Status dot
         dot = QLabel("●")
-        dot.setStyleSheet(f"color: {t.get(color_token)}; font-size: 12pt;")
+        dot.setFont(font_scale.font(font_scale.MEDIUM, False))
+        dot.setStyleSheet(f"color: {t.get(color_token)};")
         dot.setFixedWidth(16)
         layout.addWidget(dot)
 
