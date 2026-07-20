@@ -196,12 +196,35 @@ def _xlsx_cell_date(value):
     return None
 
 
+def _drop_blank_scripname_rows(headers: list, data: list, row_dates: list) -> tuple[list, list]:
+    """Excel sheets often carry stray formatting/leftover values past the
+    real data range — xlrd/openpyxl report these as trailing rows in the
+    sheet's used range, blank except for the odd artifact value. A row with
+    no ScripName can't be attributed to any stock, so it's dropped here
+    rather than uploaded later as an empty symbol.
+    """
+    if "ScripName" not in headers:
+        return data, row_dates
+    scrip_idx = headers.index("ScripName")
+    kept_data, kept_dates = [], []
+    for i, row in enumerate(data):
+        value = row[scrip_idx] if scrip_idx < len(row) else None
+        if value is None or not str(value).strip():
+            continue
+        kept_data.append(row)
+        kept_dates.append(row_dates[i] if i < len(row_dates) else None)
+    return kept_data, kept_dates
+
+
 def read_historic_sheet(path: str) -> tuple[list, list, list]:
     """
     Read all columns from a historic-upload file (xlsx/xls/csv), no fixed
     template, and additionally extract the trade date from a "DataTime"
     column (time part dropped) for every row so the caller can validate the
     sheet's dates against the user-picked upload date.
+
+    Rows with a blank ScripName are dropped (see _drop_blank_scripname_rows)
+    — a stray trailing blank row in the sheet is not a real stock row.
 
     Returns (headers, rows, row_dates) — row_dates[i] is a datetime.date or
     None if that row's DataTime cell wasn't a parseable date, or [] filled
@@ -225,6 +248,7 @@ def read_historic_sheet(path: str) -> tuple[list, list, list]:
             _xlsx_cell_date(row[date_col]) if date_col is not None and date_col < len(row) else None
             for row in data
         ]
+        data, row_dates = _drop_blank_scripname_rows(headers, data, row_dates)
         return headers, data, row_dates
 
     elif lower.endswith(".xls"):
@@ -242,6 +266,7 @@ def read_historic_sheet(path: str) -> tuple[list, list, list]:
                 row_dates.append(None)
             else:
                 row_dates.append(_xls_cell_date(ws.cell(r, date_col), wb.datemode))
+        data, row_dates = _drop_blank_scripname_rows(headers, data, row_dates)
         return headers, data, row_dates
 
     elif lower.endswith(".csv"):
@@ -256,6 +281,7 @@ def read_historic_sheet(path: str) -> tuple[list, list, list]:
                 except ValueError:
                     parsed = None
             row_dates.append(parsed)
+        data, row_dates = _drop_blank_scripname_rows(headers, data, row_dates)
         return headers, data, row_dates
 
     raise ValueError(f"Unsupported file type: {path}")
