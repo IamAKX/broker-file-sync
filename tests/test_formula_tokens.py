@@ -63,12 +63,14 @@ def test_tokens_to_display_empty_is_dash():
     assert ft.tokens_to_display([]) == "—"
 
 
-def test_camarilla_formulas_reference_only_raw_fields():
-    # DR3..DS6 must only reference PCLOSE/PDH/PDL/DR6 — no window aggregates.
+def test_camarilla_formulas_reference_only_previous_day_lookups():
+    # DR3..DS6 must only reference previous-trading-day point lookups of
+    # CLOSE/HIGH/LOW (or DR6) — no window aggregates.
     for code in ("DR3", "DR4", "DS3", "DS4"):
         for tok in ft.BUILTIN_FORMULAS[code]["tokens"]:
-            if tok["type"] == "field":
-                assert tok["value"] in ("PCLOSE", "PDH", "PDL")
+            if tok["type"] == "func":
+                assert tok.get("timepoint") == "PREVIOUS_TRADING_DAY"
+                assert tok["field"] in ("CLOSE", "HIGH", "LOW")
 
 
 def test_ds6_references_dr6():

@@ -15,18 +15,20 @@ from services.master_generator import _build_script_name_lookup, _strip_rolling_
 # Raw historic-upload metric name -> Sharekhan-shaped LMV column name.
 # Fixed mapping, not user-editable (see plan doc) — verified against
 # services/master_generator.py's Sharekhan column-order docstring.
+#
+# pdh/pdl/PClose/PQuantity are deliberately absent here — they're still read
+# from the broker file into the Live Master View unchanged (see
+# config_defaults.MAIN_COLUMN_NAME_DATA), just never uploaded to the backend.
+# services/formula_engine.py derives the same "previous trading day" values
+# from our own stored High/Low/Close instead of relying on them.
 RAW_TO_SHAREKHAN_COLUMN = {
     "DiffPcnt": "% Change",
     "Open": "Open",
     "High": "High",
     "Low": "Low",
     "Close": "Current",
-    "pdh": "P.High",
-    "pdl": "P.Low",
-    "PClose": "Close",
     "AvgRate": "Avg Rate",
     "Quantity": "Qty",
-    "PQuantity": "P.Quantity",
 }
 
 

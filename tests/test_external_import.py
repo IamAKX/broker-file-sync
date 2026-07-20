@@ -353,7 +353,6 @@ def test_database_mode_calculates_and_shows_table(qapp, monkeypatch):
                     "display_name": "Infosys",
                     "metrics": {
                         "Open": base, "High": base + 2, "Low": base - 1, "Close": base + 1,
-                        "pdh": base + 1, "pdl": base - 2, "PClose": base,
                         "AvgRate": base + 0.5, "Quantity": 1000, "DiffPcnt": 1.0,
                     },
                 }

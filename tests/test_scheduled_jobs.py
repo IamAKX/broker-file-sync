@@ -80,9 +80,19 @@ def test_build_rows_payload_maps_raw_metric_names():
     metrics = rows[0]["metrics"]
     assert metrics == {
         "DiffPcnt": 1.5, "Open": 1790, "High": 1810, "Low": 1780,
-        "Close": 1800, "pdh": 1815, "pdl": 1775, "PClose": 1795,
-        "AvgRate": 1798, "Quantity": 1000, "PQuantity": 900,
+        "Close": 1800, "AvgRate": 1798, "Quantity": 1000,
     }
+
+
+def test_build_rows_payload_excludes_dropped_metrics():
+    # pdh/pdl/PClose/PQuantity are still read from the Sharekhan file into
+    # the LMV (see SHAREKHAN_HEADERS/_sharekhan_row) but must never be sent
+    # to the backend for saving.
+    data = [_sharekhan_row()]
+    rows = scheduled_jobs._build_rows_payload(SHAREKHAN_HEADERS, data, script_name_data=[])
+    metrics = rows[0]["metrics"]
+    for excluded in ("pdh", "pdl", "PClose", "PQuantity"):
+        assert excluded not in metrics
 
 
 def test_build_rows_payload_resolves_symbol_via_script_name_map():

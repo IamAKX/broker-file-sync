@@ -20,8 +20,9 @@ def _trading_days(start: date, count: int) -> list:
 
 def _build_history(start: date, count: int):
     """Deterministic synthetic series, indexed 0..count-1 by trading day.
-    High=100+i, Low=90+i, Close=95+i, Open=94+i, pdh/pdl/PClose mirror the
-    previous trading day's High/Low/Close so every value is derivable from i.
+    High=100+i, Low=90+i, Close=95+i, Open=94+i — every value is derivable
+    from i. pdh/pdl/PClose are no longer uploaded/stored; formulas that used
+    them now derive the previous trading day's own High/Low/Close instead.
     """
     days = _trading_days(start, count)
     rows = {}
@@ -31,9 +32,6 @@ def _build_history(start: date, count: int):
             "High": 100 + i,
             "Low": 90 + i,
             "Close": 95 + i,
-            "pdh": 100 + i - 1 if i > 0 else 100 + i,
-            "pdl": 90 + i - 1 if i > 0 else 90 + i,
-            "PClose": 95 + i - 1 if i > 0 else 95 + i,
             "AvgRate": 95 + i,
             "Quantity": 1000,
             "DiffPcnt": 1.0,
@@ -95,6 +93,7 @@ def test_daily_camarilla_pivots_pure_algebra():
     days, hist = _build_history(date(2026, 6, 1), 70)
     target = days[40]
     i = 40
+    # pdh/pdl/pclose are now the previous trading day's own High/Low/Close.
     pdh, pdl, pclose = 100 + i - 1, 90 + i - 1, 95 + i - 1
     rng = pdh - pdl
     out = fe.compute_for_symbol(hist, target)
@@ -105,6 +104,23 @@ def test_daily_camarilla_pivots_pure_algebra():
     assert out["DS4"] == pytest_approx(pclose - rng * 1.1 / 2)
     assert out["DS6"] == pytest_approx(pclose - (out["DR6"] - pclose))
     assert out["DAY PIVOT"] == pytest_approx((pdh + pdl + pclose) / 3)
+
+
+def test_daily_camarilla_pivots_blank_on_first_day_with_no_prior_row():
+    days, hist = _build_history(date(2026, 6, 1), 70)
+    target = days[0]  # no earlier trading day exists in history at all
+    out = fe.compute_for_symbol(hist, target)
+    for code in ("DR3", "DR4", "DR6", "DS3", "DS4", "DS6", "DAY PIVOT"):
+        assert out[code] is None, code
+
+
+def test_day_top_bottom_uses_5_trading_days_ending_the_day_before_target():
+    days, hist = _build_history(date(2026, 6, 1), 70)
+    target = days[40]
+    # Window is the 5 trading days ending the day before target: i=35..39.
+    out = fe.compute_for_symbol(hist, target)
+    assert out["DT"] == 95 + 39
+    assert out["DB"] == 95 + 35
 
 
 def pytest_approx(x):

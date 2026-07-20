@@ -3,7 +3,12 @@ Calculation engine for the ExternalImport "database" source.
 
 Computes the 56 built-in formula codes (see services.formula_tokens.BUILTIN_FORMULAS)
 per stock, from the raw daily metrics already stored via the Historic Upload feature
-(Open, High, Low, Close, pdh, pdl, PClose, AvgRate, Quantity, DiffPcnt).
+(Open, High, Low, Close, AvgRate, Quantity, DiffPcnt).
+
+pdh/pdl/PClose are no longer uploaded (see services.scheduled_jobs.
+RAW_TO_SHAREKHAN_COLUMN and screens.historic_upload._populate_columns) —
+formulas that used them (the daily camarilla pivots and DT/DB) derive the
+same "previous trading day" values from our own stored High/Low/Close instead.
 
 Calendar weeks run Monday..Sunday. Expiry week is the Mon..Sun week containing the
 last Tuesday of the month (see services.master_generator.last_tuesday_of_month);
@@ -30,9 +35,6 @@ RAW_OPEN = "Open"
 RAW_HIGH = "High"
 RAW_LOW = "Low"
 RAW_CLOSE = "Close"
-RAW_PDH = "pdh"
-RAW_PDL = "pdl"
-RAW_PCLOSE = "PClose"
 RAW_AVGRATE = "AvgRate"
 RAW_QUANTITY = "Quantity"
 RAW_DIFFPCNT = "DiffPcnt"
@@ -263,10 +265,14 @@ def compute_for_symbol(hist: StockHistory, target: date) -> dict:
     out = {}
 
     open_t = hist.get(RAW_OPEN, target)
-    pdh_t = hist.get(RAW_PDH, target)
-    pdl_t = hist.get(RAW_PDL, target)
-    pclose_t = hist.get(RAW_PCLOSE, target)
     close_t = hist.get(RAW_CLOSE, target)
+
+    # pdh/pdl/PClose are no longer uploaded — derive the same "previous
+    # trading day" values from our own stored High/Low/Close instead.
+    prev_day = hist.last_trading_day_on_or_before(target - timedelta(days=1))
+    pdh_t = hist.get(RAW_HIGH, prev_day) if prev_day else None
+    pdl_t = hist.get(RAW_LOW, prev_day) if prev_day else None
+    pclose_t = hist.get(RAW_CLOSE, prev_day) if prev_day else None
 
     month_start, week_start = _month_start(target), _week_start(target)
     mtd_dates = hist.trading_dates_in(month_start, target)
@@ -301,9 +307,12 @@ def compute_for_symbol(hist: StockHistory, target: date) -> dict:
     out["PWL"] = _min(hist, RAW_LOW, pw_dates)
     out["PWC"] = hist.get(RAW_CLOSE, last_pw_day) if last_pw_day else None
 
-    last5 = hist.last_n_trading_days_on_or_before(target, 5)
-    out["DT"] = _max(hist, RAW_PCLOSE, last5)
-    out["DB"] = _min(hist, RAW_PCLOSE, last5)
+    # DT/DB used to be max/min of PClose (= each of those days' own previous
+    # close) over the last 5 trading days — algebraically identical to
+    # max/min of Close over the 5 trading days ending the day before target.
+    prev_last5 = hist.last_n_trading_days_on_or_before(prev_day, 5) if prev_day else []
+    out["DT"] = _max(hist, RAW_CLOSE, prev_last5)
+    out["DB"] = _min(hist, RAW_CLOSE, prev_last5)
 
     pm_start, pm_end = _prev_month_bounds(target)
     pm_dates = hist.trading_dates_in(pm_start, pm_end)
@@ -332,7 +341,7 @@ def compute_for_symbol(hist: StockHistory, target: date) -> dict:
     out["MT"] = max(month_closes) if month_closes else None
     out["MB"] = min(month_closes) if month_closes else None
 
-    # Daily camarilla pivots — pure algebra on today's own pdh/pdl/pclose
+    # Daily camarilla pivots — pure algebra on the previous trading day's High/Low/Close
     if pdh_t is not None and pdl_t is not None and pclose_t is not None:
         rng = pdh_t - pdl_t
         out["DR3"] = pclose_t + rng * 1.1 / 4
@@ -371,7 +380,6 @@ def compute_for_symbol(hist: StockHistory, target: date) -> dict:
         for code in ("MR3", "MR4", "MR6", "MS3", "MS4", "MS6"):
             out[code] = None
 
-    prev_day = hist.last_trading_day_on_or_before(target - timedelta(days=1))
     out["PATP"] = hist.get(RAW_AVGRATE, prev_day) if prev_day else None
     out["CWATP"] = _avg(hist, RAW_AVGRATE, wtd_dates)
     out["PWATP"] = _avg(hist, RAW_AVGRATE, pw_dates)
