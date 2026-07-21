@@ -125,7 +125,7 @@ def test_generate_master_includes_market_profile(tmp_path, monkeypatch):
     monkeypatch.setattr(mg, "read_sharekhan",
                         lambda p: (["Scrip Name", "Current"], [["360ONE", "1.0"]]))
     monkeypatch.setattr(mg, "read_reliable_software", lambda p: (["ScripName"], []))
-    monkeypatch.setattr(mg, "read_nifty_invest", lambda p: (["Symbol"], []))
+    monkeypatch.setattr(mg, "read_nifty_invest_multi", lambda p: (["Symbol"], []))
     mp_file = _make_csv(tmp_path, "mp.csv", [
         _HEADER,
         ["2026-06-29", "360ONE", "x", "x", "x", "x", "1094", "1088", "1086",

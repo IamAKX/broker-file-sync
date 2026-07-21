@@ -177,3 +177,123 @@ def test_other_broker_cards_skip_market_profile_date_check(screen, monkeypatch, 
     card._on_file_dropped(fake_path)
 
     assert card._selected_file == fake_path
+
+
+# ── NiftyInvest: multiple files, header-name column detection ──────────────────
+
+def _nifty_csv(tmp_path, name, header_row, rows):
+    path = tmp_path / name
+    lines = [",".join(header_row)] + [",".join(str(c) for c in r) for r in rows]
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+def test_nifty_invest_card_is_multi_file(screen):
+    assert screen._cards["NiftyInvest"]._show_multi_file is True
+
+
+def test_other_cards_are_not_multi_file(screen):
+    for broker in ["Sharekhan", "ReliableSoftware", "ExternalImport", "MarketProfile"]:
+        assert screen._cards[broker]._show_multi_file is False
+
+
+def test_browse_getopenfilenames_used_for_nifty_invest(screen, monkeypatch, tmp_path):
+    """Multi-select dialog, not the single-file one, for NiftyInvest only."""
+    from PySide6.QtWidgets import QFileDialog
+
+    f1 = _nifty_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    f2 = _nifty_csv(tmp_path, "b.csv", ["Symbol", "Max Pain"], [["TCS", 3500]])
+    monkeypatch.setattr(QFileDialog, "getOpenFileNames", staticmethod(lambda *a, **k: ([f1, f2], "")))
+
+    def _boom(*a, **k):
+        raise AssertionError("getOpenFileName (singular) should not be used for NiftyInvest")
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(_boom))
+
+    screen._cards["NiftyInvest"]._browse()
+    assert screen._cards["NiftyInvest"]._selected_files == [f1, f2]
+
+
+def test_on_files_dropped_populates_selected_files(screen, tmp_path):
+    f1 = _nifty_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    f2 = _nifty_csv(tmp_path, "b.csv", ["Max Pain", "Symbol"], [[3500, "TCS"]])
+    card = screen._cards["NiftyInvest"]
+    card._on_files_dropped([f1, f2])
+    assert card._selected_files == [f1, f2]
+    assert "2 files imported" not in card._file_lbl.text()  # import still animating, not done yet
+
+
+def test_browse_replaces_previous_selection(screen, tmp_path):
+    f1 = _nifty_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    f2 = _nifty_csv(tmp_path, "b.csv", ["Symbol", "Max Pain"], [["TCS", 3500]])
+    card = screen._cards["NiftyInvest"]
+    card._on_files_dropped([f1], replace=True)
+    assert card._selected_files == [f1]
+    card._on_files_dropped([f2], replace=True)
+    assert card._selected_files == [f2]
+
+
+def test_drop_appends_and_dedupes_existing_selection(screen, tmp_path):
+    f1 = _nifty_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    f2 = _nifty_csv(tmp_path, "b.csv", ["Symbol", "Max Pain"], [["TCS", 3500]])
+    card = screen._cards["NiftyInvest"]
+    card._on_files_dropped([f1], replace=True)
+    card._on_files_dropped([f1, f2], replace=False)
+    assert card._selected_files == [f1, f2]   # f1 not duplicated
+
+
+def test_invalid_nifty_file_rejected_valid_files_kept(screen, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "critical", staticmethod(lambda *a, **k: None))
+
+    good = _nifty_csv(tmp_path, "good.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    bad = _nifty_csv(tmp_path, "bad.csv", ["Symbol", "SomethingElse"], [["TCS", 3500]])
+    card = screen._cards["NiftyInvest"]
+    card._on_files_dropped([good, bad], replace=True)
+    assert card._selected_files == [good]
+
+
+def test_nifty_invest_import_completes_with_multi_file_label(screen, tmp_path):
+    f1 = _nifty_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    f2 = _nifty_csv(tmp_path, "b.csv", ["Symbol", "Max Pain"], [["TCS", 3500]])
+    card = screen._cards["NiftyInvest"]
+    card._on_files_dropped([f1, f2], replace=True)
+    card._tick()
+    while card._timer.isActive():
+        card._tick()
+    assert "2 files imported" in card._file_lbl.text()
+
+
+def test_nifty_invest_reset_clears_selected_files(screen, tmp_path):
+    f1 = _nifty_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    card = screen._cards["NiftyInvest"]
+    card._on_files_dropped([f1], replace=True)
+    card._reset()
+    assert card._selected_files == []
+
+
+def test_run_watcher_passes_nifty_file_list(screen, monkeypatch, tmp_path):
+    f1 = _nifty_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    f2 = _nifty_csv(tmp_path, "b.csv", ["Symbol", "Max Pain"], [["TCS", 3500]])
+    screen._cards["NiftyInvest"]._selected_files = [f1, f2]
+
+    captured = {}
+
+    class _FakeSignal:
+        def connect(self, *a, **k):
+            pass
+
+    class _FakeLiveViewer:
+        def __init__(self, sharekhan_path, reliable_path, nifty_paths, *a, **k):
+            captured["nifty_paths"] = nifty_paths
+            self._headers = []
+            self._data = []
+            self.data_updated = _FakeSignal()
+        def show(self):
+            pass
+
+    # _run_watcher does a local `from screens.live_viewer import
+    # LiveViewerWindow` — patch it at its defining module, not on data_import.
+    monkeypatch.setattr("screens.live_viewer.LiveViewerWindow", _FakeLiveViewer)
+    screen._run_watcher()
+
+    assert captured["nifty_paths"] == [f1, f2]

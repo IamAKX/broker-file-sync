@@ -49,7 +49,7 @@ def _stub_readers(monkeypatch, rs_rows):
         lambda path: (["ScripName", "callstrikehighestoi"], rs_rows),
     )
     monkeypatch.setattr(
-        "services.file_reader.read_nifty_invest",
+        "services.file_reader.read_nifty_invest_multi",
         lambda path: (["Symbol", "Max Pain"], []),
     )
 
@@ -80,7 +80,7 @@ def test_live_merge_matches_double_dot_company_any_duration(monkeypatch):
                       [["BIOCON LIMITED..rolling.10D", "BIO_OI"]]),
     )
     monkeypatch.setattr(
-        "services.file_reader.read_nifty_invest",
+        "services.file_reader.read_nifty_invest_multi",
         lambda path: (["Symbol", "Max Pain"], []),
     )
     # Config key is the suffix-stripped form, including the trailing dot.

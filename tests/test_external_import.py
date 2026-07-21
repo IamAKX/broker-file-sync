@@ -169,7 +169,7 @@ def test_live_merge_includes_external_columns(tmp_path, monkeypatch):
         lambda path: (["ScripName", "callstrikehighestoi"], []),
     )
     monkeypatch.setattr(
-        "services.file_reader.read_nifty_invest",
+        "services.file_reader.read_nifty_invest_multi",
         lambda path: (["Symbol", "Max Pain"], []),
     )
 
@@ -208,7 +208,7 @@ def test_live_merge_without_external_is_unchanged(tmp_path, monkeypatch):
         lambda path: (["ScripName", "callstrikehighestoi"], []),
     )
     monkeypatch.setattr(
-        "services.file_reader.read_nifty_invest",
+        "services.file_reader.read_nifty_invest_multi",
         lambda path: (["Symbol", "Max Pain"], []),
     )
 
@@ -232,7 +232,7 @@ def test_live_merge_external_missing_scrip_fills_none(tmp_path, monkeypatch):
         lambda path: (["ScripName", "callstrikehighestoi"], []),
     )
     monkeypatch.setattr(
-        "services.file_reader.read_nifty_invest",
+        "services.file_reader.read_nifty_invest_multi",
         lambda path: (["Symbol", "Max Pain"], []),
     )
 
@@ -266,7 +266,7 @@ def test_live_merge_external_matches_any_rolling_duration(tmp_path, monkeypatch)
         lambda path: (["ScripName", "callstrikehighestoi"], []),
     )
     monkeypatch.setattr(
-        "services.file_reader.read_nifty_invest",
+        "services.file_reader.read_nifty_invest_multi",
         lambda path: (["Symbol", "Max Pain"], []),
     )
     ext_file = _make_csv(tmp_path, "roll.csv", [
@@ -292,7 +292,7 @@ def test_live_merge_external_column_a_is_ignored(tmp_path, monkeypatch):
         lambda path: (["ScripName", "callstrikehighestoi"], []),
     )
     monkeypatch.setattr(
-        "services.file_reader.read_nifty_invest",
+        "services.file_reader.read_nifty_invest_multi",
         lambda path: (["Symbol", "Max Pain"], []),
     )
     ext_file = _make_csv(tmp_path, "cola.csv", [
@@ -327,7 +327,7 @@ def _stub_sk_and_slow_sources(monkeypatch, sk_row):
         lambda path: (["ScripName", "callstrikehighestoi"], []),
     )
     monkeypatch.setattr(
-        "services.file_reader.read_nifty_invest",
+        "services.file_reader.read_nifty_invest_multi",
         lambda path: (["Symbol", "Max Pain"], []),
     )
 

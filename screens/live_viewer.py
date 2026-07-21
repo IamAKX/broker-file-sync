@@ -332,14 +332,15 @@ class LiveViewerWindow(QWidget):
     data_updated      = Signal(list, list)    # headers, data — for downstream consumers
 
     def __init__(self, sharekhan_path: str, reliable_path: str,
-                 nifty_path: str, script_name_data: list,
+                 nifty_paths, script_name_data: list,
                  expiry_date=None, external_path=None,
                  market_profile_path=None, external_mode: str = "file",
                  theme=None, controller=None, parent=None):
         super().__init__(parent)
         self._sharekhan_path   = sharekhan_path
         self._reliable_path    = reliable_path
-        self._nifty_path       = nifty_path
+        # A single path (str) or a list — LiveDataReader normalizes either.
+        self._nifty_paths      = nifty_paths
         self._external_path    = external_path
         self._external_mode    = external_mode
         self._market_profile_path = market_profile_path
@@ -518,7 +519,7 @@ class LiveViewerWindow(QWidget):
         # one of them touches it at a time (initial load completes before the
         # worker thread starts polling).
         self._reader = LiveDataReader(
-            self._sharekhan_path, self._reliable_path, self._nifty_path,
+            self._sharekhan_path, self._reliable_path, self._nifty_paths,
             self._script_name_data, expiry_date=self._expiry_date,
             use_com=self._use_com, external_path=self._external_path,
             market_profile_path=self._market_profile_path,

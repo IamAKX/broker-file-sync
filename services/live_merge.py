@@ -20,14 +20,19 @@ import time
 
 
 class LiveDataReader:
-    def __init__(self, sharekhan_path, reliable_path, nifty_path,
+    def __init__(self, sharekhan_path, reliable_path, nifty_paths,
                  script_name_data, expiry_date=None,
                  use_com=False, slow_interval_s: float = 1.0,
                  clock=time.monotonic, external_path=None,
                  market_profile_path=None, external_mode: str = "file"):
         self._sharekhan_path   = sharekhan_path
         self._reliable_path    = reliable_path
-        self._nifty_path       = nifty_path
+        # nifty_paths may be a single path (str) or a list — NiftyInvest is
+        # the one broker that supports multiple files (see
+        # services.file_reader.read_nifty_invest_multi).
+        self._nifty_paths      = (
+            [nifty_paths] if isinstance(nifty_paths, str) else list(nifty_paths or [])
+        )
         self._external_path    = external_path
         # "file" reads external_path via read_external_import; "database"
         # instead computes the same (headers, rows) shape from stored
@@ -102,7 +107,7 @@ class LiveDataReader:
 
     def _read_slow_sources(self, force: bool = False):
         """Refresh Reliable + Nifty + External if the slow interval has elapsed."""
-        from services.file_reader import read_nifty_invest, read_market_profile
+        from services.file_reader import read_nifty_invest_multi, read_market_profile
 
         now = self._clock()
         due = (
@@ -112,7 +117,7 @@ class LiveDataReader:
         )
         if due:
             self._rs_cache  = self._read_reliable()
-            self._ni_cache  = read_nifty_invest(self._nifty_path)
+            self._ni_cache  = read_nifty_invest_multi(self._nifty_paths)
             self._ext_cache = self._read_external()
             self._mp_cache  = (read_market_profile(self._market_profile_path)
                                if self._market_profile_path else ([], []))

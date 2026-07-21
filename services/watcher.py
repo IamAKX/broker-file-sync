@@ -32,7 +32,7 @@ class FileWatcher(QObject):
 
         self._sharekhan_path   = None
         self._reliable_path    = None
-        self._nifty_path       = None
+        self._nifty_paths      = None
         self._external_path    = None
         self._market_profile_path = None
         self._output_path      = None
@@ -41,7 +41,7 @@ class FileWatcher(QObject):
     # ── Configuration ─────────────────────────────────────────────────────────
 
     def configure(self, sharekhan_path: str, reliable_path: str,
-                  nifty_path: str, output_path: str,
+                  nifty_paths, output_path: str,
                   script_name_data: list, external_path: str = None,
                   market_profile_path: str = None) -> None:
         # Remove any previously watched file
@@ -50,7 +50,7 @@ class FileWatcher(QObject):
 
         self._sharekhan_path   = sharekhan_path
         self._reliable_path    = reliable_path
-        self._nifty_path       = nifty_path
+        self._nifty_paths      = nifty_paths   # single path (str) or list — see read_nifty_invest_multi
         self._external_path    = external_path
         self._market_profile_path = market_profile_path
         self._output_path      = output_path
@@ -100,7 +100,7 @@ class FileWatcher(QObject):
                 generate_master(
                     self._sharekhan_path,
                     self._reliable_path,
-                    self._nifty_path,
+                    self._nifty_paths,
                     self._output_path,
                     self._script_name_data,
                     external_path=self._external_path,

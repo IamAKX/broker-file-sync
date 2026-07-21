@@ -30,11 +30,12 @@ _BROKER_ROW_COUNTERS = {
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
 
 BROKERS = [
-    ("Sharekhan",        "status_red",    "TradeBook export (.xlsx / .xls)",        (".xlsx", ".xls"),        True,  False),
-    ("ReliableSoftware", "status_blue",   "Transactions export (.xlsx / .xls)",     (".xlsx", ".xls"),        True,  False),
-    ("NiftyInvest",      "status_orange", "Portfolio export (.csv)",                (".csv",),                False, False),
-    ("ExternalImport",   "status_purple", "Any file — columns auto-detected",       (".xlsx", ".xls", ".csv"), False, True),
-    ("MarketProfile",    "status_pink",   "Market Profile export (.csv / .xlsx)",   (".csv", ".xlsx", ".xls"), True,  False),
+    # broker, color_token, hint, exts, show_date_picker, show_source_toggle, show_multi_file
+    ("Sharekhan",        "status_red",    "TradeBook export (.xlsx / .xls)",        (".xlsx", ".xls"),        True,  False, False),
+    ("ReliableSoftware", "status_blue",   "Transactions export (.xlsx / .xls)",     (".xlsx", ".xls"),        True,  False, False),
+    ("NiftyInvest",      "status_orange", "Portfolio export (.csv) — multiple allowed", (".csv",),            False, False, True),
+    ("ExternalImport",   "status_purple", "Any file — columns auto-detected",       (".xlsx", ".xls", ".csv"), False, True,  False),
+    ("MarketProfile",    "status_pink",   "Market Profile export (.csv / .xlsx)",   (".csv", ".xlsx", ".xls"), True,  False, False),
 ]
 
 
@@ -67,17 +68,22 @@ class BrokerImportCard(QFrame):
 
     def __init__(self, broker: str, color_token: str, hint: str, theme,
                  exts: tuple = (".xlsx", ".xls"), show_date_picker: bool = False,
-                 show_source_toggle: bool = False, parent=None):
+                 show_source_toggle: bool = False, show_multi_file: bool = False,
+                 parent=None):
         super().__init__(parent)
         self._theme = theme
         self._broker = broker
         self._hint = hint
         self._exts = exts
         self._selected_file = None
+        # Only used when show_multi_file is set (NiftyInvest today) — every
+        # other card keeps using the scalar _selected_file above, untouched.
+        self._selected_files: list = []
         self._row_count = 0
         self._progress_value = 0
         self._show_date_picker = show_date_picker
         self._show_source_toggle = show_source_toggle
+        self._show_multi_file = show_multi_file
         self._source_mode = "file"
         self._formula_viewer = None
         self.setObjectName("brokerPanel")
@@ -106,6 +112,15 @@ class BrokerImportCard(QFrame):
 
     def dropEvent(self, event):
         if self._source_mode != "file":
+            return
+        if self._show_multi_file:
+            paths = [
+                u.toLocalFile() for u in event.mimeData().urls()
+                if u.toLocalFile().lower().endswith(self._exts)
+            ]
+            if paths:
+                self._on_files_dropped(paths, replace=False)
+                event.acceptProposedAction()
             return
         for url in event.mimeData().urls():
             path = url.toLocalFile()
@@ -144,6 +159,17 @@ class BrokerImportCard(QFrame):
         info_col.addWidget(self._file_lbl)
         layout.addLayout(info_col, 1)
 
+        # Middle control slot — date picker, File/DB toggle, or nothing,
+        # depending on the broker. Always reserved at the same fixed width so
+        # Browse/status/delete line up at the same x-position on every card
+        # regardless of which (if any) control a given row actually shows.
+        _MIDDLE_SLOT_WIDTH = 130
+        middle_slot = QWidget()
+        middle_slot.setFixedWidth(_MIDDLE_SLOT_WIDTH)
+        middle_slot.setStyleSheet("background: transparent;")
+        middle_lay = QHBoxLayout(middle_slot)
+        middle_lay.setContentsMargins(0, 0, 0, 0)
+
         # File / Database source toggle (only for ExternalImport, for now)
         if self._show_source_toggle:
             from screens.notifications import ToggleSwitch
@@ -159,7 +185,7 @@ class BrokerImportCard(QFrame):
             source_row.addWidget(self._file_mode_lbl)
             source_row.addWidget(self._source_toggle)
             source_row.addWidget(self._db_mode_lbl)
-            layout.addLayout(source_row)
+            middle_lay.addLayout(source_row)
             self._update_source_mode_style()
 
         # Date picker (Sharekhan: F&O expiry date; ReliableSoftware: plain
@@ -179,7 +205,9 @@ class BrokerImportCard(QFrame):
             self._date_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self._update_date_btn_style()
             self._date_btn.clicked.connect(self._show_calendar)
-            layout.addWidget(self._date_btn)
+            middle_lay.addWidget(self._date_btn)
+
+        layout.addWidget(middle_slot)
 
         # Progress bar + percentage (inline, hidden until importing)
         self._progress = QProgressBar()
@@ -245,6 +273,30 @@ class BrokerImportCard(QFrame):
         counter = _BROKER_ROW_COUNTERS.get(self._broker, count_rows_sharekhan)
         self._row_count = counter(path)
         self._file_lbl.setText(f"Selected: {os.path.basename(path)}")
+        self._file_lbl.setStyleSheet(f"color: {self._theme.get('accent')};")
+        self._start_import()
+
+    def _on_files_dropped(self, paths: list, replace: bool = True):
+        """Multi-file counterpart to _on_file_dropped (NiftyInvest only —
+        see show_multi_file). Browse replaces the whole selection (one
+        dialog session defines "the current full set"); drag-and-drop
+        appends/dedupes (a more incremental gesture)."""
+        if replace:
+            self._selected_files = []
+        for path in paths:
+            if path in self._selected_files:
+                continue
+            if self._validate_nifty_invest_file(path):
+                self._selected_files.append(path)
+        if not self._selected_files:
+            return
+
+        counter = _BROKER_ROW_COUNTERS.get(self._broker, count_rows_sharekhan)
+        self._row_count = sum(counter(p) for p in self._selected_files)
+        names = ", ".join(os.path.basename(p) for p in self._selected_files[:3])
+        if len(self._selected_files) > 3:
+            names += f" +{len(self._selected_files) - 3} more"
+        self._file_lbl.setText(f"Selected: {names}")
         self._file_lbl.setStyleSheet(f"color: {self._theme.get('accent')};")
         self._start_import()
 
@@ -323,6 +375,30 @@ class BrokerImportCard(QFrame):
         from services.file_reader import read_market_profile_date
         return self._validate_broker_file_date(path, read_market_profile_date, "Date")
 
+    def _validate_nifty_invest_file(self, path: str) -> bool:
+        """NiftyInvest files may lay their columns out differently (see
+        services.file_reader.read_nifty_invest_multi), but a "Symbol" and a
+        "Max Pain" header must exist somewhere in the file — reject up front
+        rather than silently dropping this file's data at merge time."""
+        from PySide6.QtWidgets import QMessageBox
+        from services.file_reader import read_external_import
+
+        try:
+            headers, _rows = read_external_import(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Invalid File", f"Could not read {os.path.basename(path)}:\n\n{exc}")
+            return False
+
+        headers = [str(h).strip() if h is not None else "" for h in headers]
+        if "Symbol" not in headers or "Max Pain" not in headers:
+            QMessageBox.critical(
+                self, "Missing Columns",
+                f"{os.path.basename(path)} needs a 'Symbol' column and a 'Max Pain' "
+                "column (any position) — this file is missing one or both."
+            )
+            return False
+        return True
+
     def _browse(self):
         if self._exts == (".csv",):
             file_filter = "CSV Files (*.csv)"
@@ -330,6 +406,13 @@ class BrokerImportCard(QFrame):
             file_filter = "Supported Files (*.xlsx *.xls *.csv)"
         else:
             file_filter = "Excel Files (*.xlsx *.xls)"
+        if self._show_multi_file:
+            paths, _ = QFileDialog.getOpenFileNames(
+                self, f"Select {self._broker} Files", "", file_filter
+            )
+            if paths:
+                self._on_files_dropped(paths, replace=True)
+            return
         path, _ = QFileDialog.getOpenFileName(
             self, f"Select {self._broker} File", "", file_filter
         )
@@ -467,7 +550,11 @@ class BrokerImportCard(QFrame):
             self._pct_lbl.setVisible(False)
             self._set_status_imported()
             rows = self._row_count
-            self._file_lbl.setText(f"1 file imported · {rows:,} rows")
+            if self._show_multi_file:
+                n = len(self._selected_files)
+                self._file_lbl.setText(f"{n} file{'s' if n != 1 else ''} imported · {rows:,} rows")
+            else:
+                self._file_lbl.setText(f"1 file imported · {rows:,} rows")
             self._file_lbl.setStyleSheet(f"color: {self._theme.get('accent')};")
             self._delete_btn.setVisible(True)
             self.import_done.emit(self._broker, rows)
@@ -476,6 +563,7 @@ class BrokerImportCard(QFrame):
         if hasattr(self, "_timer") and self._timer.isActive():
             self._timer.stop()
         self._selected_file = None
+        self._selected_files = []
         self._row_count = 0
         self._progress.setValue(0)
         self._progress.setVisible(False)
@@ -689,8 +777,9 @@ class DataImportScreen(QWidget):
         cards_col.setContentsMargins(0, 0, 0, 0)
         cards_col.setSpacing(10)
         self._cards: dict[str, BrokerImportCard] = {}
-        for broker, color_token, hint, exts, show_date, show_source_toggle in BROKERS:
-            card = BrokerImportCard(broker, color_token, hint, t, exts, show_date, show_source_toggle)
+        for broker, color_token, hint, exts, show_date, show_source_toggle, show_multi_file in BROKERS:
+            card = BrokerImportCard(broker, color_token, hint, t, exts, show_date,
+                                     show_source_toggle, show_multi_file)
             card.import_done.connect(self.broker_imported)
             card.import_reset.connect(self.broker_reset)
             card.import_done.connect(self._on_card_imported)
@@ -796,7 +885,7 @@ class DataImportScreen(QWidget):
 
         sharekhan_path = self._cards["Sharekhan"]._selected_file
         reliable_path  = self._cards["ReliableSoftware"]._selected_file
-        nifty_path     = self._cards["NiftyInvest"]._selected_file
+        nifty_paths    = self._cards["NiftyInvest"]._selected_files
         external_card  = self._cards["ExternalImport"]
         external_path  = external_card._selected_file
         external_mode  = external_card._source_mode
@@ -809,7 +898,7 @@ class DataImportScreen(QWidget):
             return
 
         self._live_viewer = LiveViewerWindow(
-            sharekhan_path, reliable_path, nifty_path,
+            sharekhan_path, reliable_path, nifty_paths,
             SCRIPT_NAME_DATA,
             expiry_date=expiry_date,
             external_path=external_path,

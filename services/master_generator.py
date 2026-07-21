@@ -5,7 +5,10 @@ Join strategy:
   - Sharekhan Column C (Scrip Name) is the primary key
   - ReliableSoftware Column B (ScripName) is a foreign key — resolved to
     symbol via the Script Name mapping table before matching
-  - NiftyInvest Column A (Symbol) is a foreign key — matched directly
+  - NiftyInvest Symbol (located by header name, not a fixed column — see
+    services.file_reader.read_nifty_invest_multi; multiple NiftyInvest files
+    are supported and merged, last file wins on a duplicate Symbol) is a
+    foreign key — matched directly
   - All rows from Sharekhan are kept; missing data from other sources = blank
 
 Column positions within each read result (0-based within the extracted cols):
@@ -22,7 +25,7 @@ Column positions within each read result (0-based within the extracted cols):
 import os
 from datetime import date, timedelta
 from services.file_reader import (read_sharekhan, read_reliable_software,
-                                  read_nifty_invest, read_external_import,
+                                  read_nifty_invest_multi, read_external_import,
                                   read_market_profile)
 
 
@@ -95,7 +98,7 @@ def _strip_rolling_suffix(name: str) -> str:
 def generate_master(
     sharekhan_path: str,
     reliable_path: str,
-    nifty_path: str,
+    nifty_paths,   # a single path (str) or a list of paths — see read_nifty_invest_multi
     output_path: str,
     script_name_data: list,   # [(full_name, symbol), ...] from config tab 2
     expiry_date: date = None,  # expiry date to strip from Sharekhan Scrip Names
@@ -105,7 +108,7 @@ def generate_master(
     # --- Read all sources ---
     sk_headers, sk_rows = read_sharekhan(sharekhan_path)
     rs_headers, rs_rows = read_reliable_software(reliable_path)
-    ni_headers, ni_rows = read_nifty_invest(nifty_path)
+    ni_headers, ni_rows = read_nifty_invest_multi(nifty_paths)
     if external_path:
         ext_headers, ext_rows = read_external_import(external_path)
     else:

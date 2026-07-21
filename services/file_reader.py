@@ -163,6 +163,51 @@ def read_nifty_invest(path: str) -> tuple[list, list]:
     return _read_file(path, _NIFTY_COLS, _NIFTY_HEADER_ROW)
 
 
+_NIFTY_SYMBOL_HEADER  = "Symbol"
+_NIFTY_MAXPAIN_HEADER = "Max Pain"
+
+
+def read_nifty_invest_multi(paths) -> tuple[list, list]:
+    """Read one or more NiftyInvest exports and merge them into a single
+    (headers, rows) pair, same output shape as read_nifty_invest.
+
+    Unlike read_nifty_invest (fixed columns A/C), each file's Symbol and Max
+    Pain columns are located BY HEADER NAME — different NiftyInvest exports
+    may lay their columns out differently. A file missing either header is
+    skipped rather than raising, so one bad file doesn't take down the
+    live-read loop; user-facing rejection of a bad file happens earlier, at
+    selection time (see screens.data_import.BrokerImportCard._validate_nifty_invest_file).
+
+    Rows are merged by Symbol across all files, in the given path order —
+    if the same Symbol appears in more than one file, the last file wins.
+
+    `paths` may be a single path (str) or a list of paths.
+    """
+    if isinstance(paths, str):
+        paths = [paths]
+
+    combined: dict = {}
+    for path in paths:
+        try:
+            headers, rows = read_external_import(path)
+        except Exception:
+            continue
+        headers = [str(h).strip() if h is not None else "" for h in headers]
+        if _NIFTY_SYMBOL_HEADER not in headers or _NIFTY_MAXPAIN_HEADER not in headers:
+            continue
+        sym_idx = headers.index(_NIFTY_SYMBOL_HEADER)
+        mp_idx = headers.index(_NIFTY_MAXPAIN_HEADER)
+        for row in rows:
+            symbol = row[sym_idx] if sym_idx < len(row) else None
+            if symbol is None or not str(symbol).strip():
+                continue
+            max_pain = row[mp_idx] if mp_idx < len(row) else None
+            combined[str(symbol).strip()] = max_pain
+
+    rows = [[symbol, max_pain] for symbol, max_pain in combined.items()]
+    return [_NIFTY_SYMBOL_HEADER, _NIFTY_MAXPAIN_HEADER], rows
+
+
 def read_market_profile(path: str) -> tuple[list, list]:
     return _read_file(path, _MARKET_PROFILE_COLS, _MARKET_PROFILE_HEADER_ROW)
 

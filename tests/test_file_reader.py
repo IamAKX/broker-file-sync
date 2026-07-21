@@ -10,6 +10,7 @@ from services.file_reader import (
     read_historic_sheet,
     read_market_profile_date,
     read_reliable_software_date,
+    read_nifty_invest_multi,
 )
 
 
@@ -133,3 +134,60 @@ def test_read_market_profile_date_reads_iso_string_from_xlsx(tmp_path):
     wb.save(path)
 
     assert read_market_profile_date(path) == datetime.date(2026, 6, 29)
+
+
+# ── read_nifty_invest_multi ─────────────────────────────────────────────────
+
+def _write_csv(tmp_path, name, header_row, rows):
+    path = tmp_path / name
+    lines = [",".join(header_row)] + [",".join(str(c) for c in r) for r in rows]
+    path.write_text("\n".join(lines) + "\n")
+    return str(path)
+
+
+def test_read_nifty_invest_multi_locates_columns_by_header_name_in_different_positions(tmp_path):
+    # File A: Symbol first, Max Pain second. File B: reversed, plus an extra column.
+    f1 = _write_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    f2 = _write_csv(tmp_path, "b.csv", ["Max Pain", "Symbol", "Extra"], [[3500, "TCS", "x"]])
+
+    headers, rows = read_nifty_invest_multi([f1, f2])
+    assert headers == ["Symbol", "Max Pain"]
+    rows_by_symbol = {r[0]: r[1] for r in rows}
+    assert rows_by_symbol["INFY"] == "1800"
+    assert rows_by_symbol["TCS"] == "3500"
+
+
+def test_read_nifty_invest_multi_last_file_wins_on_duplicate_symbol(tmp_path):
+    f1 = _write_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    f2 = _write_csv(tmp_path, "b.csv", ["Symbol", "Max Pain"], [["INFY", 1900]])
+
+    headers, rows = read_nifty_invest_multi([f1, f2])
+    rows_by_symbol = {r[0]: r[1] for r in rows}
+    assert rows_by_symbol["INFY"] == "1900"
+
+
+def test_read_nifty_invest_multi_skips_file_missing_required_header(tmp_path):
+    f1 = _write_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    f2 = _write_csv(tmp_path, "b.csv", ["Symbol", "SomethingElse"], [["TCS", 3500]])
+
+    headers, rows = read_nifty_invest_multi([f1, f2])
+    rows_by_symbol = {r[0]: r[1] for r in rows}
+    assert rows_by_symbol == {"INFY": "1800"}
+
+
+def test_read_nifty_invest_multi_accepts_a_single_string_path(tmp_path):
+    f1 = _write_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800]])
+    headers, rows = read_nifty_invest_multi(f1)
+    assert rows == [["INFY", "1800"]]
+
+
+def test_read_nifty_invest_multi_empty_list_returns_empty_rows():
+    headers, rows = read_nifty_invest_multi([])
+    assert headers == ["Symbol", "Max Pain"]
+    assert rows == []
+
+
+def test_read_nifty_invest_multi_skips_blank_symbol_rows(tmp_path):
+    f1 = _write_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800], ["", 999]])
+    headers, rows = read_nifty_invest_multi([f1])
+    assert rows == [["INFY", "1800"]]
