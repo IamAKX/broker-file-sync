@@ -74,6 +74,7 @@ class TopBar(QWidget):
             ("Data", [
                 ("Data Import",     lambda: self.navigate.emit("data_import")),
                 ("Historic Upload", lambda: self.navigate.emit("historic_upload")),
+                ("LMV Upload",      lambda: self.navigate.emit("lmv_upload")),
             ]),
             ("View", [
                 ("Full Screen",  lambda: self.fullscreen_requested.emit()),

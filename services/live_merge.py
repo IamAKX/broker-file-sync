@@ -19,6 +19,99 @@ when finished.  It carries no Qt dependency so it is trivially testable.
 import time
 
 
+def merge_broker_sources(
+    sk_headers: list, sk_rows: list,
+    rs_headers: list, rs_rows: list,
+    ni_headers: list, ni_rows: list,
+    ext_headers: list, ext_rows: list,
+    mp_headers: list, mp_rows: list,
+    name_to_symbol: dict,
+    ext_row_hook=None,
+) -> tuple[list, list]:
+    """The one true join/merge — same join keys and column layout as
+    master_generator.generate_master, shared by LiveDataReader.read_merged()
+    (live LMV) and services.historic_lmv_merge.read_merged_static (one-shot
+    historical LMV) so both produce byte-identical headers for the same
+    inputs. Sharekhan rows are the backbone; every other source is looked up
+    by its resolved symbol and left blank where missing.
+
+    ``ext_row_hook(pk, sk_row, ext_row) -> ext_row``, if given, runs once per
+    matched Sharekhan row before its ExternalImport columns are extracted —
+    used only by the live reader to blend in today's live tick
+    (see apply_live_overlay); the static historical path leaves it None and
+    takes ext_row as-is.
+    """
+    from services.master_generator import (
+        _MP_DATA_INDICES, _MP_FK_IDX, _NI_DATA_INDICES, _NI_FK_IDX,
+        _RS_DATA_INDICES, _RS_FK_IDX, _SK_PK_IDX, _normalise, _strip_rolling_suffix,
+    )
+
+    rs_lookup: dict = {}
+    for row in rs_rows:
+        full_name = _strip_rolling_suffix(_normalise(row[_RS_FK_IDX]))
+        sym = name_to_symbol.get(full_name.lower())
+        if sym:
+            rs_lookup[_normalise(sym).upper()] = row
+
+    ni_lookup: dict = {}
+    for row in ni_rows:
+        ni_lookup[_normalise(row[_NI_FK_IDX]).upper()] = row
+
+    # External import: same shape as ReliableSoftware — column B (index 1) is
+    # the join key (full name + rolling suffix → symbol via config), column C
+    # onward (index 2+) are the data columns. In "database" mode column B is
+    # the stock's stored display_name, which round-trips through the same
+    # rolling-suffix-strip + name_to_symbol lookup to the same resolved symbol.
+    ext_data_indices = list(range(2, len(ext_headers))) if len(ext_headers) > 2 else []
+    ext_lookup: dict = {}
+    if ext_rows and ext_headers:
+        for row in ext_rows:
+            if not row or len(row) < 2:
+                continue
+            full_name = _strip_rolling_suffix(_normalise(row[1]))
+            sym = name_to_symbol.get(full_name.lower())
+            if sym:
+                ext_lookup[_normalise(sym).upper()] = row
+
+    mp_lookup: dict = {}
+    for row in mp_rows:
+        key = _normalise(row[_MP_FK_IDX]).upper()
+        if key:
+            mp_lookup[key] = row
+
+    out_headers = list(sk_headers)
+    for i in _RS_DATA_INDICES:
+        out_headers.append(rs_headers[i] if i < len(rs_headers) else "")
+    for i in _NI_DATA_INDICES:
+        out_headers.append(ni_headers[i] if i < len(ni_headers) else "")
+    for i in ext_data_indices:
+        out_headers.append(ext_headers[i] if i < len(ext_headers) else "")
+    for i in _MP_DATA_INDICES:
+        out_headers.append(mp_headers[i] if i < len(mp_headers) else "")
+
+    merged = []
+    for sk_row in sk_rows:
+        pk = _normalise(sk_row[_SK_PK_IDX]).upper()
+        out_row = list(sk_row)
+        rs_row = rs_lookup.get(pk)
+        for i in _RS_DATA_INDICES:
+            out_row.append(rs_row[i] if rs_row and i < len(rs_row) else None)
+        ni_row = ni_lookup.get(pk)
+        for i in _NI_DATA_INDICES:
+            out_row.append(ni_row[i] if ni_row and i < len(ni_row) else None)
+        ext_row = ext_lookup.get(pk)
+        if ext_row and ext_row_hook is not None:
+            ext_row = ext_row_hook(pk, sk_row, ext_row)
+        for i in ext_data_indices:
+            out_row.append(ext_row[i] if ext_row and i < len(ext_row) else None)
+        mp_row = mp_lookup.get(pk)
+        for i in _MP_DATA_INDICES:
+            out_row.append(mp_row[i] if mp_row and i < len(mp_row) else None)
+        merged.append(out_row)
+
+    return out_headers, merged
+
+
 class LiveDataReader:
     def __init__(self, sharekhan_path, reliable_path, nifty_paths,
                  script_name_data, expiry_date=None,
@@ -142,12 +235,7 @@ class LiveDataReader:
         Sharekhan is always re-read; Reliable/Nifty come from the slow cache
         unless ``force_slow`` is set or the slow interval has elapsed.
         """
-        from services.master_generator import (
-            _build_script_name_lookup, _normalise,
-            _strip_rolling_suffix,
-            _RS_DATA_INDICES, _NI_DATA_INDICES, _MP_DATA_INDICES,
-            _SK_PK_IDX, _RS_FK_IDX, _NI_FK_IDX, _MP_FK_IDX,
-        )
+        from services.master_generator import _build_script_name_lookup, _normalise, _SK_PK_IDX
         from services.formula_engine import CODE_TO_INDEX, _to_float
         from services.live_formula import apply_live_overlay
 
@@ -170,88 +258,38 @@ class LiveDataReader:
             self._name_to_symbol = _build_script_name_lookup(self._script_name_data)
         name_to_symbol = self._name_to_symbol
 
-        rs_lookup = {}
-        for row in rs_rows:
-            full_name = _strip_rolling_suffix(_normalise(row[_RS_FK_IDX]))
-            sym = name_to_symbol.get(full_name.lower())
-            if sym:
-                rs_lookup[_normalise(sym).upper()] = row
+        def _live_overlay_hook(pk, sk_row, ext_row):
+            # ext_row[0] is the row's own "Symbol" column, i.e. the same
+            # backend symbol string formula_engine's live baseline is keyed
+            # by — NOT pk (Sharekhan's own resolved join key, a different
+            # string space).
+            if not (self._external_mode == "database" and self._live_baseline_cache):
+                return ext_row
+            baseline = self._live_baseline_cache.get(ext_row[0])
+            if baseline is None:
+                return ext_row
+            live = {
+                "diffpcnt": _to_float(sk_row[2]),
+                "current":  _to_float(sk_row[3]),
+                "open":     _to_float(sk_row[4]),
+                "avg_rate": _to_float(sk_row[8]),
+                "qty":      _to_float(sk_row[12]),
+            }
+            overlay = apply_live_overlay(baseline, live)
+            if not overlay:
+                return ext_row
+            # Copy — ext_row is shared across every sk_row that resolves to
+            # this symbol, and reused across ticks until the next slow
+            # refresh; never mutate in place.
+            ext_row = list(ext_row)
+            for code, v in overlay.items():
+                idx = 2 + CODE_TO_INDEX[code]
+                if idx < len(ext_row):
+                    ext_row[idx] = round(v, 4)
+            return ext_row
 
-        ni_lookup = {}
-        for row in ni_rows:
-            ni_lookup[_normalise(row[_NI_FK_IDX]).upper()] = row
-
-        # External import: same shape as ReliableSoftware — column B (index 1)
-        # is the join key (full name + rolling suffix → symbol via config),
-        # column C onward (index 2+) are the data columns.
-        ext_data_indices = list(range(2, len(ext_headers))) if len(ext_headers) > 2 else []
-        ext_lookup: dict = {}
-        if ext_rows and ext_headers:
-            for row in ext_rows:
-                if not row or len(row) < 2:
-                    continue
-                full_name = _strip_rolling_suffix(_normalise(row[1]))
-                sym = name_to_symbol.get(full_name.lower())
-                if sym:
-                    ext_lookup[_normalise(sym).upper()] = row
-
-        # MarketProfile: stock (index 0) is already a symbol → direct match.
-        mp_lookup = {}
-        for row in mp_rows:
-            key = _normalise(row[_MP_FK_IDX]).upper()
-            if key:
-                mp_lookup[key] = row
-
-        out_headers = list(sk_headers)
-        for i in _RS_DATA_INDICES:
-            out_headers.append(rs_headers[i] if i < len(rs_headers) else "")
-        for i in _NI_DATA_INDICES:
-            out_headers.append(ni_headers[i] if i < len(ni_headers) else "")
-        for i in ext_data_indices:
-            out_headers.append(ext_headers[i] if i < len(ext_headers) else "")
-        for i in _MP_DATA_INDICES:
-            out_headers.append(mp_headers[i] if i < len(mp_headers) else "")
-
-        merged = []
-        for sk_row in sk_rows:
-            pk = _normalise(sk_row[_SK_PK_IDX]).upper()
-            out_row = list(sk_row)
-            rs_row = rs_lookup.get(pk)
-            for i in _RS_DATA_INDICES:
-                out_row.append(rs_row[i] if rs_row and i < len(rs_row) else None)
-            ni_row = ni_lookup.get(pk)
-            for i in _NI_DATA_INDICES:
-                out_row.append(ni_row[i] if ni_row and i < len(ni_row) else None)
-            ext_row = ext_lookup.get(pk)
-            if ext_row and self._external_mode == "database" and self._live_baseline_cache:
-                # ext_row[0] is the row's own "Symbol" column, i.e. the same
-                # backend symbol string formula_engine's live baseline is
-                # keyed by — NOT pk (Sharekhan's own resolved join key, a
-                # different string space).
-                baseline = self._live_baseline_cache.get(ext_row[0])
-                if baseline is not None:
-                    live = {
-                        "diffpcnt": _to_float(sk_row[2]),
-                        "current":  _to_float(sk_row[3]),
-                        "open":     _to_float(sk_row[4]),
-                        "avg_rate": _to_float(sk_row[8]),
-                        "qty":      _to_float(sk_row[12]),
-                    }
-                    overlay = apply_live_overlay(baseline, live)
-                    if overlay:
-                        # Copy — ext_row is shared across every sk_row that
-                        # resolves to this symbol, and reused across ticks
-                        # until the next slow refresh; never mutate in place.
-                        ext_row = list(ext_row)
-                        for code, v in overlay.items():
-                            idx = 2 + CODE_TO_INDEX[code]
-                            if idx < len(ext_row):
-                                ext_row[idx] = round(v, 4)
-            for i in ext_data_indices:
-                out_row.append(ext_row[i] if ext_row and i < len(ext_row) else None)
-            mp_row = mp_lookup.get(pk)
-            for i in _MP_DATA_INDICES:
-                out_row.append(mp_row[i] if mp_row and i < len(mp_row) else None)
-            merged.append(out_row)
-
-        return out_headers, merged
+        return merge_broker_sources(
+            sk_headers, sk_rows, rs_headers, rs_rows, ni_headers, ni_rows,
+            ext_headers, ext_rows, mp_headers, mp_rows, name_to_symbol,
+            ext_row_hook=_live_overlay_hook,
+        )

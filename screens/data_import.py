@@ -69,13 +69,20 @@ class BrokerImportCard(QFrame):
     def __init__(self, broker: str, color_token: str, hint: str, theme,
                  exts: tuple = (".xlsx", ".xls"), show_date_picker: bool = False,
                  show_source_toggle: bool = False, show_multi_file: bool = False,
-                 parent=None):
+                 compare_date_provider=None, parent=None):
         super().__init__(parent)
         self._theme = theme
         self._broker = broker
         self._hint = hint
         self._exts = exts
         self._selected_file = None
+        # Freshness checks (_validate_broker_file_date) compare a dropped
+        # file's own date against this — defaults to today (Data Import's
+        # "this file must be for today" behavior); screens.lmv_upload passes
+        # its selected historical date instead, so the same check applies
+        # against an arbitrary past date rather than always today.
+        from datetime import date as _date
+        self._compare_date_provider = compare_date_provider or (lambda: _date.today())
         # Only used when show_multi_file is set (NiftyInvest today) — every
         # other card keeps using the scalar _selected_file above, untouched.
         self._selected_files: list = []
@@ -337,12 +344,12 @@ class BrokerImportCard(QFrame):
     def _validate_broker_file_date(self, path: str, date_reader, date_column_label: str) -> bool:
         """Shared freshness check for brokers whose export carries a
         trade-date column that isn't otherwise read by their normal parser —
-        catches an old/wrong-day file before it's silently merged into the
-        Live Master View. Only day/month are compared (not year) — same
-        idea as Sharekhan's expiry-date check above, applied to freshness
-        instead of symbol suffix stripping."""
+        catches a file dated for the wrong day before it's silently merged
+        into the Live Master View. Only day/month are compared (not year) —
+        same idea as Sharekhan's expiry-date check above, applied to
+        freshness instead of symbol suffix stripping. Compares against
+        self._compare_date_provider() — today by default (see __init__)."""
         from PySide6.QtWidgets import QMessageBox
-        from datetime import date
 
         try:
             file_date = date_reader(path)
@@ -357,12 +364,13 @@ class BrokerImportCard(QFrame):
             )
             return False
 
-        today = date.today()
-        if (file_date.day, file_date.month) != (today.day, today.month):
+        compare_date = self._compare_date_provider()
+        if (file_date.day, file_date.month) != (compare_date.day, compare_date.month):
             QMessageBox.critical(
                 self, "Date Mismatch",
                 f"{os.path.basename(path)} is dated {file_date.strftime('%d-%b')}, "
-                f"but today is {today.strftime('%d-%b')}. Import a file for today's date."
+                f"but the selected date is {compare_date.strftime('%d-%b')}. "
+                f"Import a file for that date."
             )
             return False
         return True

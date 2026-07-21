@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
         from screens.historic_upload import HistoricUploadScreen
         from screens.formula_builder import FormulaBuilderScreen
         from screens.holidays import HolidaysScreen
+        from screens.lmv_upload import LmvUploadScreen
 
         dashboard        = DashboardScreen(self._controller)
         data_import      = DataImportScreen(self._controller)
@@ -96,6 +97,7 @@ class MainWindow(QMainWindow):
             ("historic_upload",  HistoricUploadScreen(self._controller)),
             ("formula_builder",  FormulaBuilderScreen(self._controller)),
             ("holidays",         HolidaysScreen(self._controller)),
+            ("lmv_upload",       LmvUploadScreen(self._controller)),
         ]
         for name, widget in screens:
             self._screens[name] = widget
