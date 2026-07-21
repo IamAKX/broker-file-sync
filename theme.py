@@ -92,6 +92,10 @@ class ThemeManager:
             QLabel {{
                 background-color: transparent;
             }}
+            QLabel#statValue {{
+                font-size: {font_scale.DISPLAY_LG}pt;
+                font-weight: bold;
+            }}
             QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox {{
                 background-color: {p['input_bg']};
                 color: {p['text_primary']};

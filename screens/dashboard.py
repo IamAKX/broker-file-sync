@@ -61,6 +61,7 @@ class StatCard(QFrame):
         layout.addLayout(top_row)
 
         self._val_lbl = QLabel(value)
+        self._val_lbl.setObjectName("statValue")
         self._val_lbl.setFont(font_scale.font(font_scale.DISPLAY_LG, True))
         layout.addWidget(self._val_lbl)
 

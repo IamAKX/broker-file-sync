@@ -506,9 +506,9 @@ SCHEDULER_TRIGGER_DEFAULTS = [
      "08:55"),
     ("lmv_check", "LMV Load Check",
      "Reminds you to load the Live Master View before today's historic save runs.",
-     "15:40"),
+     "22:35"),
     ("historic_save", "Daily Historic Save",
      "Saves today's Live Master View data to Historic records automatically.",
-     "15:45"),
+     "22:45"),
 ]
 
