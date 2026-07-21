@@ -23,6 +23,23 @@ def read_external_import_db(target: date = None) -> tuple[list, list]:
     Returns ([], []) if no historic data has been uploaded yet. Network/API
     errors propagate to the caller — this function has no UI concerns.
     """
+    headers, rows, _ = _fetch(target)
+    return headers, rows
+
+
+def read_external_import_db_with_live_baseline(target: date = None) -> tuple[list, list, dict]:
+    """Like read_external_import_db, but also returns the per-symbol live-
+    overlay baseline (see formula_engine.compute_live_baseline_for_symbol),
+    keyed by the same ``symbol`` string as each row's own first column.
+
+    Used only by the LMV's live source (services.live_merge) to blend this
+    with today's live Sharekhan tick — the static ExternalImport "database"
+    preview popup uses read_external_import_db instead and never needs it.
+    """
+    return _fetch(target)
+
+
+def _fetch(target: date = None) -> tuple[list, list, dict]:
     target = target or date.today()
     date_from = target - timedelta(days=FORMULA_LOOKBACK_DAYS)
 
@@ -38,7 +55,7 @@ def read_external_import_db(target: date = None) -> tuple[list, list]:
         for d in availability.get("dates", []) if d.get("has_data")
     )
     if not available_dates:
-        return [], []
+        return [], [], {}
 
     latest_available = available_dates[-1]
     raw_by_date = {}
@@ -50,9 +67,11 @@ def read_external_import_db(target: date = None) -> tuple[list, list]:
         if d == latest_available:
             display_names = {s["symbol"]: s.get("display_name") or "" for s in stocks}
 
-    results = formula_engine.compute_all(raw_by_date, target, holidays)
+    results, live_baselines = formula_engine.compute_all_with_live_baseline(
+        raw_by_date, target, holidays
+    )
     if not results:
-        return [], []
+        return [], [], {}
 
     headers = ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES
     rows = []
@@ -63,4 +82,4 @@ def read_external_import_db(target: date = None) -> tuple[list, list]:
             v = values.get(code)
             row.append("" if v is None else round(v, 4))
         rows.append(row)
-    return headers, rows
+    return headers, rows, live_baselines

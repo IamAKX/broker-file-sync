@@ -48,6 +48,8 @@ FORMULA_CODES = [
     "DAY TO", "PDTO", "CWTO", "PWTO", "DAY PIVOT", "WEEK PIVOT", "MONTH PIVOT",
 ]
 
+CODE_TO_INDEX = {code: i for i, code in enumerate(FORMULA_CODES)}
+
 
 class StockHistory:
     """Per-symbol lookup over {trade_date: {metric_name: value}}.
@@ -439,3 +441,73 @@ def compute_all(raw_by_date: dict, target: date, holidays: set = frozenset()) ->
         hist = StockHistory(rows_by_date, holidays)
         results[sym] = compute_for_symbol(hist, target)
     return results
+
+
+def compute_live_baseline_for_symbol(hist: StockHistory, target: date) -> dict:
+    """Ingredients for services.live_formula.apply_live_overlay — everything
+    the LMV's live overlay needs from stored EOD history to blend with
+    today's own live Sharekhan tick for CWO/CMO/CWATP/CMATP/WEEK % CHANGE/
+    MONTH % CHANGE/DAY TO/CWTO.
+
+    Kept separate from compute_for_symbol's `out` dict rather than added to
+    it, so as not to disturb that function's 56-code return contract (see
+    test_all_56_codes_present_in_output / test_missing_data_returns_none_not_crash).
+
+    "Elapsed" days are always filtered to strictly before target, even if
+    target's own row already exists in hist (e.g. the 15:45 daily save has
+    already landed while the LMV is still open) — otherwise today would be
+    double-counted against the live tick supplied separately.
+    """
+    week_start, month_start = _week_start(target), _month_start(target)
+    wtd_elapsed = [d for d in hist.trading_dates_in(week_start, target) if d < target]
+    mtd_elapsed = [d for d in hist.trading_dates_in(month_start, target) if d < target]
+
+    cwo_day = hist.first_trading_day_on_or_after(week_start, limit=target)
+    cmo_day = hist.first_trading_day_on_or_after(month_start, limit=target)
+
+    pw_start, pw_end = _prev_week_bounds(target)
+    last_pw_day = hist.last_trading_day_on_or_before(pw_end, limit=pw_start)
+    pm_start, pm_end = _prev_month_bounds(target)
+    last_pm_day = hist.last_trading_day_on_or_before(pm_end, limit=pm_start)
+
+    return {
+        "is_first_trading_day_of_week": cwo_day == target,
+        "is_first_trading_day_of_month": cmo_day == target,
+        "prev_atp_values_week": [
+            v for v in (hist.get(RAW_AVGRATE, d) for d in wtd_elapsed) if v is not None
+        ],
+        "prev_atp_values_month": [
+            v for v in (hist.get(RAW_AVGRATE, d) for d in mtd_elapsed) if v is not None
+        ],
+        "prev_qty_values_week": [
+            v for v in (hist.get(RAW_QUANTITY, d) for d in wtd_elapsed) if v is not None
+        ],
+        "pwc": hist.get(RAW_CLOSE, last_pw_day) if last_pw_day else None,
+        "pmc": hist.get(RAW_CLOSE, last_pm_day) if last_pm_day else None,
+    }
+
+
+def compute_all_with_live_baseline(
+    raw_by_date: dict, target: date, holidays: set = frozenset()
+) -> tuple[dict, dict]:
+    """Like compute_all, but also returns the per-symbol live-overlay
+    baseline (see compute_live_baseline_for_symbol) computed from the same
+    StockHistory in one pass — used by the LMV's live source, not the static
+    ExternalImport "database" preview.
+    """
+    if not raw_by_date:
+        return {}, {}
+    latest_date = max(raw_by_date.keys())
+    target_symbols = raw_by_date.get(latest_date, {})
+    by_symbol: dict = {sym: {} for sym in target_symbols}
+    for d, symbols in raw_by_date.items():
+        for sym, metrics in symbols.items():
+            if sym in by_symbol:
+                by_symbol[sym][d] = metrics
+
+    results, live_baselines = {}, {}
+    for sym, rows_by_date in by_symbol.items():
+        hist = StockHistory(rows_by_date, holidays)
+        results[sym] = compute_for_symbol(hist, target)
+        live_baselines[sym] = compute_live_baseline_for_symbol(hist, target)
+    return results, live_baselines

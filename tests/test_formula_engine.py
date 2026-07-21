@@ -291,3 +291,57 @@ def test_all_56_codes_present_in_output():
     out = fe.compute_for_symbol(hist, days[50])
     from services.formula_tokens import BUILTIN_CODES
     assert set(out.keys()) == set(BUILTIN_CODES)
+
+
+# ── compute_live_baseline_for_symbol / compute_all_with_live_baseline ──────────
+
+def test_live_baseline_flags_first_trading_day_of_week_and_month():
+    days, hist = _build_history(date(2026, 6, 1), 70)  # days[0] = Mon Jun 1
+    baseline = fe.compute_live_baseline_for_symbol(hist, days[0])
+    assert baseline["is_first_trading_day_of_week"] is True
+    assert baseline["is_first_trading_day_of_month"] is True
+    assert baseline["prev_atp_values_week"] == []
+    assert baseline["prev_atp_values_month"] == []
+    assert baseline["prev_qty_values_week"] == []
+
+
+def test_live_baseline_mid_week_excludes_target_even_though_its_own_row_is_stored():
+    days, hist = _build_history(date(2026, 6, 1), 70)
+    target = days[3]  # Thu Jun 4 — hist already has target's own row (AvgRate=98)
+    baseline = fe.compute_live_baseline_for_symbol(hist, target)
+    assert baseline["is_first_trading_day_of_week"] is False
+    # Mon/Tue/Wed only — target's own stored AvgRate (98) must not appear,
+    # or the live overlay would double-count today against the live tick.
+    assert baseline["prev_atp_values_week"] == [95, 96, 97]
+    assert baseline["prev_qty_values_week"] == [1000, 1000, 1000]
+
+
+def test_live_baseline_pwc_pmc_match_compute_for_symbol():
+    days, hist = _build_history(date(2026, 6, 1), 70)
+    target = days[40]
+    out = fe.compute_for_symbol(hist, target)
+    baseline = fe.compute_live_baseline_for_symbol(hist, target)
+    assert baseline["pwc"] == out["PWC"]
+    assert baseline["pmc"] == out["PMC"]
+    assert baseline["pwc"] is not None and baseline["pmc"] is not None
+
+
+def test_live_baseline_pwc_pmc_none_with_no_prior_history():
+    days, hist = _build_history(date(2026, 6, 1), 70)
+    baseline = fe.compute_live_baseline_for_symbol(hist, days[0])
+    assert baseline["pwc"] is None
+    assert baseline["pmc"] is None
+
+
+def test_compute_all_with_live_baseline_matches_compute_all_plus_baseline():
+    d1, d2 = date(2026, 6, 1), date(2026, 6, 2)
+    raw_by_date = {
+        d1: {"AAA": {"High": 10, "Low": 5, "Close": 8, "Open": 6, "AvgRate": 7, "Quantity": 100}},
+        d2: {"AAA": {"High": 11, "Low": 6, "Close": 9, "Open": 7, "AvgRate": 8, "Quantity": 200},
+             "BBB": {"High": 20, "Low": 15, "Close": 18, "Open": 16, "AvgRate": 17, "Quantity": 300}},
+    }
+    results, live_baselines = fe.compute_all_with_live_baseline(raw_by_date, d2)
+    assert results == fe.compute_all(raw_by_date, d2)
+    assert set(live_baselines.keys()) == set(results.keys()) == {"AAA", "BBB"}
+    assert live_baselines["AAA"]["prev_atp_values_week"] == [7]  # d1 only, d2 excluded
+    assert live_baselines["BBB"]["prev_atp_values_week"] == []  # BBB has no d1 row at all

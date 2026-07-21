@@ -49,6 +49,10 @@ class LiveDataReader:
         self._mp_cache = None
         self._slow_stamp = None   # monotonic time of last slow refresh
 
+        # Per-symbol live-overlay baseline (database mode only) — see
+        # _read_external and the overlay step in read_merged.
+        self._live_baseline_cache: dict = {}
+
         # Cached symbol-resolution map (rebuilt only when script data changes).
         self._name_to_symbol = None
 
@@ -116,8 +120,13 @@ class LiveDataReader:
 
     def _read_external(self):
         if self._external_mode == "database":
-            from services.external_import_source import read_external_import_db
-            return read_external_import_db()
+            from services.external_import_source import (
+                read_external_import_db_with_live_baseline,
+            )
+            headers, rows, live_baselines = read_external_import_db_with_live_baseline()
+            self._live_baseline_cache = live_baselines
+            return headers, rows
+        self._live_baseline_cache = {}
         from services.file_reader import read_external_import
         return read_external_import(self._external_path) if self._external_path else ([], [])
 
@@ -134,6 +143,8 @@ class LiveDataReader:
             _RS_DATA_INDICES, _NI_DATA_INDICES, _MP_DATA_INDICES,
             _SK_PK_IDX, _RS_FK_IDX, _NI_FK_IDX, _MP_FK_IDX,
         )
+        from services.formula_engine import CODE_TO_INDEX, _to_float
+        from services.live_formula import apply_live_overlay
 
         sk_headers, sk_rows = self._read_sharekhan()
         self._read_slow_sources(force=force_slow)
@@ -207,6 +218,30 @@ class LiveDataReader:
             for i in _NI_DATA_INDICES:
                 out_row.append(ni_row[i] if ni_row and i < len(ni_row) else None)
             ext_row = ext_lookup.get(pk)
+            if ext_row and self._external_mode == "database" and self._live_baseline_cache:
+                # ext_row[0] is the row's own "Symbol" column, i.e. the same
+                # backend symbol string formula_engine's live baseline is
+                # keyed by — NOT pk (Sharekhan's own resolved join key, a
+                # different string space).
+                baseline = self._live_baseline_cache.get(ext_row[0])
+                if baseline is not None:
+                    live = {
+                        "diffpcnt": _to_float(sk_row[2]),
+                        "current":  _to_float(sk_row[3]),
+                        "open":     _to_float(sk_row[4]),
+                        "avg_rate": _to_float(sk_row[8]),
+                        "qty":      _to_float(sk_row[12]),
+                    }
+                    overlay = apply_live_overlay(baseline, live)
+                    if overlay:
+                        # Copy — ext_row is shared across every sk_row that
+                        # resolves to this symbol, and reused across ticks
+                        # until the next slow refresh; never mutate in place.
+                        ext_row = list(ext_row)
+                        for code, v in overlay.items():
+                            idx = 2 + CODE_TO_INDEX[code]
+                            if idx < len(ext_row):
+                                ext_row[idx] = round(v, 4)
             for i in ext_data_indices:
                 out_row.append(ext_row[i] if ext_row and i < len(ext_row) else None)
             mp_row = mp_lookup.get(pk)

@@ -222,6 +222,176 @@ def test_live_merge_external_column_a_is_ignored(tmp_path, monkeypatch):
     assert data[0][headers.index("ExtCol")] == "OK"
 
 
+# ── live_merge: database-mode live overlay (CWO/CWATP/.../CWTO) ────────────────
+
+_SK_LIVE_HEADERS = [
+    "Scrip Name", "Lot Size", "% Change", "Current", "Open", "High", "Low",
+    "Close", "Avg Rate", "OI Difference Percentage", "P.High", "P.Low",
+    "Qty", "P.Quantity", "TurnOver",
+]
+
+
+def _stub_sk_and_slow_sources(monkeypatch, sk_row):
+    monkeypatch.setattr(
+        "services.live_merge.LiveDataReader._read_sharekhan",
+        lambda self: (_SK_LIVE_HEADERS, [list(sk_row)]),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_reliable_software",
+        lambda path: (["ScripName", "callstrikehighestoi"], []),
+    )
+    monkeypatch.setattr(
+        "services.file_reader.read_nifty_invest",
+        lambda path: (["Symbol", "Max Pain"], []),
+    )
+
+
+def _ext_db_fixture(live_baselines):
+    from services import formula_engine
+    codes = formula_engine.FORMULA_CODES
+    ext_headers = ["Symbol", "Display Name"] + codes
+    # CWO pre-populated with a "stored DB" value, as formula_engine.compute_all
+    # would already correctly give it for a non-first day of the week.
+    ext_row = ["INFY", "Infosys"] + ["" for _ in codes]
+    ext_row[2 + formula_engine.CODE_TO_INDEX["CWO"]] = 95.5
+    return ext_headers, [ext_row], live_baselines
+
+
+def test_live_merge_database_mode_overlays_live_values_on_first_trading_day(monkeypatch):
+    from services.live_merge import LiveDataReader
+    from services import external_import_source
+
+    sk_row = ["INFY", 1, 2.0, 110.0, 105.0, 111.0, 104.0, 109.0, 108.0, 0.0,
+              112.0, 103.0, 1000.0, 900.0, 50000.0]
+    _stub_sk_and_slow_sources(monkeypatch, sk_row)
+
+    live_baselines = {
+        "INFY": {
+            "is_first_trading_day_of_week": True,
+            "is_first_trading_day_of_month": False,
+            "prev_atp_values_week": [],
+            "prev_atp_values_month": [50.0, 51.0],
+            "prev_qty_values_week": [],
+            "pwc": 100.0,
+            "pmc": 200.0,
+        }
+    }
+    ext_headers, ext_rows, baselines = _ext_db_fixture(live_baselines)
+    monkeypatch.setattr(
+        external_import_source, "read_external_import_db_with_live_baseline",
+        lambda: (ext_headers, ext_rows, baselines),
+    )
+
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [("Infosys", "INFY")],
+                            external_mode="database")
+    reader._read_slow_sources(force=True)
+    headers, data = reader.read_merged(force_slow=False)
+    row = data[0]
+
+    # First trading day of the week -> CWO overridden with today's live Open
+    # (overwriting the stale "stored DB" placeholder from the fixture).
+    assert row[headers.index("CWO")] == 105.0
+    # Not the first trading day of the month -> CMO left alone (still blank).
+    assert row[headers.index("CMO")] == ""
+    assert row[headers.index("CWATP")] == 108.0        # no prior days -> live Avg Rate alone
+    assert row[headers.index("CMATP")] == 69.6667       # avg(50, 51, 108)
+    assert row[headers.index("WEEK % CHANGE")] == 10.0  # (110-100)/100*100, vs live Current
+    assert row[headers.index("MONTH % CHANGE")] == -45.0
+    assert row[headers.index("DAY TO")] == 0.0002
+    assert row[headers.index("CWTO")] == 0.0011
+
+
+def test_live_merge_database_mode_leaves_cwo_alone_mid_week(monkeypatch):
+    from services.live_merge import LiveDataReader
+    from services import external_import_source
+
+    sk_row = ["INFY", 1, 2.0, 110.0, 105.0, 111.0, 104.0, 109.0, 108.0, 0.0,
+              112.0, 103.0, 1000.0, 900.0, 50000.0]
+    _stub_sk_and_slow_sources(monkeypatch, sk_row)
+
+    live_baselines = {
+        "INFY": {
+            "is_first_trading_day_of_week": False,
+            "is_first_trading_day_of_month": False,
+            "prev_atp_values_week": [100.0, 102.0],
+            "prev_atp_values_month": [100.0, 102.0],
+            "prev_qty_values_week": [500.0],
+            "pwc": 100.0,
+            "pmc": 200.0,
+        }
+    }
+    ext_headers, ext_rows, baselines = _ext_db_fixture(live_baselines)
+    monkeypatch.setattr(
+        external_import_source, "read_external_import_db_with_live_baseline",
+        lambda: (ext_headers, ext_rows, baselines),
+    )
+
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [("Infosys", "INFY")],
+                            external_mode="database")
+    reader._read_slow_sources(force=True)
+    headers, data = reader.read_merged(force_slow=False)
+    row = data[0]
+
+    # Mid-week -> CWO keeps the pre-existing "stored DB" value untouched...
+    assert row[headers.index("CWO")] == 95.5
+    # ...while CWATP still blends the elapsed days with today's live tick.
+    assert row[headers.index("CWATP")] == 103.3333  # avg(100, 102, 108)
+
+
+def test_live_merge_database_mode_symbol_missing_from_baseline_falls_back_cleanly(monkeypatch):
+    from services.live_merge import LiveDataReader
+    from services import external_import_source
+
+    sk_row = ["INFY", 1, 2.0, 110.0, 105.0, 111.0, 104.0, 109.0, 108.0, 0.0,
+              112.0, 103.0, 1000.0, 900.0, 50000.0]
+    _stub_sk_and_slow_sources(monkeypatch, sk_row)
+
+    # A brand-new listing: matched via Sharekhan/ExternalImport join, but no
+    # entry in the live-baseline cache at all (zero stored history yet).
+    ext_headers, ext_rows, baselines = _ext_db_fixture(live_baselines={})
+    monkeypatch.setattr(
+        external_import_source, "read_external_import_db_with_live_baseline",
+        lambda: (ext_headers, ext_rows, baselines),
+    )
+
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [("Infosys", "INFY")],
+                            external_mode="database")
+    reader._read_slow_sources(force=True)
+    headers, data = reader.read_merged(force_slow=False)
+    row = data[0]
+
+    # No crash, and the untouched fixture value passes straight through.
+    assert row[headers.index("CWO")] == 95.5
+    assert row[headers.index("CWATP")] == ""
+
+
+def test_live_merge_file_mode_never_applies_live_overlay(tmp_path, monkeypatch):
+    from services.live_merge import LiveDataReader
+    from services import live_formula
+
+    calls = []
+    monkeypatch.setattr(
+        live_formula, "apply_live_overlay",
+        lambda baseline, live: calls.append(1) or {},
+    )
+
+    sk_row = ["INFY", 1, 2.0, 110.0, 105.0, 111.0, 104.0, 109.0, 108.0, 0.0,
+              112.0, 103.0, 1000.0, 900.0, 50000.0]
+    _stub_sk_and_slow_sources(monkeypatch, sk_row)
+
+    ext_file = _make_csv(tmp_path, "ext.csv", [
+        ["RowNo", "ScripName", "MyScore"],
+        ["1", "Infosys.rolling.12D", "99"],
+    ])
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [("Infosys", "INFY")],
+                            external_path=ext_file, external_mode="file")
+    reader._read_slow_sources(force=True)
+    headers, data = reader.read_merged(force_slow=False)
+
+    assert data[0][headers.index("MyScore")] == "99"
+    assert calls == []
+
+
 # ── data_import UI ────────────────────────────────────────────────────────────
 
 def test_external_import_card_present(qapp):
