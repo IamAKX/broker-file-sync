@@ -35,11 +35,17 @@ If you just want to run the app without installing Python or building anything y
 
 Every push to `main` triggers the CI pipeline which:
 1. Runs all tests
-2. Builds a macOS `.app` bundle
-3. Builds a Windows `.exe` (with `pywin32` bundled for live TradeTiger data)
-4. Creates a GitHub Release with both as downloadable `.zip` files
+2. Computes the next version (patch-bumped off the highest existing `vX.Y.Z`
+   git tag) and writes it to `version.py`
+3. Builds a macOS `.app` bundle
+4. Builds a Windows `.exe` (with `pywin32` bundled for live TradeTiger data)
+5. Creates a GitHub Release tagged `vX.Y.Z` with both `.zip`s and a
+   `checksums.txt` as downloadable assets
 
-→ Download the latest build from the [Releases page](https://github.com/IamAKX/broker-file-sync/releases)
+→ Download the latest build from the [Releases page](https://github.com/IamAKX/broker-file-sync/releases),
+or use **Help → Check for Update** from within the app itself — it checks
+this same Releases page and can download/apply the update for you
+(packaged builds only; see `services/update_checker.py`).
 
 ---
 
@@ -47,6 +53,10 @@ Every push to `main` triggers the CI pipeline which:
 
 ```bash
 pip install pyinstaller
+
+# Optional — version.py defaults to "0.0.0-dev" otherwise (fine for a local
+# build; just means Help > Check for Update always reports one available).
+echo 'APP_VERSION = "1.2.3"' > version.py
 
 pyinstaller --windowed --onedir --name "BrokerFileSync" \
   --icon "assets/icons/app_logo.icns" \
@@ -68,6 +78,8 @@ Output: `dist/BrokerFileSync.app`
 ```cmd
 pip install pyinstaller pywin32
 python -m pywin32_postinstall -install
+
+echo APP_VERSION = "1.2.3" > version.py
 
 pyinstaller --windowed --onedir --name "BrokerFileSync" ^
   --icon "assets\icons\app_logo.ico" ^

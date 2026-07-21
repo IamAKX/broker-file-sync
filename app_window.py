@@ -28,6 +28,7 @@ class MainWindow(QMainWindow):
         self._topbar.quit_requested.connect(self._controller.request_quit)
         self._topbar.logout_requested.connect(self._controller.show_login)
         self._topbar.fullscreen_requested.connect(self._toggle_fullscreen)
+        self._topbar.check_for_update_requested.connect(self._open_update_dialog)
         root.addWidget(self._topbar)
 
         body = QHBoxLayout()
@@ -172,6 +173,11 @@ class MainWindow(QMainWindow):
             self.showNormal()
         else:
             self.showFullScreen()
+
+    def _open_update_dialog(self):
+        from components.update_dialog import UpdateDialog
+        dlg = UpdateDialog(self._controller, theme=self._controller.theme, parent=self)
+        dlg.exec()
 
     def _on_theme_toggled(self):
         self._controller.theme.apply()

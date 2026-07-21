@@ -3,12 +3,13 @@ import re
 import os
 import sys
 from PySide6.QtWidgets import (
-    QWidget, QHBoxLayout, QLabel, QPushButton, QMenu
+    QWidget, QHBoxLayout, QLabel, QPushButton, QMenu, QMessageBox
 )
 from PySide6.QtCore import Signal, Qt, QByteArray, QSize
 from PySide6.QtGui import QFont, QAction, QIcon, QPixmap, QPainter
 from PySide6.QtSvg import QSvgRenderer
 from theme import ThemeManager
+from version import APP_VERSION
 
 
 def _restart_app():
@@ -43,6 +44,7 @@ class TopBar(QWidget):
     quit_requested  = Signal()
     logout_requested = Signal()
     fullscreen_requested = Signal()
+    check_for_update_requested = Signal()
 
     def __init__(self, theme: ThemeManager, parent=None):
         super().__init__(parent)
@@ -83,9 +85,9 @@ class TopBar(QWidget):
                 ("Logout",       lambda: self.logout_requested.emit()),
             ]),
             ("Help", [
-                ("About",              lambda: None),
+                ("About",              lambda: self._show_about()),
                 ("Terms & Conditions", lambda: None),
-                ("Check for Update",   lambda: None),
+                ("Check for Update",   lambda: self.check_for_update_requested.emit()),
             ]),
         ]
 
@@ -152,3 +154,17 @@ class TopBar(QWidget):
         self._toggle_btn.setIcon(self._toggle_icon())
         self._toggle_btn.setStyleSheet(self._toggle_style())
         self.theme_toggled.emit()
+
+    def _show_about(self):
+        box = QMessageBox(self)
+        box.setWindowTitle("About Broker Sync")
+        box.setText(f"Broker Sync\nVersion {APP_VERSION}")
+        box.setStyleSheet(
+            f"QMessageBox{{background:{self._theme.get('background')};"
+            f"color:{self._theme.get('text_primary')};}}"
+            f"QMessageBox QLabel{{color:{self._theme.get('text_primary')};background:transparent;}}"
+            f"QMessageBox QPushButton{{background:{self._theme.get('button_bg')};"
+            f"color:{self._theme.get('text_primary')};border:1px solid {self._theme.get('border')};"
+            "border-radius:4px;padding:6px 14px;}"
+        )
+        box.exec()
