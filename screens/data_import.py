@@ -31,10 +31,10 @@ ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", 
 
 BROKERS = [
     ("Sharekhan",        "status_red",    "TradeBook export (.xlsx / .xls)",        (".xlsx", ".xls"),        True,  False),
-    ("ReliableSoftware", "status_blue",   "Transactions export (.xlsx / .xls)",     (".xlsx", ".xls"),        False, False),
+    ("ReliableSoftware", "status_blue",   "Transactions export (.xlsx / .xls)",     (".xlsx", ".xls"),        True,  False),
     ("NiftyInvest",      "status_orange", "Portfolio export (.csv)",                (".csv",),                False, False),
     ("ExternalImport",   "status_purple", "Any file — columns auto-detected",       (".xlsx", ".xls", ".csv"), False, True),
-    ("MarketProfile",    "status_pink",   "Market Profile export (.csv / .xlsx)",   (".csv", ".xlsx", ".xls"), False, False),
+    ("MarketProfile",    "status_pink",   "Market Profile export (.csv / .xlsx)",   (".csv", ".xlsx", ".xls"), True,  False),
 ]
 
 
@@ -162,10 +162,15 @@ class BrokerImportCard(QFrame):
             layout.addLayout(source_row)
             self._update_source_mode_style()
 
-        # Expiry date picker (only for Sharekhan)
+        # Date picker (Sharekhan: F&O expiry date; ReliableSoftware: plain
+        # manual date, no expiry semantics)
         if self._show_date_picker:
-            from services.master_generator import last_tuesday_of_month
-            default_date = last_tuesday_of_month()
+            if self._broker == "Sharekhan":
+                from services.master_generator import last_tuesday_of_month
+                default_date = last_tuesday_of_month()
+            else:
+                from datetime import date
+                default_date = date.today()
             self._expiry_date = default_date
 
             self._date_btn = QPushButton(default_date.strftime("%d-%b-%Y"))
@@ -232,6 +237,10 @@ class BrokerImportCard(QFrame):
     def _on_file_dropped(self, path: str):
         if self._broker == "ExternalImport" and not self._validate_external_import_headers(path):
             return
+        if self._broker == "ReliableSoftware" and not self._validate_reliable_software_date(path):
+            return
+        if self._broker == "MarketProfile" and not self._validate_market_profile_date(path):
+            return
         self._selected_file = path
         counter = _BROKER_ROW_COUNTERS.get(self._broker, count_rows_sharekhan)
         self._row_count = counter(path)
@@ -272,6 +281,47 @@ class BrokerImportCard(QFrame):
             )
             return False
         return True
+
+    def _validate_broker_file_date(self, path: str, date_reader, date_column_label: str) -> bool:
+        """Shared freshness check for brokers whose export carries a
+        trade-date column that isn't otherwise read by their normal parser —
+        catches an old/wrong-day file before it's silently merged into the
+        Live Master View. Only day/month are compared (not year) — same
+        idea as Sharekhan's expiry-date check above, applied to freshness
+        instead of symbol suffix stripping."""
+        from PySide6.QtWidgets import QMessageBox
+        from datetime import date
+
+        try:
+            file_date = date_reader(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Invalid File", f"Could not read {os.path.basename(path)}:\n\n{exc}")
+            return False
+
+        if file_date is None:
+            QMessageBox.critical(
+                self, "Missing Date",
+                f"{os.path.basename(path)} has no readable {date_column_label} value in its first data row."
+            )
+            return False
+
+        today = date.today()
+        if (file_date.day, file_date.month) != (today.day, today.month):
+            QMessageBox.critical(
+                self, "Date Mismatch",
+                f"{os.path.basename(path)} is dated {file_date.strftime('%d-%b')}, "
+                f"but today is {today.strftime('%d-%b')}. Import a file for today's date."
+            )
+            return False
+        return True
+
+    def _validate_reliable_software_date(self, path: str) -> bool:
+        from services.file_reader import read_reliable_software_date
+        return self._validate_broker_file_date(path, read_reliable_software_date, "DataTime")
+
+    def _validate_market_profile_date(self, path: str) -> bool:
+        from services.file_reader import read_market_profile_date
+        return self._validate_broker_file_date(path, read_market_profile_date, "Date")
 
     def _browse(self):
         if self._exts == (".csv",):

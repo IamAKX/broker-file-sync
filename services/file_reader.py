@@ -133,12 +133,79 @@ def read_reliable_software(path: str) -> tuple[list, list]:
     return _read_file(path, _RELIABLE_COLS, _RELIABLE_HEADER_ROW)
 
 
+def read_reliable_software_date(path: str):
+    """Returns the trade date from a ReliableSoftware export's first data
+    row, column A (DataTime) — or None if unreadable/blank. Used only for
+    the Data Import screen's freshness check; read_reliable_software()
+    itself never reads this column (see _RELIABLE_COLS, which starts at B).
+    """
+    data_row = _RELIABLE_HEADER_ROW + 1
+    if path.lower().endswith(".xlsx"):
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+        if len(rows) <= data_row or not rows[data_row]:
+            return None
+        return _xlsx_cell_date(rows[data_row][0])
+    elif path.lower().endswith(".xls"):
+        import xlrd
+        wb = xlrd.open_workbook(path)
+        ws = wb.sheet_by_index(0)
+        if ws.nrows <= data_row:
+            return None
+        return _xls_cell_date(ws.cell(data_row, 0), wb.datemode)
+    raise ValueError(f"Unsupported file type: {path}")
+
+
 def read_nifty_invest(path: str) -> tuple[list, list]:
     return _read_file(path, _NIFTY_COLS, _NIFTY_HEADER_ROW)
 
 
 def read_market_profile(path: str) -> tuple[list, list]:
     return _read_file(path, _MARKET_PROFILE_COLS, _MARKET_PROFILE_HEADER_ROW)
+
+
+def read_market_profile_date(path: str):
+    """Returns the trade date from a MarketProfile export's first data row,
+    column A (Date) — or None if unreadable/blank. Used only for the Data
+    Import screen's freshness check; read_market_profile() itself never
+    reads this column (see _MARKET_PROFILE_COLS, which starts at B).
+
+    Unlike ReliableSoftware's DataTime, MarketProfile's Date often arrives
+    as a plain "YYYY-MM-DD" string rather than a typed date cell (CSV has
+    no cell types at all, and xlsx/xls exports vary by tool) — each branch
+    tries the typed-date path first, then falls back to ISO string parsing.
+    """
+    data_row = _MARKET_PROFILE_HEADER_ROW + 1
+    lower = path.lower()
+    if lower.endswith(".csv"):
+        import csv
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            rows = list(csv.reader(f))
+        if len(rows) <= data_row or not rows[data_row]:
+            return None
+        return _parse_iso_date(rows[data_row][0])
+    elif lower.endswith(".xlsx"):
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+        if len(rows) <= data_row or not rows[data_row]:
+            return None
+        value = rows[data_row][0]
+        return _xlsx_cell_date(value) or _parse_iso_date(value)
+    elif lower.endswith(".xls"):
+        import xlrd
+        wb = xlrd.open_workbook(path)
+        ws = wb.sheet_by_index(0)
+        if ws.nrows <= data_row:
+            return None
+        cell = ws.cell(data_row, 0)
+        return _xls_cell_date(cell, wb.datemode) or _parse_iso_date(cell.value)
+    raise ValueError(f"Unsupported file type: {path}")
 
 
 def read_external_import(path: str) -> tuple[list, list]:
@@ -194,6 +261,17 @@ def _xlsx_cell_date(value):
     if isinstance(value, _dt.date):
         return value
     return None
+
+
+def _parse_iso_date(value):
+    """Return a datetime.date from a "YYYY-MM-DD"-ish string value, else None."""
+    if value is None:
+        return None
+    from datetime import date as _date
+    try:
+        return _date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return None
 
 
 def _drop_blank_scripname_rows(headers: list, data: list, row_dates: list) -> tuple[list, list]:
