@@ -109,6 +109,37 @@ def test_build_rows_payload_falls_back_to_display_name_when_unmapped():
     assert rows[0]["symbol"] == "Unknown Corp"
 
 
+# ── _build_lmv_snapshot_payload ──────────────────────────────────────────────
+
+LMV_HEADERS = ["Sector", "Scrip Name", "Lot Size", "% Change", "Current", "PATP", "DAY TO"]
+
+
+def _lmv_row(sector="IT", scrip="INFY", lot=1, pct=1.5, current=1800, patp=1780, day_to=12.3):
+    return [sector, scrip, lot, pct, current, patp, day_to]
+
+
+def test_build_lmv_snapshot_payload_includes_imported_and_computed_columns():
+    rows = scheduled_jobs._build_lmv_snapshot_payload(LMV_HEADERS, [_lmv_row()], script_name_data=[])
+    assert rows[0]["metrics"] == {
+        "Lot Size": 1, "% Change": 1.5, "Current": 1800, "PATP": 1780, "DAY TO": 12.3,
+    }
+
+
+def test_build_lmv_snapshot_payload_excludes_sector_and_scrip_name():
+    rows = scheduled_jobs._build_lmv_snapshot_payload(LMV_HEADERS, [_lmv_row()], script_name_data=[])
+    metrics = rows[0]["metrics"]
+    assert "Sector" not in metrics
+    assert "Scrip Name" not in metrics
+
+
+def test_build_lmv_snapshot_payload_resolves_symbol_via_script_name_map():
+    data = [_lmv_row(scrip="Infosys Limited")]
+    script_name_data = [("Infosys Limited", "INFY")]
+    rows = scheduled_jobs._build_lmv_snapshot_payload(LMV_HEADERS, data, script_name_data)
+    assert rows[0]["symbol"] == "INFY"
+    assert rows[0]["display_name"] == "Infosys Limited"
+
+
 # ── run_lmv_check ────────────────────────────────────────────────────────────
 
 def test_lmv_check_notifies_when_not_loaded():
@@ -144,13 +175,20 @@ def test_historic_save_notifies_when_lmv_not_loaded():
 
 def test_historic_save_uploads_when_lmv_loaded(monkeypatch):
     uploaded = {}
+    snapshot_uploaded = {}
 
     def fake_upload_daily(trade_date, rows):
         uploaded["trade_date"] = trade_date
         uploaded["rows"] = rows
         return {"values_upserted": len(rows)}
 
+    def fake_snapshot_upload_daily(trade_date, rows):
+        snapshot_uploaded["trade_date"] = trade_date
+        snapshot_uploaded["rows"] = rows
+        return {"values_upserted": len(rows)}
+
     monkeypatch.setattr(scheduled_jobs.historic_api, "upload_daily", fake_upload_daily)
+    monkeypatch.setattr(scheduled_jobs.lmv_snapshot_api, "upload_daily", fake_snapshot_upload_daily)
 
     controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row(scrip="INFY")]))
     notifier = _FakeNotifier()
@@ -159,6 +197,12 @@ def test_historic_save_uploads_when_lmv_loaded(monkeypatch):
     assert notifier.notifications == []
     assert uploaded["trade_date"] == _FixedDate.today()
     assert uploaded["rows"][0]["symbol"] == "INFY"
+    assert snapshot_uploaded["trade_date"] == _FixedDate.today()
+    assert snapshot_uploaded["rows"][0]["symbol"] == "INFY"
+    # The raw upload keeps only the 7 canonical metrics; the snapshot upload
+    # carries every other Sharekhan column too (e.g. Lot Size).
+    assert "Lot Size" not in uploaded["rows"][0]["metrics"]
+    assert "Lot Size" in snapshot_uploaded["rows"][0]["metrics"]
 
 
 def test_historic_save_notifies_on_api_error(monkeypatch):
@@ -168,12 +212,32 @@ def test_historic_save_notifies_on_api_error(monkeypatch):
         raise ApiError("server exploded", "internal_error", 500)
 
     monkeypatch.setattr(scheduled_jobs.historic_api, "upload_daily", fake_upload_daily)
+    monkeypatch.setattr(scheduled_jobs.lmv_snapshot_api, "upload_daily", lambda trade_date, rows: {})
 
     controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row()]))
     notifier = _FakeNotifier()
     scheduled_jobs.run_historic_save(controller, notifier)
 
     assert len(notifier.notifications) == 1
+
+
+def test_historic_save_notifies_on_snapshot_api_error_independently(monkeypatch):
+    from api.exceptions import ApiError
+
+    monkeypatch.setattr(scheduled_jobs.historic_api, "upload_daily", lambda trade_date, rows: {})
+
+    def fake_snapshot_upload_daily(trade_date, rows):
+        raise ApiError("server exploded", "internal_error", 500)
+
+    monkeypatch.setattr(scheduled_jobs.lmv_snapshot_api, "upload_daily", fake_snapshot_upload_daily)
+
+    controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row()]))
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_historic_save(controller, notifier)
+
+    # The raw upload still succeeded — only the snapshot upload's failure is reported.
+    assert len(notifier.notifications) == 1
+    assert notifier.notifications[0][0] == "LMV Snapshot Save Failed"
 
 
 def test_historic_save_silent_on_session_expired(monkeypatch):
@@ -183,6 +247,7 @@ def test_historic_save_silent_on_session_expired(monkeypatch):
         raise ApiError("unauthorized", "unauthorized", 401)
 
     monkeypatch.setattr(scheduled_jobs.historic_api, "upload_daily", fake_upload_daily)
+    monkeypatch.setattr(scheduled_jobs.lmv_snapshot_api, "upload_daily", fake_upload_daily)
 
     controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row()]))
     notifier = _FakeNotifier()

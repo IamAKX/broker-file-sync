@@ -12,4 +12,6 @@ AVAILABILITY = "/historic/availability"
 SNAPSHOT = "/historic/snapshot"
 HISTORIC = "/historic"
 
+LMV_SNAPSHOT_DAILY_UPLOAD = "/lmv-snapshot/daily-upload"
+
 HOLIDAYS = "/holidays"
