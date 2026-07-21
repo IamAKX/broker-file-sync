@@ -104,6 +104,49 @@ def test_open_formula_field_editor_updates_preview(qapp, screen, monkeypatch):
     assert editor._formula["tokens"] == new_tokens
 
 
+def test_hint_shows_builtin_status_for_a_builtin_code(qapp, screen):
+    from screens.formula_builder import FormulaEditorPanel
+    formula = dict(screen._formulas[0])  # a real built-in, e.g. code "CMH"
+    editor = FormulaEditorPanel(formula, screen._theme)
+    assert "Built-in" in editor._hint.text()
+
+
+def test_hint_shows_documentation_only_for_arbitrary_custom_tokens(qapp, screen):
+    from screens.formula_builder import FormulaEditorPanel
+    formula = {
+        "id": "x", "code": "NEW", "name": "New Formula",
+        "tokens": [{"type": "field", "value": "HIGH"}], "description": "", "frequency": "DAILY",
+    }
+    editor = FormulaEditorPanel(formula, screen._theme)
+    assert "Documentation only" in editor._hint.text()
+
+
+def test_hint_shows_computable_for_last_n_trading_days_aggregate(qapp, screen):
+    from screens.formula_builder import FormulaEditorPanel
+    formula = {
+        "id": "x", "code": "MAX10D", "name": "Max 10 Day High",
+        "tokens": [{"type": "func", "value": "MAX_OF(", "field": "HIGH",
+                    "window": "LAST_N_TRADING_DAYS", "n": 10}],
+        "description": "", "frequency": "DAILY",
+    }
+    editor = FormulaEditorPanel(formula, screen._theme)
+    assert "Computable" in editor._hint.text()
+
+
+def test_hint_updates_when_code_field_edited_to_a_builtin_name(qapp, screen):
+    from screens.formula_builder import FormulaEditorPanel
+    formula = {
+        "id": "x", "code": "NEW", "name": "New Formula",
+        "tokens": [{"type": "func", "value": "MAX_OF(", "field": "HIGH",
+                    "window": "LAST_N_TRADING_DAYS", "n": 5}],
+        "description": "", "frequency": "DAILY",
+    }
+    editor = FormulaEditorPanel(formula, screen._theme)
+    assert "Computable" in editor._hint.text()
+    editor._code_edit.setText("CMH")
+    assert "Built-in" in editor._hint.text()
+
+
 def test_reset_to_defaults_restores_56(qapp, screen, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
     monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Yes)

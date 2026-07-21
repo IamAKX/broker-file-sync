@@ -85,3 +85,19 @@ def test_pwto_is_at_cwto_last_trading_day_of_previous_week():
     assert tok["value"] == "AT("
     assert tok["field"] == "CWTO"
     assert tok["timepoint"] == "LAST_TRADING_DAY_OF_PREVIOUS_WEEK"
+
+
+def test_last_n_trading_days_is_a_selectable_window():
+    assert "LAST_N_TRADING_DAYS" in ft.WINDOWS
+
+
+def test_tokens_to_display_last_n_trading_days():
+    tokens = [{"type": "func", "value": "MAX_OF(", "field": "HIGH", "window": "LAST_N_TRADING_DAYS", "n": 10}]
+    assert ft.tokens_to_display(tokens) == "MAX_OF([HIGH], LAST 10 TRADING DAYS)"
+
+
+def test_tokens_to_display_last_n_trading_days_falls_back_without_n():
+    # Defensive: shouldn't happen via the UI (which always collects n before
+    # creating the token), but must not crash if it does.
+    tokens = [{"type": "func", "value": "MAX_OF(", "field": "HIGH", "window": "LAST_N_TRADING_DAYS"}]
+    assert ft.tokens_to_display(tokens) == "MAX_OF([HIGH], LAST_N_TRADING_DAYS)"

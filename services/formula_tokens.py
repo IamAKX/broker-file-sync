@@ -39,6 +39,12 @@ WINDOWS = [
     "CURRENT_WEEK", "CURRENT_MONTH", "PREVIOUS_WEEK", "PREVIOUS_MONTH",
     "EXPIRY_WEEK", "ROLLOVER_WEEK",
     "LAST_5_TRADING_DAYS", "LAST_3_WEEKS", "LAST_2_MONTHS",
+    # Unlike the fixed windows above, this one prompts for a number of days
+    # (see screens.formula_field_editor's _TwoStepPickerDialog step 3) and is
+    # the one window services.formula_engine.compute_custom_aggregate can
+    # actually compute for a custom (non-built-in) formula — see that
+    # module's "Custom (user-defined) formulas" section.
+    "LAST_N_TRADING_DAYS",
 ]
 
 TIMEPOINTS = [
@@ -51,6 +57,11 @@ AGG_FUNCS = ["MAX_OF(", "MIN_OF(", "AVG_OF(", "SUM_OF("]
 POINT_FUNC = "AT("
 WRAP_FUNCS = ["ABS("]
 OPERATORS = ["+", "-", "*", "/"]
+
+# config_store key for the ExternalImport formula list (built-ins + custom) —
+# shared by screens.formula_builder (editor/persistence) and
+# services.external_import_source (reads custom formulas to compute them).
+STORE_KEY = "external_import_formulas"
 
 
 def tokens_to_display(tokens: list) -> str:
@@ -67,7 +78,11 @@ def tokens_to_display(tokens: list) -> str:
         elif kind == "func":
             fname = value.rstrip("(")
             if "window" in tok:
-                parts.append(f"{fname}([{tok.get('field', '')}], {tok.get('window', '')})")
+                window = tok.get("window", "")
+                if window == "LAST_N_TRADING_DAYS" and "n" in tok:
+                    parts.append(f"{fname}([{tok.get('field', '')}], LAST {tok['n']} TRADING DAYS)")
+                else:
+                    parts.append(f"{fname}([{tok.get('field', '')}], {window})")
             elif "timepoint" in tok:
                 parts.append(f"{fname}([{tok.get('field', '')}], {tok.get('timepoint', '')})")
             else:

@@ -340,8 +340,67 @@ def test_compute_all_with_live_baseline_matches_compute_all_plus_baseline():
         d2: {"AAA": {"High": 11, "Low": 6, "Close": 9, "Open": 7, "AvgRate": 8, "Quantity": 200},
              "BBB": {"High": 20, "Low": 15, "Close": 18, "Open": 16, "AvgRate": 17, "Quantity": 300}},
     }
-    results, live_baselines = fe.compute_all_with_live_baseline(raw_by_date, d2)
+    results, live_baselines, custom_results = fe.compute_all_with_live_baseline(raw_by_date, d2)
     assert results == fe.compute_all(raw_by_date, d2)
     assert set(live_baselines.keys()) == set(results.keys()) == {"AAA", "BBB"}
+    assert custom_results == {"AAA": {}, "BBB": {}}
     assert live_baselines["AAA"]["prev_atp_values_week"] == [7]  # d1 only, d2 excluded
     assert live_baselines["BBB"]["prev_atp_values_week"] == []  # BBB has no d1 row at all
+
+
+# ── last_n_trading_days_on_or_before: search bound scales with n ───────────────
+
+def test_last_n_trading_days_search_bound_scales_with_n():
+    # Old fixed 30-calendar-day bound only reaches ~21 trading days — a
+    # user-chosen n beyond that must still come back with the full n.
+    days, hist = _build_history(date(2026, 1, 1), 70)
+    target = days[60]
+    found = hist.last_n_trading_days_on_or_before(target, 40)
+    assert len(found) == 40
+    assert found == days[21:61]
+
+
+# ── is_computable_custom_formula / compute_custom_aggregate ────────────────────
+
+def _n_days_token(func="MAX_OF(", field="HIGH", n=5):
+    return [{"type": "func", "value": func, "field": field, "window": "LAST_N_TRADING_DAYS", "n": n}]
+
+
+def test_is_computable_custom_formula_accepts_the_one_supported_shape():
+    for func in ("MAX_OF(", "MIN_OF(", "AVG_OF(", "SUM_OF("):
+        assert fe.is_computable_custom_formula(_n_days_token(func=func)) is True
+
+
+def test_is_computable_custom_formula_rejects_everything_else():
+    assert fe.is_computable_custom_formula([]) is False
+    assert fe.is_computable_custom_formula(_n_days_token() + _n_days_token()) is False  # multi-token
+    assert fe.is_computable_custom_formula([{"type": "field", "value": "HIGH"}]) is False
+    assert fe.is_computable_custom_formula(
+        [{"type": "func", "value": "MAX_OF(", "field": "HIGH", "window": "CURRENT_WEEK"}]
+    ) is False  # a fixed window, not LAST_N_TRADING_DAYS
+    assert fe.is_computable_custom_formula(
+        [{"type": "func", "value": "MAX_OF(", "field": "NOT_A_FIELD", "window": "LAST_N_TRADING_DAYS", "n": 5}]
+    ) is False
+    assert fe.is_computable_custom_formula(_n_days_token(n=0)) is False
+    assert fe.is_computable_custom_formula(_n_days_token(n=-1)) is False
+    assert fe.is_computable_custom_formula([{**_n_days_token()[0], "n": "5"}]) is False  # n must be int
+
+
+def test_compute_custom_aggregate_matches_hand_computed_values():
+    days, hist = _build_history(date(2026, 6, 1), 70)
+    target = days[40]
+    last3 = days[38:41]  # the 3 trading days ending at target, inclusive
+    assert fe.compute_custom_aggregate(hist, target, _n_days_token("MAX_OF(", "HIGH", 3)) == 100 + 40
+    assert fe.compute_custom_aggregate(hist, target, _n_days_token("MIN_OF(", "LOW", 3)) == 90 + 38
+    assert fe.compute_custom_aggregate(hist, target, _n_days_token("AVG_OF(", "CLOSE", 3)) == (
+        sum(95 + i for i in (38, 39, 40)) / 3
+    )
+    assert fe.compute_custom_aggregate(hist, target, _n_days_token("SUM_OF(", "QUANTITY", 3)) == 3000
+
+
+def test_compute_custom_aggregate_none_for_uncomputable_or_empty_history():
+    days, hist = _build_history(date(2026, 6, 1), 70)
+    target = days[40]
+    assert fe.compute_custom_aggregate(hist, target, [{"type": "field", "value": "HIGH"}]) is None
+    empty_hist = fe.StockHistory({})
+    assert fe.compute_custom_aggregate(empty_hist, target, _n_days_token()) is None

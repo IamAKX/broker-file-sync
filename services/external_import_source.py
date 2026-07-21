@@ -12,9 +12,29 @@ ExternalImport View popup, the Live Master View merge) treat "file" and
 from datetime import date, timedelta
 
 from api import historic_api, holidays_api
-from services import formula_engine
+from services import config_store, formula_engine, formula_tokens
 
 FORMULA_LOOKBACK_DAYS = 100
+
+
+def _load_custom_defs() -> dict:
+    """{code: tokens} for user-defined formulas (screens.formula_builder)
+    that are actually computable (see
+    formula_engine.is_computable_custom_formula) and don't collide with a
+    built-in code — built-ins always go through the trusted, tested
+    per-code path in formula_engine.py, never this one. First occurrence
+    wins on duplicate codes.
+    """
+    formulas = config_store.load_json(formula_tokens.STORE_KEY, [])
+    custom_defs = {}
+    for f in formulas:
+        code = (f.get("code") or "").strip()
+        if not code or code in formula_engine.FORMULA_CODES or code in custom_defs:
+            continue
+        tokens = f.get("tokens") or []
+        if formula_engine.is_computable_custom_formula(tokens):
+            custom_defs[code] = tokens
+    return custom_defs
 
 
 def read_external_import_db(target: date = None) -> tuple[list, list]:
@@ -67,19 +87,24 @@ def _fetch(target: date = None) -> tuple[list, list, dict]:
         if d == latest_available:
             display_names = {s["symbol"]: s.get("display_name") or "" for s in stocks}
 
-    results, live_baselines = formula_engine.compute_all_with_live_baseline(
-        raw_by_date, target, holidays
+    custom_defs = _load_custom_defs()
+    results, live_baselines, custom_results = formula_engine.compute_all_with_live_baseline(
+        raw_by_date, target, holidays, custom_defs
     )
     if not results:
         return [], [], {}
 
-    headers = ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES
+    headers = ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES + list(custom_defs.keys())
     rows = []
     for symbol in sorted(results.keys()):
         values = results[symbol]
         row = [symbol, display_names.get(symbol, "")]
         for code in formula_engine.FORMULA_CODES:
             v = values.get(code)
+            row.append("" if v is None else round(v, 4))
+        custom_values = custom_results.get(symbol, {})
+        for code in custom_defs:
+            v = custom_values.get(code)
             row.append("" if v is None else round(v, 4))
         rows.append(row)
     return headers, rows, live_baselines

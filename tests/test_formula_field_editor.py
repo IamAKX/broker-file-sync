@@ -91,6 +91,8 @@ def test_window_agg_picker_inserts_func_token(theme):
             return QDialog.DialogCode.Accepted
         def selected(self):
             return "HIGH", "CURRENT_MONTH"
+        def n_value(self):
+            return None
 
     import screens.formula_field_editor as mod
     orig = mod._TwoStepPickerDialog
@@ -101,6 +103,33 @@ def test_window_agg_picker_inserts_func_token(theme):
         mod._TwoStepPickerDialog = orig
 
     assert b.get_tokens() == [{"type": "func", "value": "MAX_OF(", "field": "HIGH", "window": "CURRENT_MONTH"}]
+
+
+def test_window_agg_picker_with_n_includes_n_in_token(theme):
+    from screens.formula_field_editor import FieldFormulaBuilder
+    from PySide6.QtWidgets import QDialog
+
+    b = FieldFormulaBuilder([], theme)
+
+    class _Fake:
+        def exec(self):
+            return QDialog.DialogCode.Accepted
+        def selected(self):
+            return "CLOSE", "LAST_N_TRADING_DAYS"
+        def n_value(self):
+            return 10
+
+    import screens.formula_field_editor as mod
+    orig = mod._TwoStepPickerDialog
+    mod._TwoStepPickerDialog = lambda *a, **k: _Fake()
+    try:
+        b._add_window_agg("AVG_OF(")
+    finally:
+        mod._TwoStepPickerDialog = orig
+
+    assert b.get_tokens() == [
+        {"type": "func", "value": "AVG_OF(", "field": "CLOSE", "window": "LAST_N_TRADING_DAYS", "n": 10}
+    ]
 
 
 def test_at_picker_inserts_func_token(theme):
@@ -130,3 +159,53 @@ def test_dialog_wraps_builder_and_returns_tokens(theme):
     from screens.formula_field_editor import FormulaFieldEditorDialog
     dlg = FormulaFieldEditorDialog([{"type": "field", "value": "HIGH"}], theme)
     assert dlg.get_tokens() == [{"type": "field", "value": "HIGH"}]
+
+
+# ── _TwoStepPickerDialog step 3: N input for LAST_N_TRADING_DAYS ───────────────
+
+def test_two_step_picker_picking_other_windows_still_accepts_immediately(theme):
+    from services import formula_tokens as ft
+    from screens.formula_field_editor import _TwoStepPickerDialog
+    from PySide6.QtWidgets import QDialog
+
+    dlg = _TwoStepPickerDialog("MAX_OF(", ft.RAW_FIELDS, "Window", ft.WINDOWS, theme)
+    dlg._pick_field("HIGH")
+    dlg._pick_second("CURRENT_MONTH")
+    assert dlg.result() == QDialog.DialogCode.Accepted
+    assert dlg.selected() == ("HIGH", "CURRENT_MONTH")
+    assert dlg.n_value() is None
+
+
+def test_two_step_picker_last_n_trading_days_opens_step3(theme):
+    from services import formula_tokens as ft
+    from screens.formula_field_editor import _TwoStepPickerDialog
+    from PySide6.QtWidgets import QDialog
+
+    dlg = _TwoStepPickerDialog("MAX_OF(", ft.RAW_FIELDS, "Window", ft.WINDOWS, theme)
+    dlg._pick_field("CLOSE")
+    dlg._pick_second("LAST_N_TRADING_DAYS")
+    # Step 3 shown, not yet accepted.
+    assert dlg.result() != QDialog.DialogCode.Accepted
+    assert hasattr(dlg, "_n_input")
+
+    dlg._n_input.setText("10")
+    dlg._confirm_n()
+    assert dlg.result() == QDialog.DialogCode.Accepted
+    assert dlg.selected() == ("CLOSE", "LAST_N_TRADING_DAYS")
+    assert dlg.n_value() == 10
+
+
+def test_two_step_picker_rejects_invalid_n_and_keeps_dialog_open(theme):
+    from services import formula_tokens as ft
+    from screens.formula_field_editor import _TwoStepPickerDialog
+    from PySide6.QtWidgets import QDialog
+
+    dlg = _TwoStepPickerDialog("MAX_OF(", ft.RAW_FIELDS, "Window", ft.WINDOWS, theme)
+    dlg._pick_field("CLOSE")
+    dlg._pick_second("LAST_N_TRADING_DAYS")
+
+    for bad in ("0", "-5", "abc", ""):
+        dlg._n_input.setText(bad)
+        dlg._confirm_n()
+        assert dlg.result() != QDialog.DialogCode.Accepted
+        assert dlg.n_value() is None

@@ -116,8 +116,13 @@ class StockHistory:
         return None
 
     def last_n_trading_days_on_or_before(self, d: date, n: int) -> list:
+        # Every built-in caller passes n=5, well within _SEARCH_LIMIT_DAYS —
+        # but a user-configurable n (see compute_custom_aggregate) needs the
+        # search bound to actually scale with n, or a large n silently comes
+        # back short instead of walking far enough.
+        limit = max(self._SEARCH_LIMIT_DAYS, n * 2 + 10)
         result, cursor, steps = [], d, 0
-        while len(result) < n and steps < self._SEARCH_LIMIT_DAYS:
+        while len(result) < n and steps < limit:
             if self.is_trading_day(cursor):
                 result.append(cursor)
             cursor -= timedelta(days=1)
@@ -487,16 +492,74 @@ def compute_live_baseline_for_symbol(hist: StockHistory, target: date) -> dict:
     }
 
 
+# ── Custom (user-defined) formulas ──────────────────────────────────────────
+#
+# services.formula_tokens/screens.formula_builder let a user describe an
+# arbitrary formula as a token list, but that vocabulary is otherwise
+# documentation-only — nothing computes it. The one shape below (a single
+# MAX_OF/MIN_OF/AVG_OF/SUM_OF of one raw field over the last N trading days,
+# N chosen by the user) is a genuine exception: it's computed for real, for
+# any custom formula whose tokens happen to match it exactly. Anything else
+# (built-ins' own tokens, multi-token arithmetic, other window types) stays
+# documentation-only, same as before this was added.
+
+_CUSTOM_FIELD_MAP = {
+    "OPEN": RAW_OPEN, "HIGH": RAW_HIGH, "LOW": RAW_LOW, "CLOSE": RAW_CLOSE,
+    "AVGRATE": RAW_AVGRATE, "QUANTITY": RAW_QUANTITY, "DIFFPCNT": RAW_DIFFPCNT,
+}
+
+_CUSTOM_AGG_REDUCERS = {
+    "MAX_OF(": _max, "MIN_OF(": _min, "AVG_OF(": _avg, "SUM_OF(": _sum,
+}
+
+
+def is_computable_custom_formula(tokens: list) -> bool:
+    """True only for the one supported custom shape: [{"type": "func",
+    "value": one of MAX_OF(/MIN_OF(/AVG_OF(/SUM_OF(, "field": a raw field,
+    "window": "LAST_N_TRADING_DAYS", "n": a positive int}]."""
+    if not isinstance(tokens, list) or len(tokens) != 1:
+        return False
+    tok = tokens[0]
+    if not isinstance(tok, dict) or tok.get("type") != "func":
+        return False
+    if tok.get("value") not in _CUSTOM_AGG_REDUCERS:
+        return False
+    if tok.get("field") not in _CUSTOM_FIELD_MAP:
+        return False
+    if tok.get("window") != "LAST_N_TRADING_DAYS":
+        return False
+    n = tok.get("n")
+    return isinstance(n, int) and not isinstance(n, bool) and n >= 1
+
+
+def compute_custom_aggregate(hist: StockHistory, target: date, tokens: list):
+    """None if tokens aren't the one supported shape (see
+    is_computable_custom_formula) or there's no data in the window at all."""
+    if not is_computable_custom_formula(tokens):
+        return None
+    tok = tokens[0]
+    metric = _CUSTOM_FIELD_MAP[tok["field"]]
+    reducer = _CUSTOM_AGG_REDUCERS[tok["value"]]
+    dates = hist.last_n_trading_days_on_or_before(target, tok["n"])
+    return reducer(hist, metric, dates)
+
+
 def compute_all_with_live_baseline(
-    raw_by_date: dict, target: date, holidays: set = frozenset()
-) -> tuple[dict, dict]:
-    """Like compute_all, but also returns the per-symbol live-overlay
-    baseline (see compute_live_baseline_for_symbol) computed from the same
-    StockHistory in one pass — used by the LMV's live source, not the static
-    ExternalImport "database" preview.
+    raw_by_date: dict, target: date, holidays: set = frozenset(),
+    custom_defs: dict = None,
+) -> tuple[dict, dict, dict]:
+    """Like compute_all, but also returns (per symbol, in one pass over the
+    same StockHistory):
+      - the live-overlay baseline (see compute_live_baseline_for_symbol),
+        used by the LMV's live source;
+      - custom_results: {symbol: {code: value}} for custom_defs (a
+        {code: tokens} map of user-defined formulas — see
+        compute_custom_aggregate), used by ExternalImport's "database" mode
+        to add real extra columns for computable custom formulas.
     """
+    custom_defs = custom_defs or {}
     if not raw_by_date:
-        return {}, {}
+        return {}, {}, {}
     latest_date = max(raw_by_date.keys())
     target_symbols = raw_by_date.get(latest_date, {})
     by_symbol: dict = {sym: {} for sym in target_symbols}
@@ -505,9 +568,13 @@ def compute_all_with_live_baseline(
             if sym in by_symbol:
                 by_symbol[sym][d] = metrics
 
-    results, live_baselines = {}, {}
+    results, live_baselines, custom_results = {}, {}, {}
     for sym, rows_by_date in by_symbol.items():
         hist = StockHistory(rows_by_date, holidays)
         results[sym] = compute_for_symbol(hist, target)
         live_baselines[sym] = compute_live_baseline_for_symbol(hist, target)
-    return results, live_baselines
+        custom_results[sym] = {
+            code: compute_custom_aggregate(hist, target, tokens)
+            for code, tokens in custom_defs.items()
+        }
+    return results, live_baselines, custom_results

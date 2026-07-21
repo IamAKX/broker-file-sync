@@ -59,6 +59,92 @@ def test_count_rows_external(tmp_path):
     assert count_rows_external(str(f)) == 3
 
 
+# ── external_import_source: custom "last N trading days" formulas ──────────────
+
+def _stub_historic_backend(monkeypatch):
+    from datetime import date, timedelta
+    from api import historic_api, holidays_api
+
+    # Fixed Mon..Fri week (2026-06-01 is a Monday) — deterministic regardless
+    # of which real-world weekday the test suite happens to run on.
+    dates = [date(2026, 6, 1) + timedelta(days=i) for i in range(5)]
+    monkeypatch.setattr(
+        historic_api, "get_availability",
+        lambda date_from, date_to: {
+            "dates": [{"trade_date": d.isoformat(), "has_data": True} for d in dates]
+        },
+    )
+    monkeypatch.setattr(holidays_api, "list_holidays", lambda year: [])
+
+    def fake_snapshot(trade_date):
+        i = dates.index(trade_date)
+        return {
+            "trade_date": trade_date.isoformat(),
+            "stocks": [{
+                "symbol": "INFY", "display_name": "Infosys",
+                "metrics": {
+                    "Open": 100 + i, "High": 110 + i, "Low": 90 + i, "Close": 105 + i,
+                    "AvgRate": 104 + i, "Quantity": 1000, "DiffPcnt": 1.0,
+                },
+            }],
+        }
+    monkeypatch.setattr(historic_api, "get_snapshot", fake_snapshot)
+    return dates
+
+
+def _stub_custom_formulas(monkeypatch, formulas):
+    from services import config_store
+    monkeypatch.setattr(config_store, "load_json", lambda key, default: formulas)
+
+
+def test_custom_formula_last_n_trading_days_computed_as_extra_column(monkeypatch):
+    from services.external_import_source import read_external_import_db
+
+    dates = _stub_historic_backend(monkeypatch)
+    _stub_custom_formulas(monkeypatch, [
+        {"id": "1", "code": "MAX3D", "name": "Max High 3D", "description": "", "frequency": "DAILY",
+         "tokens": [{"type": "func", "value": "MAX_OF(", "field": "HIGH", "window": "LAST_N_TRADING_DAYS", "n": 3}]},
+    ])
+
+    headers, rows = read_external_import_db(target=dates[-1])
+    assert "MAX3D" in headers
+    row = rows[0]
+    # High = 110+i for the last 3 stubbed days (i=2,3,4) -> max is 110+4
+    assert row[headers.index("MAX3D")] == 110 + 4
+
+
+def test_custom_formula_colliding_with_builtin_code_ignored(monkeypatch):
+    from services.external_import_source import read_external_import_db
+    from services import formula_engine
+
+    dates = _stub_historic_backend(monkeypatch)
+    _stub_custom_formulas(monkeypatch, [
+        {"id": "1", "code": "CMH", "name": "Shadows a built-in", "description": "", "frequency": "DAILY",
+         "tokens": [{"type": "func", "value": "MAX_OF(", "field": "HIGH", "window": "LAST_N_TRADING_DAYS", "n": 3}]},
+    ])
+
+    headers, rows = read_external_import_db(target=dates[-1])
+    # Exactly one "CMH" column — the trusted built-in, not a duplicate.
+    assert headers.count("CMH") == 1
+    assert headers == ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES
+
+
+def test_non_computable_custom_formula_produces_no_extra_column(monkeypatch):
+    from services.external_import_source import read_external_import_db
+    from services import formula_engine
+
+    dates = _stub_historic_backend(monkeypatch)
+    _stub_custom_formulas(monkeypatch, [
+        {"id": "1", "code": "MYFORMULA", "name": "Still just documentation", "description": "",
+         "frequency": "DAILY", "tokens": [{"type": "field", "value": "HIGH"}, {"type": "op", "value": "+"},
+                                           {"type": "field", "value": "LOW"}]},
+    ])
+
+    headers, rows = read_external_import_db(target=dates[-1])
+    assert "MYFORMULA" not in headers
+    assert headers == ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES
+
+
 # ── live_merge ────────────────────────────────────────────────────────────────
 
 def _make_csv(tmp_path, name, rows):

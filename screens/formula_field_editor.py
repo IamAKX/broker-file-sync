@@ -85,8 +85,16 @@ class FieldTokenChip(QFrame):
         self.setFixedHeight(22)
 
 
+_LAST_N_TRADING_DAYS = "LAST_N_TRADING_DAYS"
+
+
 class _TwoStepPickerDialog(QDialog):
-    """Pick a field, then a window/timepoint — used for MAX_OF/MIN_OF/AVG_OF/SUM_OF/AT."""
+    """Pick a field, then a window/timepoint — used for MAX_OF/MIN_OF/AVG_OF/SUM_OF/AT.
+
+    Picking the LAST_N_TRADING_DAYS window adds an optional 3rd step asking
+    for N (see _build_step3_n / n_value) — every other window/timepoint
+    accepts immediately after step 2, unchanged.
+    """
 
     def __init__(self, title: str, fields: list, second_label: str,
                  second_options: list, theme=None, parent=None):
@@ -96,6 +104,7 @@ class _TwoStepPickerDialog(QDialog):
         self._second_options = second_options
         self._field = fields[0] if fields else ""
         self._second = second_options[0] if second_options else ""
+        self._n = None
         self._step = 0
         self.setWindowTitle(title)
         self.setFixedWidth(320)
@@ -167,10 +176,40 @@ class _TwoStepPickerDialog(QDialog):
 
     def _pick_second(self, name):
         self._second = name
+        if name == _LAST_N_TRADING_DAYS:
+            self._build_step3_n()
+        else:
+            self.accept()
+
+    def _build_step3_n(self):
+        self._clear()
+        lay = self.layout() or QVBoxLayout(self)
+        lay.setSpacing(10)
+        lay.addWidget(QLabel("Number of trading days (N):"))
+        self._n_input = QLineEdit("5")
+        lay.addWidget(self._n_input)
+        confirm = QPushButton("OK")
+        confirm.setCursor(Qt.CursorShape.PointingHandCursor)
+        confirm.clicked.connect(self._confirm_n)
+        lay.addWidget(confirm)
+
+    def _confirm_n(self):
+        text = self._n_input.text().strip()
+        try:
+            n = int(text)
+        except ValueError:
+            return
+        if n < 1:
+            return
+        self._n = n
         self.accept()
 
     def selected(self):
         return self._field, self._second
+
+    def n_value(self):
+        """The N entered in step 3, or None if that step never ran."""
+        return self._n
 
 
 class FieldFormulaBuilder(QWidget):
@@ -351,7 +390,11 @@ class FieldFormulaBuilder(QWidget):
         dlg = _TwoStepPickerDialog(fname, fields, "Window", ft.WINDOWS, self._theme, self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             field, window = dlg.selected()
-            self._add_token({"type": "func", "value": fname, "field": field, "window": window})
+            token = {"type": "func", "value": fname, "field": field, "window": window}
+            n = dlg.n_value()
+            if n is not None:
+                token["n"] = n
+            self._add_token(token)
 
     def _add_at(self):
         fields = ft.RAW_FIELDS + self._other_codes()

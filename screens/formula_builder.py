@@ -21,10 +21,11 @@ from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter
 from PySide6.QtSvg import QSvgRenderer
 
 from services import config_store
+from services import formula_engine
 from services import formula_tokens as ft
 from screens.formula_field_editor import FormulaFieldEditorDialog
 
-_STORE_KEY = "external_import_formulas"
+_STORE_KEY = ft.STORE_KEY
 _FREQUENCIES = ["DAILY", "WEEKLY", "MONTHLY"]
 _ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
 
@@ -233,15 +234,13 @@ class FormulaEditorPanel(QWidget):
 
         root.addStretch()
 
-        hint = QLabel(
-            "Formula edits here describe the calculation for reference — the "
-            "actual ExternalImport calculation engine is fixed and tested "
-            "separately."
-        )
-        hint.setFont(font_scale.font(font_scale.SMALL, False))
-        hint.setStyleSheet(f"color:{txts};")
-        hint.setWordWrap(True)
-        root.addWidget(hint)
+        self._hint = QLabel()
+        self._hint.setFont(font_scale.font(font_scale.SMALL, False))
+        self._hint_txts = txts
+        self._hint.setWordWrap(True)
+        self._refresh_hint()
+        root.addWidget(self._hint)
+        self._code_edit.textChanged.connect(self._refresh_hint)
 
         btn_row = QHBoxLayout()
         save_btn = QPushButton("Save Formula")
@@ -264,6 +263,22 @@ class FormulaEditorPanel(QWidget):
         if dlg.exec():
             self._formula["tokens"] = dlg.get_tokens()
             self._formula_preview.setText(ft.tokens_to_display(self._formula["tokens"]))
+            self._refresh_hint()
+
+    def _status_text(self) -> str:
+        code = self._code_edit.text().strip()
+        if code in ft.BUILTIN_CODES:
+            return "Built-in — computed by the tested calculation engine."
+        if formula_engine.is_computable_custom_formula(self._formula.get("tokens", [])):
+            return "✓ Computable — will appear as a live column."
+        return (
+            "Documentation only — add a single MIN/MAX/AVG/SUM over "
+            "“Last N Trading Days” to make this a real computed column."
+        )
+
+    def _refresh_hint(self):
+        self._hint.setText(self._status_text())
+        self._hint.setStyleSheet(f"color:{self._hint_txts};")
 
     def _save(self):
         self._formula["code"] = self._code_edit.text().strip() or self._formula.get("code", "")
