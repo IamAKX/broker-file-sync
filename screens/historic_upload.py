@@ -13,6 +13,7 @@ from config_defaults import SCRIPT_NAME_DATA
 from services import config_store
 from services.file_reader import read_historic_sheet
 from services.master_generator import _build_script_name_lookup, _strip_rolling_suffix
+from services.scheduled_jobs import RAW_TO_SHAREKHAN_COLUMN
 from api import historic_api, holidays_api
 from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
@@ -23,6 +24,14 @@ from screens.historic_viewer import HistoricDataViewer
 # columns, and N onward) is never offered for upload.
 _METRIC_COL_START = 2   # column C
 _METRIC_COL_END = 12    # column M (inclusive)
+
+# Sheet-column-name -> canonical raw metric name, so a manual upload here stores
+# values under the same metric names the automatic end-of-day save uses (see
+# services/scheduled_jobs.py::_build_rows_payload). Without this, a sheet header
+# like "Avg Rate" would be saved verbatim instead of as "AvgRate", landing in a
+# distinct metric that formula_engine.py's lookups (keyed on the canonical name)
+# never find.
+_SHAREKHAN_TO_RAW_COLUMN = {sk_col: raw for raw, sk_col in RAW_TO_SHAREKHAN_COLUMN.items()}
 
 
 def _themed_calendar_stylesheet(theme) -> str:
@@ -395,7 +404,8 @@ class HistoricUploadScreen(QWidget):
             metrics = {}
             for idx in selected_indices:
                 if idx < len(row):
-                    metrics[self._headers[idx]] = row[idx]
+                    header = self._headers[idx]
+                    metrics[_SHAREKHAN_TO_RAW_COLUMN.get(header, header)] = row[idx]
             rows_payload.append({
                 "symbol": symbol,
                 "display_name": display_name or None,
