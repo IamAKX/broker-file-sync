@@ -63,6 +63,37 @@ def test_deferred_initial_load_never_pops_a_blocking_popup_on_error(qapp, monkey
     assert "connection" in screen._status_lbl.text().lower()
 
 
+def test_save_commits_in_progress_cell_edit_before_validating(qapp, monkeypatch):
+    # Regression: clicking Save while the Name cell's editor is still open
+    # (i.e. the user typed a name but never pressed Enter/Tab or clicked
+    # another cell) must not report that name as blank — Qt doesn't commit
+    # editor text to the item until the editor loses focus, and clicking a
+    # separate button doesn't trigger that commit synchronously.
+    from PySide6.QtWidgets import QLineEdit
+    from api import holidays_api
+    from unittest.mock import MagicMock
+
+    screen = _make_screen(qapp, monkeypatch, rows=[])
+    screen._add_row()
+
+    from screens.holidays import _NAME_COL
+    screen._table.editItem(screen._table.item(0, _NAME_COL))
+    editor = screen._table.findChild(QLineEdit)
+    assert editor is not None
+    editor.setText("Ganesh Chaturthi")
+    # Sanity-check the bug precondition: the item itself is still blank here.
+    assert screen._table.item(0, _NAME_COL).text() == ""
+
+    create_mock = MagicMock(return_value={"id": 42})
+    monkeypatch.setattr(holidays_api, "create_holiday", create_mock)
+
+    screen._save()
+
+    assert screen._status_lbl.text() != "Row 1: name cannot be blank"
+    create_mock.assert_called_once()
+    assert create_mock.call_args[0][1] == "Ganesh Chaturthi"
+
+
 def test_year_change_still_shows_popup_on_error(qapp, monkeypatch):
     # User-initiated (screen is visible, they just changed the year) — a
     # blocking popup here is fine, unlike the deferred/theme-cascade paths.

@@ -382,6 +382,15 @@ class HolidaysScreen(QWidget):
 
     def _save(self):
         t = self._theme
+        # Clicking Save while a Name cell is still being edited doesn't
+        # commit the in-progress edit to the item's text — Qt only does that
+        # on Enter/Tab or when a different cell gains focus. Force it here so
+        # a value that's visibly typed isn't reported as blank.
+        if self._table.state() == QAbstractItemView.State.EditingState:
+            editor = self._table.focusWidget()
+            if editor is not None:
+                self._table.itemDelegate().commitData.emit(editor)
+
         parsed_rows = []
         for row in range(self._table.rowCount()):
             date_btn = self._table.cellWidget(row, _DATE_COL)
