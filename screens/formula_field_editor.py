@@ -7,13 +7,25 @@ LMV columns — there is no free-text formula cell here.
 """
 import font_scale
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton, QFrame,
     QScrollArea, QLineEdit, QSizePolicy, QDialog
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 
 from services import formula_tokens as ft
+
+
+def _scrollbar_css(theme) -> str:
+    bd = _t(theme, "border")
+    return (
+        f"QScrollBar:horizontal{{height:8px;background:transparent;margin:0;}}"
+        f"QScrollBar::handle:horizontal{{background:{bd};border-radius:4px;min-width:24px;}}"
+        f"QScrollBar::add-line:horizontal,QScrollBar::sub-line:horizontal{{width:0;}}"
+        f"QScrollBar:vertical{{width:8px;background:transparent;margin:0;}}"
+        f"QScrollBar::handle:vertical{{background:{bd};border-radius:4px;min-height:24px;}}"
+        f"QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{{height:0;}}"
+    )
 
 
 def _t(theme, key: str) -> str:
@@ -232,135 +244,181 @@ class FieldFormulaBuilder(QWidget):
     def _other_codes(self) -> list:
         return [c for c in ft.BUILTIN_CODES if c != self._exclude_code]
 
+    def _card(self, title: str, trailing: QWidget = None) -> QVBoxLayout:
+        """A titled, bordered section. Returns the body layout to add content to."""
+        t = self._theme
+        bd, bg = _t(t, "border"), _t(t, "card_bg")
+        txt, accent = _t(t, "text_primary"), _t(t, "accent")
+
+        frame = QFrame()
+        frame.setStyleSheet(f"QFrame{{background:{bg};border:1px solid {bd};border-radius:8px;}}")
+        body = QVBoxLayout(frame)
+        body.setContentsMargins(14, 10, 14, 14)
+        body.setSpacing(8)
+
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        dot = QLabel("●")
+        dot.setStyleSheet(f"color:{accent};background:transparent;")
+        dot.setFont(font_scale.font(font_scale.SMALL, False))
+        title_lbl = QLabel(title.upper())
+        title_lbl.setFont(font_scale.font(font_scale.SMALL, True))
+        title_lbl.setStyleSheet(f"color:{txt};background:transparent;")
+        header.addWidget(dot)
+        header.addWidget(title_lbl)
+        header.addStretch()
+        if trailing is not None:
+            header.addWidget(trailing)
+        body.addLayout(header)
+
+        self._root.addWidget(frame)
+        return body
+
+    def _sub_label(self, text: str) -> QLabel:
+        lbl = QLabel(text)
+        lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        lbl.setStyleSheet(f"color:{_t(self._theme, 'text_secondary')};background:transparent;")
+        lbl.setFixedWidth(90)
+        return lbl
+
     def _build(self):
         t = self._theme
         bd = _t(t, "border")
         inp_bg = _t(t, "input_bg")
-        txts = _t(t, "text_secondary")
         accent = _t(t, "accent")
 
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(6)
+        self._root = QVBoxLayout(self)
+        self._root.setContentsMargins(0, 0, 0, 0)
+        self._root.setSpacing(12)
 
-        token_frame = QFrame()
-        token_frame.setMinimumHeight(44)
-        token_frame.setStyleSheet(f"QFrame{{background:{inp_bg};border:1px solid {bd};border-radius:6px;}}")
-        self._token_layout = QHBoxLayout(token_frame)
+        # ── Formula: the current token sequence + live preview + Clear ──
+        clr = QPushButton("Clear")
+        clr.setFixedHeight(24)
+        clr.setCursor(Qt.CursorShape.PointingHandCursor)
+        destructive = _t(t, "destructive")
+        clr.setStyleSheet(
+            f"QPushButton{{background:transparent;color:{destructive};"
+            f"border:1px solid {destructive}88;border-radius:4px;padding:2px 10px;}}"
+            f"QPushButton:hover{{background:{destructive};color:white;}}"
+        )
+        clr.clicked.connect(self._clear)
+        formula_body = self._card("Formula", trailing=clr)
+
+        token_scroll = QScrollArea()
+        token_scroll.setWidgetResizable(True)
+        token_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        token_scroll.setFixedHeight(48)
+        token_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        token_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        token_scroll.setStyleSheet(_scrollbar_css(self._theme))
+        token_inner = QWidget()
+        token_inner.setStyleSheet(f"background:{inp_bg};border:1px solid {bd};border-radius:6px;")
+        self._token_layout = QHBoxLayout(token_inner)
         self._token_layout.setContentsMargins(8, 4, 8, 4)
         self._token_layout.setSpacing(4)
         self._token_layout.addStretch()
-        root.addWidget(token_frame)
+        token_scroll.setWidget(token_inner)
+        formula_body.addWidget(token_scroll)
 
         self._preview_lbl = QLabel("—")
         self._preview_lbl.setFont(QFont("Menlo,Consolas,monospace", 10))
         self._preview_lbl.setStyleSheet(f"color:{accent};background:transparent;border:none;padding:2px 0;")
         self._preview_lbl.setWordWrap(True)
-        root.addWidget(self._preview_lbl)
+        formula_body.addWidget(self._preview_lbl)
 
-        # Number + Clear
-        num_row = QHBoxLayout()
-        self._num_input = QLineEdit()
-        self._num_input.setPlaceholderText("Constant…")
-        self._num_input.setFixedHeight(30)
-        self._num_input.setFixedWidth(110)
-        add_num = QPushButton("Add")
-        add_num.setFixedHeight(30)
-        add_num.setCursor(Qt.CursorShape.PointingHandCursor)
-        add_num.setStyleSheet(f"QPushButton{{background:{accent};color:{_t(t,'background')};border:none;border-radius:4px;padding:0 10px;}}")
-        add_num.clicked.connect(self._add_number)
-        clr = QPushButton("Clear")
-        clr.setFixedHeight(30)
-        clr.setCursor(Qt.CursorShape.PointingHandCursor)
-        clr.clicked.connect(self._clear)
-        num_row.addWidget(QLabel("Number:"))
-        num_row.addWidget(self._num_input)
-        num_row.addWidget(add_num)
-        num_row.addSpacing(8)
-        num_row.addWidget(clr)
-        num_row.addStretch()
-        root.addLayout(num_row)
+        # ── Raw fields ──
+        fields_body = self._card("Raw Fields")
+        fields_row = QHBoxLayout()
+        fields_row.setSpacing(6)
+        for f in ft.RAW_FIELDS:
+            b = self._chip_button(f, color="field")
+            b.clicked.connect(lambda _, name=f: self._add_token({"type": "field", "value": name}))
+            fields_row.addWidget(b)
+        fields_row.addStretch()
+        fields_body.addLayout(fields_row)
 
-        # Operators
-        self._add_chip_row(root, "Operators", ["+", "-", "*", "/", "(", ")"],
-                            lambda v: self._add_token({"type": "op" if v not in ("(", ")") else "paren", "value": v}))
+        # ── Functions: aggregate over a window, point-in-time lookup, ABS( ──
+        func_body = self._card("Functions")
 
-        # Window aggregate functions
         agg_row = QHBoxLayout()
-        agg_lbl = QLabel("Aggregate over a window:")
-        agg_lbl.setStyleSheet(f"color:{txts};")
-        agg_row.addWidget(agg_lbl)
+        agg_row.setSpacing(6)
+        agg_row.addWidget(self._sub_label("Aggregate:"))
         for fname in ft.AGG_FUNCS:
             b = self._chip_button(fname)
             b.clicked.connect(lambda _, fn=fname: self._add_window_agg(fn))
             agg_row.addWidget(b)
         agg_row.addStretch()
-        root.addLayout(agg_row)
+        func_body.addLayout(agg_row)
 
-        # AT() point lookup + ABS(
         pt_row = QHBoxLayout()
-        pt_lbl = QLabel("Value at a point in time:")
-        pt_lbl.setStyleSheet(f"color:{txts};")
+        pt_row.setSpacing(6)
+        pt_row.addWidget(self._sub_label("Point-in-time:"))
         at_btn = self._chip_button("AT(")
         at_btn.clicked.connect(self._add_at)
         abs_btn = self._chip_button("ABS(")
         abs_btn.clicked.connect(lambda: self._add_token({"type": "func", "value": "ABS("}))
-        pt_row.addWidget(pt_lbl)
         pt_row.addWidget(at_btn)
-        pt_row.addSpacing(8)
         pt_row.addWidget(abs_btn)
         pt_row.addStretch()
-        root.addLayout(pt_row)
+        func_body.addLayout(pt_row)
 
-        # Raw fields
-        raw_lbl = QLabel("Raw fields (click to insert):")
-        raw_lbl.setStyleSheet(f"color:{txts};")
-        root.addWidget(raw_lbl)
-        raw_row = QHBoxLayout()
-        for f in ft.RAW_FIELDS:
-            b = self._chip_button(f, color="field")
-            b.clicked.connect(lambda _, name=f: self._add_token({"type": "field", "value": name}))
-            raw_row.addWidget(b)
-        raw_row.addStretch()
-        root.addLayout(raw_row)
+        # ── Operators & constants ──
+        ops_body = self._card("Operators & Constants")
 
-        # Other formulas
-        other_lbl = QLabel("Other formulas (click to insert):")
-        other_lbl.setStyleSheet(f"color:{txts};")
-        root.addWidget(other_lbl)
+        op_row = QHBoxLayout()
+        op_row.setSpacing(6)
+        op_row.addWidget(self._sub_label("Operators:"))
+        for v in ["+", "-", "*", "/", "(", ")"]:
+            b = self._chip_button(v, color="op")
+            kind = "paren" if v in ("(", ")") else "op"
+            b.clicked.connect(lambda _, val=v, k=kind: self._add_token({"type": k, "value": val}))
+            op_row.addWidget(b)
+        op_row.addStretch()
+        ops_body.addLayout(op_row)
+
+        num_row = QHBoxLayout()
+        num_row.setSpacing(6)
+        num_row.addWidget(self._sub_label("Constant:"))
+        self._num_input = QLineEdit()
+        self._num_input.setPlaceholderText("e.g. 1.1")
+        self._num_input.setFixedHeight(28)
+        self._num_input.setFixedWidth(110)
+        add_num = QPushButton("Add")
+        add_num.setFixedHeight(28)
+        add_num.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_num.setStyleSheet(
+            f"QPushButton{{background:{accent};color:{_t(t,'background')};"
+            "border:none;border-radius:4px;padding:0 10px;}"
+        )
+        add_num.clicked.connect(self._add_number)
+        num_row.addWidget(self._num_input)
+        num_row.addWidget(add_num)
+        num_row.addStretch()
+        ops_body.addLayout(num_row)
+
+        # ── Reference other formulas: wraps into a scrollable grid, not one
+        # long horizontally-scrolling strip ──
+        other_body = self._card("Reference Other Formulas")
         other_scroll = QScrollArea()
         other_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        other_scroll.setFixedHeight(70)
-        other_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        other_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        other_scroll.setFixedHeight(120)
+        other_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        other_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        other_scroll.setStyleSheet(_scrollbar_css(self._theme))
         other_inner = QWidget()
-        other_row = QHBoxLayout(other_inner)
-        other_row.setContentsMargins(0, 4, 0, 4)
-        other_row.setSpacing(6)
-        for code in self._other_codes():
+        other_grid = QGridLayout(other_inner)
+        other_grid.setContentsMargins(0, 0, 4, 0)
+        other_grid.setSpacing(6)
+        _OTHER_COLS = 6
+        for idx, code in enumerate(self._other_codes()):
             b = self._chip_button(code, color="field")
             b.clicked.connect(lambda _, name=code: self._add_token({"type": "field", "value": name}))
-            other_row.addWidget(b)
-        other_row.addStretch()
+            other_grid.addWidget(b, idx // _OTHER_COLS, idx % _OTHER_COLS, Qt.AlignmentFlag.AlignLeft)
         other_scroll.setWidget(other_inner)
         other_scroll.setWidgetResizable(True)
-        root.addWidget(other_scroll)
+        other_body.addWidget(other_scroll)
 
-    def _add_chip_row(self, layout, label_text, items, on_click):
-        txts = _t(self._theme, "text_secondary")
-        lbl = QLabel(f"{label_text}:")
-        lbl.setStyleSheet(f"color:{txts};")
-        layout.addWidget(lbl)
-        row_w = QWidget()
-        row_lay = QHBoxLayout(row_w)
-        row_lay.setContentsMargins(0, 0, 0, 0)
-        row_lay.setSpacing(6)
-        for item in items:
-            b = self._chip_button(item)
-            b.clicked.connect(lambda _, v=item: on_click(v))
-            row_lay.addWidget(b)
-        row_lay.addStretch()
-        layout.addWidget(row_w)
+        self._root.addStretch()
 
     def _chip_button(self, text: str, color: str = "func") -> QPushButton:
         t = self._theme
@@ -445,7 +503,8 @@ class FormulaFieldEditorDialog(QDialog):
         super().__init__(parent)
         self._theme = theme
         self.setWindowTitle("Edit Formula")
-        self.resize(720, 560)
+        self.resize(760, 660)
+        self.setMinimumSize(620, 480)
         bg, txt = _t(theme, "background"), _t(theme, "text_primary")
         self.setStyleSheet(
             f"QDialog{{background:{bg};color:{txt};}}QWidget{{background:{bg};color:{txt};}}"
@@ -461,8 +520,13 @@ class FormulaFieldEditorDialog(QDialog):
         root.setContentsMargins(16, 16, 16, 16)
         root.setSpacing(12)
 
+        outer_scroll = QScrollArea()
+        outer_scroll.setWidgetResizable(True)
+        outer_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        outer_scroll.setStyleSheet(_scrollbar_css(theme))
         self._builder = FieldFormulaBuilder(tokens, theme, exclude_code=exclude_code, parent=self)
-        root.addWidget(self._builder, 1)
+        outer_scroll.setWidget(self._builder)
+        root.addWidget(outer_scroll, 1)
 
         btn_row = QHBoxLayout()
         cancel_btn = QPushButton("Cancel")
