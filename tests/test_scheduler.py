@@ -65,11 +65,11 @@ def test_fires_each_trigger_as_its_time_passes(qapp, store):
     sched._tick()
     assert fired == ["availability_check"]
 
-    clock.dt = datetime(2026, 7, 20, 15, 41)
+    clock.dt = datetime(2026, 7, 20, 22, 36)
     sched._tick()
     assert fired == ["availability_check", "lmv_check"]
 
-    clock.dt = datetime(2026, 7, 20, 15, 46)
+    clock.dt = datetime(2026, 7, 20, 22, 46)
     sched._tick()
     assert fired == ["availability_check", "lmv_check", "historic_save"]
 
