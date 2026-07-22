@@ -747,3 +747,4 @@ class HistoricUploadScreen(QWidget):
         for viewer in self._viewers:
             if viewer.isVisible():
                 viewer.refresh_theme()
+
