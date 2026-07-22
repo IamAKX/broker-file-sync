@@ -45,6 +45,8 @@ class TopBar(QWidget):
     logout_requested = Signal()
     fullscreen_requested = Signal()
     check_for_update_requested = Signal()
+    export_strategies_requested = Signal()
+    import_strategies_requested = Signal()
 
     def __init__(self, theme: ThemeManager, parent=None):
         super().__init__(parent)
@@ -61,6 +63,9 @@ class TopBar(QWidget):
         menus = [
             ("File", [
                 ("Clear Cache",  lambda: None),
+                ("---",          None),
+                ("Export All Strategies", lambda: self.export_strategies_requested.emit()),
+                ("Import All Strategies", lambda: self.import_strategies_requested.emit()),
                 ("---",          None),
                 ("Restart",      lambda: _restart_app()),
                 ("---",          None),

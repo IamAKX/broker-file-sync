@@ -29,6 +29,8 @@ class MainWindow(QMainWindow):
         self._topbar.logout_requested.connect(self._controller.show_login)
         self._topbar.fullscreen_requested.connect(self._toggle_fullscreen)
         self._topbar.check_for_update_requested.connect(self._open_update_dialog)
+        self._topbar.export_strategies_requested.connect(self._export_all_strategies)
+        self._topbar.import_strategies_requested.connect(self._import_all_strategies)
         root.addWidget(self._topbar)
 
         body = QHBoxLayout()
@@ -180,6 +182,72 @@ class MainWindow(QMainWindow):
         from components.update_dialog import UpdateDialog
         dlg = UpdateDialog(self._controller, theme=self._controller.theme, parent=self)
         dlg.exec()
+
+    def _export_all_strategies(self):
+        import json
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from services import strategy_store
+
+        strategies = strategy_store.load_all()
+        if not strategies:
+            QMessageBox.information(self, "Export All Strategies", "No strategies to export.")
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Export All Strategies", "strategies_export.json", "JSON Files (*.json)"
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(strategies, f, indent=2, ensure_ascii=False)
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Failed", f"Could not export:\n\n{exc}")
+            return
+        QMessageBox.information(
+            self, "Export All Strategies",
+            f"Exported {len(strategies)} strategies to:\n{path}"
+        )
+
+    def _import_all_strategies(self):
+        import json
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from services import strategy_store
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Import All Strategies", "", "JSON Files (*.json)"
+        )
+        if not path:
+            return
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, list) or not all(
+                isinstance(s, dict) and "id" in s and "name" in s for s in data
+            ):
+                raise ValueError("File does not contain a valid strategies export.")
+        except Exception as exc:
+            QMessageBox.warning(self, "Import Failed", f"Could not import:\n\n{exc}")
+            return
+
+        existing_count = len(strategy_store.load_all())
+        reply = QMessageBox.question(
+            self, "Import All Strategies",
+            f"This will replace all {existing_count} existing strategies with "
+            f"{len(data)} strategies from the file. This cannot be undone. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        strategy_store.import_all(data)
+        strategy_builder = self._screens.get("strategy_builder")
+        if strategy_builder is not None:
+            strategy_builder.reload_strategies()
+        QMessageBox.information(self, "Import All Strategies", f"Imported {len(data)} strategies.")
 
     def _on_theme_toggled(self):
         self._controller.theme.apply()

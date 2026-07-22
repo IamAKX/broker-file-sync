@@ -71,6 +71,12 @@ def delete_strategy(strategy_id: str):
     _save_raw(all_s)
 
 
+def import_all(strategies: list):
+    """Replace every persisted strategy with the given list (used by the
+    File > Import All Strategies menu action)."""
+    _save_raw(strategies)
+
+
 def new_strategy(name: str) -> dict:
     return {"id": str(uuid.uuid4()), "name": name, "active": True, "category": "Daily", "columns": [], "row_filter": []}
 

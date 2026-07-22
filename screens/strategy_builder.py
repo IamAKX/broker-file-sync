@@ -1353,6 +1353,20 @@ class StrategyBuilderScreen(QWidget):
     def get_active_strategies(self) -> list:
         return [s for s in self._strategies if s.get("active")]
 
+    def reload_strategies(self):
+        """Re-read all strategies from disk and refresh the list — used after
+        an Import All Strategies replaces the underlying storage file."""
+        while self._editor_slot.count():
+            item = self._editor_slot.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self._active_editor = None
+        self._editor_container.hide()
+        self._placeholder.show()
+
+        self._strategies = store.load_all()
+        self._refresh_list()
+
     # ── Theme propagation ─────────────────────────────────────────────────
 
     def refresh_theme(self):
