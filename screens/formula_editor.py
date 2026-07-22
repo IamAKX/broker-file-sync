@@ -1,6 +1,7 @@
 """Expression Editor — catalogues and dialog for building formula tokens."""
 import font_scale
 import os
+import re
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -10,7 +11,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QFrame, QScrollArea, QSizePolicy, QMessageBox,
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtGui import QFont, QColor, QTextCursor
 
 # ── Catalogues ────────────────────────────────────────────────────────────────
 
@@ -145,25 +146,127 @@ def _t(theme, key: str) -> str:
     return _FALLBACK.get(key, "#888")
 
 
+def _token_insert_text(tok: dict) -> str:
+    """Text to splice into the expression at the cursor for one clicked token."""
+    kind = tok.get("type", "op")
+    val = tok.get("value", "")
+    if kind == "col":
+        return f"[{val}]"
+    if kind == "self":
+        return "THIS"
+    if kind == "func":
+        fname = val.rstrip("(")
+        col_arg = tok.get("col_arg", "")
+        return f"{fname}({col_arg})" if col_arg else f"{fname}("
+    if kind == "op" and val == ",":
+        return ", "
+    if kind == "op":
+        return f" {val.strip()} "
+    return val
+
+
 def _tokens_to_text(tokens: list) -> str:
-    """Convert token list to human-readable expression string."""
-    parts = []
-    for tok in tokens:
-        kind = tok.get("type", "op")
-        val  = tok.get("value", "")
-        if kind == "col":
-            parts.append(f"[{val}]")
-        elif kind == "self":
-            parts.append("THIS")
-        elif kind == "func":
-            fname = val.rstrip("(")
-            col_arg = tok.get("col_arg", "")
-            parts.append(f"{fname}({col_arg})" if col_arg else f"{fname}(")
-        elif kind == "op" and val == ",":
-            parts.append(", ")
-        else:
-            parts.append(f" {val} " if kind == "op" else val)
-    return "".join(parts).strip() or ""
+    """Convert an initial token list (as loaded from storage) into the
+    plain-text expression shown in the editable preview box."""
+    return "".join(_token_insert_text(tok) for tok in tokens).strip()
+
+
+# ── Freeform text → token parser ──────────────────────────────────────────────
+# The preview box is a normal editable text field (click anywhere, type,
+# backspace at the cursor). services.strategy_engine and everywhere the
+# formula/condition/row-filter is persisted still work in terms of the
+# structured token list, so on Compile/Save we re-parse the current text.
+
+_AGG_FUNCS = {"sum_all", "min_all", "max_all", "avg_all", "count_all"}
+_WORD_OPS = {"and": " and ", "or": " or ", "not": " not "}
+_WORD_CONSTS = {"true": "True", "false": "False", "none": "None"}
+
+_TOKEN_RE = re.compile(r"""
+      (?P<ws>\s+)
+    | (?P<field>\[[^\]]*\])
+    | (?P<dstring>"[^"]*")
+    | (?P<sstring>'[^']*')
+    | (?P<number>\d+\.\d+|\.\d+|\d+\.|\d+)
+    | (?P<word>[A-Za-z_][A-Za-z0-9_]*)
+    | (?P<op3>\*\*)
+    | (?P<op2>==|!=|<=|>=)
+    | (?P<lparen>\()
+    | (?P<rparen>\))
+    | (?P<comma>,)
+    | (?P<op1>[+\-*/%<>])
+""", re.VERBOSE)
+
+_AGG_ARG_RE = re.compile(
+    r"""\s*(?:\[([^\]]*)\]|([A-Za-z_][A-Za-z0-9_]*)|"([^"]*)"|'([^']*)')\s*\)"""
+)
+
+
+def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
+    """For SUM_ALL(...)-style aggregates, try to read the single column
+    argument up to the matching ')'. Returns (pos_after_close_paren, col_name)
+    on success, else (start, None) so the caller falls back to normal tokens."""
+    if func_name_lower not in _AGG_FUNCS:
+        return start, None
+    m = _AGG_ARG_RE.match(text, start)
+    if not m:
+        return start, None
+    col = next(g for g in m.groups() if g is not None)
+    return m.end(), col
+
+
+def parse_expression_text(text: str) -> list:
+    """Parse the preview box's plain text into the structured token list.
+    Raises ValueError with a human-readable message on malformed input."""
+    tokens = []
+    pos, n = 0, len(text)
+    while pos < n:
+        m = _TOKEN_RE.match(text, pos)
+        if not m:
+            raise ValueError(f"Unexpected character {text[pos]!r} at position {pos + 1}")
+        kind = m.lastgroup
+        val = m.group(kind)
+        pos = m.end()
+
+        if kind == "ws":
+            continue
+        if kind == "field":
+            tokens.append({"type": "col", "value": val[1:-1]})
+        elif kind in ("dstring", "sstring", "number"):
+            tokens.append({"type": "num", "value": val})
+        elif kind == "word":
+            low = val.lower()
+            if low in _WORD_OPS:
+                tokens.append({"type": "op", "value": _WORD_OPS[low]})
+            elif low == "this":
+                tokens.append({"type": "self"})
+            elif low in _WORD_CONSTS:
+                tokens.append({"type": "num", "value": _WORD_CONSTS[low]})
+            else:
+                look = pos
+                while look < n and text[look].isspace():
+                    look += 1
+                if look < n and text[look] == "(":
+                    consumed_to, col_arg = _try_consume_aggregate_arg(text, look + 1, low)
+                    if col_arg is not None:
+                        tokens.append({"type": "func", "value": f"{val}(", "col_arg": col_arg})
+                        pos = consumed_to
+                    else:
+                        tokens.append({"type": "func", "value": f"{val}("})
+                        pos = look + 1
+                else:
+                    raise ValueError(
+                        f"Unknown identifier '{val}' — expected a column like [Name], "
+                        f"a function call like {val}(...), or a constant."
+                    )
+        elif kind in ("op3", "op2", "op1"):
+            tokens.append({"type": "op", "value": val})
+        elif kind == "lparen":
+            tokens.append({"type": "paren", "value": "("})
+        elif kind == "rparen":
+            tokens.append({"type": "paren", "value": ")"})
+        elif kind == "comma":
+            tokens.append({"type": "op", "value": ","})
+    return tokens
 
 
 # ── Expression Editor Dialog ──────────────────────────────────────────────────
@@ -182,7 +285,7 @@ class ExpressionEditorDialog(QDialog):
                  allow_self: bool = None, extra_row_values: dict = None,
                  parent=None):
         super().__init__(parent)
-        self._tokens = list(tokens)
+        self._initial_tokens = list(tokens)
         self._lmv_headers = list(lmv_headers)
         self._strategy_col_headers = list(strategy_col_headers)
         # Computed strategy-column values (name -> value) merged into the test
@@ -198,10 +301,16 @@ class ExpressionEditorDialog(QDialog):
         # instead — allow_self defaults to on for conditions unless disabled.
         self._allow_self = (mode == "condition") if allow_self is None else allow_self
         self._compiled_ok = False
+        self._compiled_tokens = None
         self.setWindowTitle("Expression Editor")
         self.setFixedSize(900, 620)
         self._build()
-        self._refresh_preview()
+        self._preview_edit.setPlainText(_tokens_to_text(self._initial_tokens))
+        # Start editing at the end of any pre-loaded formula, not position 0,
+        # so typing/Backspace/toolbar clicks continue naturally from there.
+        end_cursor = self._preview_edit.textCursor()
+        end_cursor.movePosition(QTextCursor.MoveOperation.End)
+        self._preview_edit.setTextCursor(end_cursor)
 
     # ── Build ─────────────────────────────────────────────────────────────────
 
@@ -240,15 +349,20 @@ class ExpressionEditorDialog(QDialog):
         root.setSpacing(0)
 
         # ── Preview area ──────────────────────────────────────────────────────
+        # A normal editable text field: click anywhere to place the cursor,
+        # type or Backspace like any text box. Catalogue/toolbar clicks insert
+        # their token text at the cursor instead of always appending at the end.
         self._preview_edit = QTextEdit()
-        self._preview_edit.setReadOnly(True)
         self._preview_edit.setFixedHeight(110)
         self._preview_edit.setPlaceholderText("Expression preview…")
+        self._preview_edit.setAcceptRichText(False)
         self._preview_edit.setFont(QFont("Menlo,Consolas,monospace", 11))
-        self._preview_edit.setStyleSheet(
-            f"QTextEdit{{background:{ibg};color:{acc};border:none;"
-            f"border-bottom:1px solid {bd};border-radius:0;padding:8px 12px;}}"
-        )
+        self._preview_edit.textChanged.connect(self._on_text_changed)
+
+        self._preview_ibg = ibg
+        self._preview_acc = acc
+        self._preview_bd = bd
+        self._set_preview_style(compiled=False)
         root.addWidget(self._preview_edit)
 
         # ── Three-panel body ──────────────────────────────────────────────────
@@ -507,12 +621,17 @@ class ExpressionEditorDialog(QDialog):
             self._add_token(entry["token"])
 
     # ── Token management ──────────────────────────────────────────────────────
+    # The preview box holds the real, editable text; these just splice a
+    # token's text in at the current cursor position.
+
+    def _insert_at_cursor(self, text: str):
+        cursor = self._preview_edit.textCursor()
+        cursor.insertText(text)
+        self._preview_edit.setTextCursor(cursor)
+        self._preview_edit.setFocus()
 
     def _add_token(self, token: dict):
-        self._tokens.append(dict(token))
-        self._compiled_ok = False
-        self._save_btn.setEnabled(False)
-        self._refresh_preview()
+        self._insert_at_cursor(_token_insert_text(token))
 
     def _add_constant(self):
         text = self._const_input.text().strip()
@@ -532,27 +651,41 @@ class ExpressionEditorDialog(QDialog):
         self._const_input.clear()
 
     def _clear(self):
-        self._tokens.clear()
-        self._compiled_ok = False
-        self._save_btn.setEnabled(False)
-        self._refresh_preview()
+        self._preview_edit.clear()
 
     def _backspace(self):
-        if self._tokens:
-            self._tokens.pop()
-        self._compiled_ok = False
-        self._save_btn.setEnabled(False)
-        self._refresh_preview()
+        cursor = self._preview_edit.textCursor()
+        cursor.deletePreviousChar()
+        self._preview_edit.setTextCursor(cursor)
+        self._preview_edit.setFocus()
 
     # ── Preview ───────────────────────────────────────────────────────────────
 
-    def _refresh_preview(self):
-        self._preview_edit.setPlainText(_tokens_to_text(self._tokens))
+    def _set_preview_style(self, compiled: bool):
+        bg = "#0d2116" if compiled else self._preview_ibg
+        fg = "#39d353" if compiled else self._preview_acc
+        self._preview_edit.setStyleSheet(
+            f"QTextEdit{{background:{bg};color:{fg};border:none;"
+            f"border-bottom:1px solid {self._preview_bd};border-radius:0;padding:8px 12px;}}"
+        )
+
+    def _on_text_changed(self):
+        self._compiled_ok = False
+        self._save_btn.setEnabled(False)
+        self._set_preview_style(compiled=False)
 
     # ── Compile & Test ────────────────────────────────────────────────────────
 
     def _compile_and_test(self):
         from services.strategy_engine import compile_check
+        try:
+            tokens = parse_expression_text(self._preview_edit.toPlainText())
+        except ValueError as exc:
+            self._compiled_ok = False
+            self._save_btn.setEnabled(False)
+            QMessageBox.warning(self, "Compile Error", f"Formula error:\n\n{exc}")
+            return
+
         # Merge computed strategy-column values into the test row so a row
         # filter referencing those columns can be evaluated.
         test_row = dict(self._lmv_first_row)
@@ -560,15 +693,13 @@ class ExpressionEditorDialog(QDialog):
         test_all = self._all_lmv_data
         if self._extra_row_values and test_all:
             test_all = [dict(test_all[0], **self._extra_row_values)] + list(test_all[1:])
-        ok, msg = compile_check(self._tokens, test_row,
+        ok, msg = compile_check(tokens, test_row,
                                 test_all, self_value=self._self_value)
         if ok:
+            self._compiled_tokens = tokens
             self._compiled_ok = True
             self._save_btn.setEnabled(True)
-            self._preview_edit.setStyleSheet(
-                f"QTextEdit{{background:#0d2116;color:#39d353;border:none;"
-                f"border-bottom:1px solid {_t(self._theme,'border')};border-radius:0;padding:8px 12px;}}"
-            )
+            self._set_preview_style(compiled=True)
             QMessageBox.information(self, "Compile OK",
                                     f"Formula compiled successfully.\n\nResult on first row: {msg}")
         else:
@@ -579,4 +710,9 @@ class ExpressionEditorDialog(QDialog):
     # ── Public API ────────────────────────────────────────────────────────────
 
     def get_tokens(self) -> list:
-        return list(self._tokens)
+        if self._compiled_ok and self._compiled_tokens is not None:
+            return list(self._compiled_tokens)
+        try:
+            return parse_expression_text(self._preview_edit.toPlainText())
+        except ValueError:
+            return []

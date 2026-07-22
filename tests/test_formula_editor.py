@@ -113,14 +113,26 @@ def test_editor_add_token_via_operator_updates_preview(qapp):
     assert "+" in dlg._preview_edit.toPlainText()
 
 
-def test_editor_backspace_removes_last_token(qapp):
+def test_editor_backspace_removes_character_before_cursor(qapp):
     from screens.formula_editor import ExpressionEditorDialog
-    tokens = [{"type": "col", "value": "LTP"}, {"type": "op", "value": "+"}]
+    tokens = [{"type": "col", "value": "LTP"}]
     dlg = ExpressionEditorDialog(tokens, ["LTP"], [], {})
-    assert len(dlg._tokens) == 2
+    before = dlg._preview_edit.toPlainText()
+    assert before == "[LTP]"
     dlg._backspace()
-    assert len(dlg._tokens) == 1
-    assert dlg._tokens[0]["type"] == "col"
+    assert dlg._preview_edit.toPlainText() == before[:-1]
+
+
+def test_editor_backspace_deletes_at_cursor_not_always_at_end(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtGui import QTextCursor
+    dlg = ExpressionEditorDialog([], ["LTP"], [], {})
+    dlg._preview_edit.setPlainText("[LTP]+1")
+    cursor = dlg._preview_edit.textCursor()
+    cursor.setPosition(5)   # right after "[LTP]", before "+1"
+    dlg._preview_edit.setTextCursor(cursor)
+    dlg._backspace()
+    assert dlg._preview_edit.toPlainText() == "[LTP+1"
 
 
 def test_editor_clear_empties_tokens(qapp):
