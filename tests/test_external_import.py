@@ -173,23 +173,22 @@ def test_live_merge_includes_external_columns(tmp_path, monkeypatch):
         lambda path: (["Symbol", "Max Pain"], []),
     )
 
-    # External now mirrors ReliableSoftware: col A ignored, col B is the join
-    # key (full name + rolling suffix → symbol via config), col C onward = data.
+    # ExternalImport's column A is already the resolved symbol (same shape
+    # data_import.py validates for the file source) — col C onward = data.
     ext_file = _make_csv(tmp_path, "ext.csv", [
-        ["RowNo", "ScripName", "MyScore"],
-        ["1", "Infosys Limited.rolling.12D", "99"],
-        ["2", "TCS.rolling.11D", "88"],
+        ["Symbol", "Display Name", "MyScore"],
+        ["INFY", "Infosys Limited", "99"],
+        ["TCS", "TCS", "88"],
     ])
-    script_name_data = [("Infosys Limited", "INFY"), ("TCS", "TCS")]
 
-    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", script_name_data,
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [],
                             external_path=ext_file)
     # Trigger slow-source read manually
     reader._read_slow_sources(force=True)
     headers, data = reader.read_merged(force_slow=False)
 
     assert "MyScore" in headers
-    assert "ScripName" not in headers   # the key column is not output
+    assert "Display Name" not in headers   # the key column is not output
     score_idx = headers.index("MyScore")
     rows_by_scrip = {r[0]: r for r in data}
     assert rows_by_scrip["INFY"][score_idx] == "99"
@@ -238,12 +237,11 @@ def test_live_merge_external_missing_scrip_fills_none(tmp_path, monkeypatch):
 
     # Only INFY in external — TCS should get None
     ext_file = _make_csv(tmp_path, "partial.csv", [
-        ["RowNo", "ScripName", "MyScore"],
-        ["1", "Infosys Limited.rolling.12D", "99"],
+        ["Symbol", "Display Name", "MyScore"],
+        ["INFY", "Infosys Limited", "99"],
     ])
-    script_name_data = [("Infosys Limited", "INFY")]
 
-    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", script_name_data,
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [],
                             external_path=ext_file)
     reader._read_slow_sources(force=True)
     headers, data = reader.read_merged(force_slow=False)
@@ -254,8 +252,8 @@ def test_live_merge_external_missing_scrip_fills_none(tmp_path, monkeypatch):
     assert rows_by_scrip["TCS"][score_idx] is None
 
 
-def test_live_merge_external_matches_any_rolling_duration(tmp_path, monkeypatch):
-    # External uses .rolling.10D; config (stripped) maps ABB LTD → ABB.
+def test_live_merge_external_symbol_match_is_case_and_whitespace_insensitive(tmp_path, monkeypatch):
+    # Symbol matching normalises case/whitespace exactly like NiftyInvest/MarketProfile.
     from services.live_merge import LiveDataReader
     monkeypatch.setattr(
         "services.live_merge.LiveDataReader._read_sharekhan",
@@ -270,18 +268,21 @@ def test_live_merge_external_matches_any_rolling_duration(tmp_path, monkeypatch)
         lambda path: (["Symbol", "Max Pain"], []),
     )
     ext_file = _make_csv(tmp_path, "roll.csv", [
-        ["RowNo", "ScripName", "ExtCol"],
-        ["1", "ABB LTD.rolling.10D", "XYZ"],
+        ["Symbol", "Display Name", "ExtCol"],
+        [" abb ", "ABB Ltd", "XYZ"],
     ])
-    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv",
-                            [("ABB LTD", "ABB")], external_path=ext_file)
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [], external_path=ext_file)
     reader._read_slow_sources(force=True)
     headers, data = reader.read_merged(force_slow=False)
     assert data[0][headers.index("ExtCol")] == "XYZ"
 
 
-def test_live_merge_external_column_a_is_ignored(tmp_path, monkeypatch):
-    # Column A holds junk; matching must rely on column B only.
+def test_live_merge_external_display_name_mismatch_does_not_break_match(tmp_path, monkeypatch):
+    # Regression test for a production bug: the backend can (and does) store
+    # Display Name as just the bare symbol, which never resolves through the
+    # ReliableSoftware-style full-name lookup (e.g. "ABB" vs config's
+    # "ABB LTD"). Matching must rely on column A (Symbol) alone, never on
+    # resolving column B through that lookup, or real rows silently vanish.
     from services.live_merge import LiveDataReader
     monkeypatch.setattr(
         "services.live_merge.LiveDataReader._read_sharekhan",
@@ -296,15 +297,13 @@ def test_live_merge_external_column_a_is_ignored(tmp_path, monkeypatch):
         lambda path: (["Symbol", "Max Pain"], []),
     )
     ext_file = _make_csv(tmp_path, "cola.csv", [
-        ["GARBAGE", "ScripName", "ExtCol"],
-        ["zzz", "Infosys Limited.rolling.12D", "OK"],
+        ["Symbol", "Display Name", "ExtCol"],
+        ["INFY", "INFY", "OK"],   # Display Name == bare symbol, not registered as a full name anywhere
     ])
-    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv",
-                            [("Infosys Limited", "INFY")], external_path=ext_file)
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [], external_path=ext_file)
     reader._read_slow_sources(force=True)
     headers, data = reader.read_merged(force_slow=False)
-    # Column A header ("GARBAGE") must not be in output; ExtCol is matched.
-    assert "GARBAGE" not in headers
+    assert "Display Name" not in headers
     assert data[0][headers.index("ExtCol")] == "OK"
 
 
@@ -466,10 +465,10 @@ def test_live_merge_file_mode_never_applies_live_overlay(tmp_path, monkeypatch):
     _stub_sk_and_slow_sources(monkeypatch, sk_row)
 
     ext_file = _make_csv(tmp_path, "ext.csv", [
-        ["RowNo", "ScripName", "MyScore"],
-        ["1", "Infosys.rolling.12D", "99"],
+        ["Symbol", "Display Name", "MyScore"],
+        ["INFY", "Infosys", "99"],
     ])
-    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [("Infosys", "INFY")],
+    reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [],
                             external_path=ext_file, external_mode="file")
     reader._read_slow_sources(force=True)
     headers, data = reader.read_merged(force_slow=False)

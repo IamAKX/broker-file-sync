@@ -16,8 +16,16 @@ DATA = [
 ]
 
 
-def test_viewer_populates_table(qapp):
+def test_viewer_populates_table(qapp, monkeypatch):
     from screens.lmv_snapshot_viewer import LmvSnapshotViewer
+    from services import strategy_store
+
+    # Isolate from whatever's actually saved in the real strategies.json —
+    # an active strategy there would add its own output column and break
+    # this test's exact column-count assertion regardless of this test's
+    # own synthetic data.
+    monkeypatch.setattr(strategy_store, "load_all", lambda: [])
+
     w = LmvSnapshotViewer(HEADERS, DATA, date(2026, 7, 20), theme=None)
     assert w._table.rowCount() == 2
     assert w._table.columnCount() == 4

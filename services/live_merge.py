@@ -57,21 +57,20 @@ def merge_broker_sources(
     for row in ni_rows:
         ni_lookup[_normalise(row[_NI_FK_IDX]).upper()] = row
 
-    # External import: same shape as ReliableSoftware — column B (index 1) is
-    # the join key (full name + rolling suffix → symbol via config), column C
-    # onward (index 2+) are the data columns. In "database" mode column B is
-    # the stock's stored display_name, which round-trips through the same
-    # rolling-suffix-strip + name_to_symbol lookup to the same resolved symbol.
+    # External import: column A (index 0) is already the resolved symbol
+    # (same shape in both "file" and "database" source modes — see
+    # screens.data_import._validate_external_import_headers and
+    # services.external_import_source._fetch), column B is Display Name,
+    # column C onward (index 2+) are the data columns.
     ext_data_indices = list(range(2, len(ext_headers))) if len(ext_headers) > 2 else []
     ext_lookup: dict = {}
     if ext_rows and ext_headers:
         for row in ext_rows:
-            if not row or len(row) < 2:
+            if not row:
                 continue
-            full_name = _strip_rolling_suffix(_normalise(row[1]))
-            sym = name_to_symbol.get(full_name.lower())
-            if sym:
-                ext_lookup[_normalise(sym).upper()] = row
+            key = _normalise(row[0]).upper()
+            if key:
+                ext_lookup[key] = row
 
     mp_lookup: dict = {}
     for row in mp_rows:
