@@ -14,7 +14,7 @@ source .venv/bin/activate
 python -m pip install --upgrade pip >/dev/null
 pip install -r requirements.txt
 
-export BROKER_SYNC_API_URL="${BROKER_SYNC_API_URL:-http://localhost:8000}"
+# export BROKER_SYNC_API_URL="${BROKER_SYNC_API_URL:-http://localhost:8000}"
 
 echo "Starting Broker File Sync... (API: $BROKER_SYNC_API_URL)"
 python main.py

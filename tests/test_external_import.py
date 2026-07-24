@@ -364,7 +364,7 @@ def test_live_merge_database_mode_overlays_live_values_on_first_trading_day(monk
     ext_headers, ext_rows, baselines = _ext_db_fixture(live_baselines)
     monkeypatch.setattr(
         external_import_source, "read_external_import_db_with_live_baseline",
-        lambda: (ext_headers, ext_rows, baselines),
+        lambda **kwargs: (ext_headers, ext_rows, baselines),
     )
 
     reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [("Infosys", "INFY")],
@@ -408,7 +408,7 @@ def test_live_merge_database_mode_leaves_cwo_alone_mid_week(monkeypatch):
     ext_headers, ext_rows, baselines = _ext_db_fixture(live_baselines)
     monkeypatch.setattr(
         external_import_source, "read_external_import_db_with_live_baseline",
-        lambda: (ext_headers, ext_rows, baselines),
+        lambda **kwargs: (ext_headers, ext_rows, baselines),
     )
 
     reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [("Infosys", "INFY")],
@@ -436,7 +436,7 @@ def test_live_merge_database_mode_symbol_missing_from_baseline_falls_back_cleanl
     ext_headers, ext_rows, baselines = _ext_db_fixture(live_baselines={})
     monkeypatch.setattr(
         external_import_source, "read_external_import_db_with_live_baseline",
-        lambda: (ext_headers, ext_rows, baselines),
+        lambda **kwargs: (ext_headers, ext_rows, baselines),
     )
 
     reader = LiveDataReader("sk.xlsx", "rs.xlsx", "ni.csv", [("Infosys", "INFY")],

@@ -51,6 +51,9 @@ def _apply_app_icon(app: QApplication):
             pass   # pyobjc not installed; dock icon/menu name fall back to defaults
 
 def main():
+    from services.error_logging import install_excepthook
+    install_excepthook()
+
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
 

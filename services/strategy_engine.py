@@ -182,16 +182,146 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
     return "".join(parts)
 
 
-def evaluate(tokens: list, row_data: dict, all_data: list,
-             self_value=None):
-    """Return numeric or string result, or None on error."""
-    if not tokens:
+def _col_value(raw):
+    """Like _col_literal, but returns the actual Python value (not source text)."""
+    if raw is None or raw == "":
         return None
-    expr = _tokens_to_expr(tokens, row_data, all_data, self_value)
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return str(raw)
+
+
+def _compute_aggregate(base: str, col_name: str, all_data: list):
+    nums = []
+    for rd in all_data:
+        try:
+            nums.append(float(rd.get(col_name, 0) or 0))
+        except (TypeError, ValueError):
+            pass
+    if base == "SUM":
+        return sum(nums)
+    elif base == "MIN":
+        return min(nums) if nums else 0
+    elif base == "MAX":
+        return max(nums) if nums else 0
+    elif base == "AVG":
+        return sum(nums) / len(nums) if nums else 0
+    elif base == "COUNT":
+        return len(nums)
+    else:
+        return 0
+
+
+class _Compiled:
+    """A formula's fixed structure, compiled once and reused across rows/ticks.
+
+    ``col_vars`` maps referenced column name -> placeholder variable name
+    (e.g. "_c0"). ``agg_specs`` is [(placeholder, base_op, col_name), ...]
+    for _ALL aggregate functions, resolved once per tick rather than once
+    per row (they don't depend on the row being evaluated).
+    """
+    __slots__ = ("code", "col_vars", "uses_self", "agg_specs")
+
+    def __init__(self, code, col_vars, uses_self, agg_specs):
+        self.code = code
+        self.col_vars = col_vars
+        self.uses_self = uses_self
+        self.agg_specs = agg_specs
+
+
+_compile_cache: dict = {}
+
+
+def _formula_signature(tokens: list):
+    return tuple((tok.get("type"), tok.get("value"), tok.get("col_arg"))
+                 for tok in tokens)
+
+
+def _build_compiled(tokens: list):
+    parts = []
+    col_vars: dict = {}
+    uses_self = False
+    agg_specs = []
+
+    for tok in tokens:
+        t = tok.get("type")
+        v = tok.get("value", "")
+
+        if t == "col":
+            var = col_vars.get(v)
+            if var is None:
+                var = f"_c{len(col_vars)}"
+                col_vars[v] = var
+            parts.append(var)
+
+        elif t == "self":
+            uses_self = True
+            parts.append("_self")
+
+        elif t in ("num", "op", "paren"):
+            parts.append(v)
+
+        elif t == "func":
+            fname = v.rstrip("(").upper()
+            if fname.endswith("_ALL"):
+                col_name = tok.get("col_arg", "")
+                base = fname[:-4]
+                var = f"_a{len(agg_specs)}"
+                agg_specs.append((var, base, col_name))
+                parts.append(var)
+            else:
+                parts.append(_FUNC_MAP.get(fname, fname.lower()) + "(")
+
+    expr = "".join(parts)
     if not expr.strip():
         return None
     try:
-        return eval(expr, _EVAL_BUILTINS)   # noqa: S307
+        code = compile(expr, "<formula>", "eval")  # noqa: S307
+    except SyntaxError:
+        return None
+    return _Compiled(code, col_vars, uses_self, agg_specs)
+
+
+def _get_compiled(tokens: list):
+    sig = _formula_signature(tokens)
+    if sig not in _compile_cache:
+        _compile_cache[sig] = _build_compiled(tokens)
+    return _compile_cache[sig]
+
+
+def evaluate(tokens: list, row_data: dict, all_data: list,
+             self_value=None, agg_cache: dict | None = None):
+    """Return numeric or string result, or None on error.
+
+    ``agg_cache``, when provided, memoizes _ALL aggregate results by
+    (base_op, col_name) for the caller's own scope (e.g. one dict per
+    apply_strategies()/render pass) so an aggregate is computed once
+    instead of once per row.
+    """
+    if not tokens:
+        return None
+    compiled = _get_compiled(tokens)
+    if compiled is None:
+        return None
+    ns = _EVAL_BUILTINS.copy()
+    for col_name, var in compiled.col_vars.items():
+        ns[var] = _col_value(row_data.get(col_name))
+    if compiled.uses_self:
+        ns["_self"] = _col_value(self_value)
+    for var, base, col_name in compiled.agg_specs:
+        if agg_cache is not None:
+            key = (base, col_name)
+            if key in agg_cache:
+                val = agg_cache[key]
+            else:
+                val = _compute_aggregate(base, col_name, all_data)
+                agg_cache[key] = val
+        else:
+            val = _compute_aggregate(base, col_name, all_data)
+        ns[var] = val
+    try:
+        return eval(compiled.code, ns)   # noqa: S307
     except Exception:
         return None
 
@@ -232,9 +362,9 @@ def _referenced_columns(tokens: list) -> list:
 
 
 def evaluate_condition(tokens: list, row_data: dict, all_data: list,
-                       self_value=None) -> bool:
+                       self_value=None, agg_cache: dict | None = None) -> bool:
     """Return True if condition is met."""
-    result = evaluate(tokens, row_data, all_data, self_value)
+    result = evaluate(tokens, row_data, all_data, self_value, agg_cache)
     if result is None:
         return False
     return bool(result)
@@ -253,6 +383,9 @@ def apply_strategies(strategies: list, headers: list,
 
     # Build list of all dicts for aggregate functions
     all_dicts = [dict(zip(headers, row)) for row in data]
+    # Memoizes SUM_ALL/AVG_ALL/etc. by (base_op, col_name) for this call, so an
+    # aggregate over all rows is computed once instead of once per row.
+    agg_cache: dict = {}
 
     extra_headers = []
     for strat in active:
@@ -277,12 +410,13 @@ def apply_strategies(strategies: list, headers: list,
             enriched = dict(row_dict)
             values = []
             for col in strat.get("columns", []):
-                val = evaluate(col["formula"], row_dict, all_dicts)
+                val = evaluate(col["formula"], row_dict, all_dicts,
+                               agg_cache=agg_cache)
                 enriched[col["name"]] = val
                 values.append(val)
             row_filter = strat.get("row_filter", [])
             passed = (not row_filter) or evaluate_condition(
-                row_filter, enriched, all_dicts)
+                row_filter, enriched, all_dicts, agg_cache=agg_cache)
             per_strat.append((passed, values))
 
         # Drop rows excluded by every active filter (union of filters).
@@ -303,13 +437,13 @@ def apply_strategies(strategies: list, headers: list,
 
 
 def get_cell_color(col_def: dict, value, row_dict: dict,
-                   all_dicts: list) -> str | None:
+                   all_dicts: list, agg_cache: dict | None = None) -> str | None:
     """Return hex color if any fmt rule matches, else None."""
     for rule in col_def.get("fmt_rules", []):
         if not rule.get("condition"):
             continue
         if evaluate_condition(rule["condition"], row_dict, all_dicts,
-                              self_value=value):
+                              self_value=value, agg_cache=agg_cache):
             return rule.get("color")
     return None
 

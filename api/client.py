@@ -35,6 +35,13 @@ def _format_validation_errors(errors: list) -> str:
 class ApiClient:
     def __init__(self):
         self._session = requests.Session()
+        # Default pool_maxsize is 10 — callers that fan out concurrent
+        # requests (e.g. services.external_import_source's parallel historic
+        # snapshot fetches) need enough pooled connections that concurrency
+        # actually overlaps instead of queuing behind a small pool.
+        adapter = requests.adapters.HTTPAdapter(pool_maxsize=20, pool_connections=20)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
         self._on_session_expired = None
 
     def set_session_expired_callback(self, callback) -> None:

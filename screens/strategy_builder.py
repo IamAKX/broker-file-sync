@@ -1353,6 +1353,9 @@ class StrategyBuilderScreen(QWidget):
     def get_active_strategies(self) -> list:
         return [s for s in self._strategies if s.get("active")]
 
+    def get_all_strategies(self) -> list:
+        return list(self._strategies)
+
     def reload_strategies(self):
         """Re-read all strategies from disk and refresh the list — used after
         an Import All Strategies replaces the underlying storage file."""

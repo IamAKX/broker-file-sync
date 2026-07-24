@@ -84,7 +84,15 @@ class MainWindow(QMainWindow):
             strategy_builder.set_lmv_headers(headers)
             viewer = getattr(data_import, "_live_viewer", None)
             if viewer is not None:
-                viewer.set_strategies(strategy_builder.get_active_strategies())
+                # Every strategy is available in the picker, but none is
+                # auto-applied on open — auto-activating every persisted
+                # "active" strategy at once meant a large batch of row
+                # filters (each strategy's own) all had to match for a row
+                # to survive the union, which can empty the whole table the
+                # instant LMV loads. Users opt specific ones in per session.
+                all_strats = [dict(s, active=False)
+                              for s in strategy_builder.get_all_strategies()]
+                viewer.set_strategies(all_strats)
 
         data_import.lmv_headers_ready.connect(_on_lmv_ready)
         data_import.lmv_data_ready.connect(strategy_builder.set_lmv_data)

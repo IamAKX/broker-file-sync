@@ -252,6 +252,7 @@ class LmvUploadScreen(QWidget):
             headers, data, self._selected_date, theme=self._controller.theme,
             on_save=lambda: self._on_save_clicked(headers, data),
             title=f"LMV Preview — {self._selected_date.strftime('%d-%b-%Y')}",
+            show_strategies=False,
         )
         viewer.show()
         self._viewers.append(viewer)
@@ -417,6 +418,7 @@ class LmvUploadScreen(QWidget):
         viewer = LmvSnapshotViewer(
             headers, rows, self._selected_browse_date, theme=t, on_save=None,
             title=f"Historical LMV — {self._selected_browse_date.strftime('%d-%b-%Y')}",
+            show_strategies=False,
         )
         viewer.show()
         self._viewers.append(viewer)

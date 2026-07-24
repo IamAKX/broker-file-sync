@@ -150,6 +150,12 @@ class LiveDataReader:
         # _read_external and the overlay step in read_merged.
         self._live_baseline_cache: dict = {}
 
+        # Historic ExternalImport ("database" mode) snapshot-per-day cache,
+        # scoped to this reader's lifetime (i.e. this LMV session) — avoids
+        # re-fetching up to FORMULA_LOOKBACK_DAYS of already-finalized
+        # historic snapshots over HTTP on every slow-source refresh.
+        self._ext_snapshot_cache: dict = {}
+
         # Cached symbol-resolution map (rebuilt only when script data changes).
         self._name_to_symbol = None
 
@@ -220,7 +226,8 @@ class LiveDataReader:
             from services.external_import_source import (
                 read_external_import_db_with_live_baseline,
             )
-            headers, rows, live_baselines = read_external_import_db_with_live_baseline()
+            headers, rows, live_baselines = read_external_import_db_with_live_baseline(
+                snapshot_cache=self._ext_snapshot_cache)
             self._live_baseline_cache = live_baselines
             return headers, rows
         self._live_baseline_cache = {}

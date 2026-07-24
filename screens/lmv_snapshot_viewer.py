@@ -29,17 +29,26 @@ class LmvSnapshotViewer(QWidget):
     """
 
     def __init__(self, headers: list, data: list, trade_date, theme=None,
-                 on_save=None, title: str = None, parent=None):
+                 on_save=None, title: str = None, parent=None,
+                 show_strategies: bool = True):
         super().__init__(parent)
         self._headers = list(headers)
         self._data = [list(r) for r in data]
         self._trade_date = trade_date
         self._theme = theme
         self._on_save = on_save
+        self._show_strategies = show_strategies
 
         self._visible_cols = set(range(len(self._headers)))
         self._selected_category = "All"
-        self._strategies = [s for s in strategy_store.load_all() if s.get("active")]
+        # Loading/applying strategies here is pure overhead when this viewer
+        # is only being used to review the merged columns that will be
+        # saved/browsed (e.g. LMV Upload) — those columns never include
+        # strategy output, so skip the load entirely in that case.
+        self._strategies = (
+            [s for s in strategy_store.load_all() if s.get("active")]
+            if show_strategies else []
+        )
 
         from config_defaults import SECTOR_STOCK_DATA
         self._sector_map = {stock: sector for sector, stock in SECTOR_STOCK_DATA}
@@ -99,15 +108,16 @@ class LmvSnapshotViewer(QWidget):
 
         self._filter_btn = _toolbar_btn("⊞  Filters")
         self._filter_btn.clicked.connect(self._show_filter_panel)
-        self._strat_btn = _toolbar_btn("⚡  Strategies")
-        self._strat_btn.clicked.connect(self._show_strategy_picker)
         self._export_btn = _toolbar_btn("⭳  Export")
         self._export_btn.clicked.connect(self._export)
 
         top.addWidget(self._filter_btn)
         top.addSpacing(8)
-        top.addWidget(self._strat_btn)
-        top.addSpacing(8)
+        if self._show_strategies:
+            self._strat_btn = _toolbar_btn("⚡  Strategies")
+            self._strat_btn.clicked.connect(self._show_strategy_picker)
+            top.addWidget(self._strat_btn)
+            top.addSpacing(8)
         top.addWidget(self._export_btn)
 
         if self._on_save is not None:
@@ -154,10 +164,18 @@ class LmvSnapshotViewer(QWidget):
         self._table.setShowGrid(True)
         root.addWidget(self._table, 1)
 
+        bottom = QHBoxLayout()
+        self._stock_count_lbl = QLabel("Stocks : 0")
+        self._stock_count_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._stock_count_lbl.setStyleSheet(f"color: {text_s};")
+        bottom.addWidget(self._stock_count_lbl)
+        bottom.addStretch()
+        root.addLayout(bottom)
+
     @staticmethod
     def _fmt_cell(val) -> str:
         if isinstance(val, float):
-            return f"{val:.2f}"
+            return f"{val:.4f}"
         if val is None:
             return ""
         return str(val)
@@ -260,6 +278,8 @@ class LmvSnapshotViewer(QWidget):
         self._populate_table()
 
     def _update_strat_btn_label(self):
+        if not self._show_strategies:
+            return
         filtered = self._filtered_strategies()
         active = sum(1 for s in filtered if s.get("active"))
         total = len(filtered)
@@ -356,6 +376,18 @@ class LmvSnapshotViewer(QWidget):
                 item = self._table.item(r, 0)   # Sector is always col 0
                 self._table.setRowHidden(r, item is None or item.text() != selected)
         self._update_filter_btn_label()
+        self._update_stock_count_label()
+
+    def _update_stock_count_label(self):
+        """Count of currently visible (non-filtered-out) rows — kept in sync
+        wherever row visibility can change (sector filter, strategy apply,
+        category change all end in _apply_sector_filter, called from
+        _populate_table)."""
+        visible = sum(
+            1 for r in range(self._table.rowCount())
+            if not self._table.isRowHidden(r)
+        )
+        self._stock_count_lbl.setText(f"Stocks : {visible}")
 
     # ── Export ───────────────────────────────────────────────────────────────
 

@@ -9,7 +9,7 @@ from components.column_filter_popup import ColumnFilterPopup
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QFrame,
-    QCheckBox, QSizePolicy, QComboBox
+    QCheckBox, QSizePolicy, QComboBox, QScrollArea, QLineEdit
 )
 from PySide6.QtCore import (
     Qt, QTimer, QFileSystemWatcher, Signal, QObject, QThread
@@ -28,22 +28,41 @@ _FILE_SETTLE_S = 0.2    # brief wait so disk writes finish before re-reading
 
 # ── Off-thread reader worker ────────────────────────────────────────────────
 
+def _inject_sector_rows(headers: list, data: list, sector_map: dict) -> tuple:
+    """Prepend a Sector column to headers and every data row. Module-level
+    (not a LiveViewerWindow method) so the worker thread can call it too,
+    without touching any GUI-thread-owned state beyond the read-only
+    sector_map passed in."""
+    scrip_idx = headers.index("Scrip Name") if "Scrip Name" in headers else -1
+    new_headers = ["Sector"] + list(headers)
+    new_data = []
+    for row in data:
+        scrip = row[scrip_idx] if scrip_idx >= 0 and scrip_idx < len(row) else ""
+        sector = sector_map.get(str(scrip).strip().upper(), "—")
+        new_data.append([sector] + list(row))
+    return new_headers, new_data
+
+
 class _LiveDataWorker(QObject):
     """
-    Runs the read+merge on a worker thread so a slow COM/disk read never
-    freezes the UI.  Owns a :class:`services.live_merge.LiveDataReader`; the
-    reader's COM handles are created and used entirely on this thread.
+    Runs the read+merge, and the strategy-formula computation on top of it,
+    entirely on a worker thread — so neither the network calls (ExternalImport
+    "database" mode especially) nor the O(rows x strategies x columns) formula
+    evaluation ever blocks the GUI thread, on the first load or any later
+    tick.  Owns a :class:`services.live_merge.LiveDataReader`; the reader's
+    COM handles are created and used entirely on this thread.
     """
 
-    result = Signal(list, list)   # headers, data
-    failed = Signal(str)          # error message
+    result = Signal(list, list, list, list)   # headers, data, disp_headers, disp_data
+    failed = Signal(str)                      # error message, already prefixed
 
-    def __init__(self, reader):
+    def __init__(self, reader, sector_map: dict):
         super().__init__()
-        self._reader  = reader
-        self._started = False
+        self._reader     = reader
+        self._sector_map = sector_map
+        self._started    = False
 
-    def do_read(self, force_slow: bool, settle_s: float) -> None:
+    def do_read(self, force_slow: bool, settle_s: float, strategies: list) -> None:
         if not self._started:
             try:
                 self._reader.start()
@@ -56,9 +75,20 @@ class _LiveDataWorker(QObject):
         try:
             headers, data = self._reader.read_merged(force_slow=force_slow)
         except Exception as exc:
-            self.failed.emit(str(exc)[:120])
+            self.failed.emit(f"Read error: {exc}"[:200])
             return
-        self.result.emit(headers, data)
+        headers, data = _inject_sector_rows(headers, data, self._sector_map)
+        try:
+            active = [s for s in strategies if s.get("active")]
+            if active:
+                from services.strategy_engine import apply_strategies
+                disp_headers, disp_data = apply_strategies(active, headers, data)
+            else:
+                disp_headers, disp_data = headers, data
+        except Exception as exc:
+            self.failed.emit(f"Strategy error: {exc}"[:200])
+            return
+        self.result.emit(headers, data, disp_headers, disp_data)
 
     def shutdown(self) -> None:
         if self._started:
@@ -123,7 +153,26 @@ class StrategyPickerPopup(QWidget):
             empty.setWordWrap(True)
             lay.addWidget(empty)
         else:
-            # Checkbox per strategy
+            # Search box — filters the checkbox list below by name, so a
+            # large strategy count stays navigable.
+            search = QLineEdit()
+            search.setPlaceholderText("Search strategies…")
+            search.setFixedHeight(28)
+            search.setFont(font_scale.font(font_scale.SMALL, False))
+            search.setStyleSheet(
+                f"QLineEdit{{background:{inp_bg};color:{txt};"
+                f"border:1px solid {bd};border-radius:6px;padding:0 8px;}}"
+                f"QLineEdit:focus{{border-color:{accent};}}"
+            )
+            search.textChanged.connect(self._filter_checks)
+            lay.addWidget(search)
+
+            # Checkbox per strategy, in a bounded, scrollable list so the
+            # popup doesn't grow off-screen when there are many strategies.
+            list_widget = QWidget()
+            list_lay = QVBoxLayout(list_widget)
+            list_lay.setContentsMargins(0, 0, 0, 0)
+            list_lay.setSpacing(2)
             for strat in self._strategies:
                 cb = QCheckBox(strat.get("name", "Unnamed"))
                 cb.setChecked(strat.get("active", True))
@@ -139,7 +188,16 @@ class StrategyPickerPopup(QWidget):
                     f"border-color:{accent};}}"
                 )
                 self._checks.append(cb)
-                lay.addWidget(cb)
+                list_lay.addWidget(cb)
+            list_lay.addStretch()
+
+            scroll = QScrollArea()
+            scroll.setWidget(list_widget)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setMaximumHeight(320)
+            scroll.setStyleSheet("QScrollArea{background:transparent;border:none;}")
+            lay.addWidget(scroll)
 
         # Divider
         div = QFrame()
@@ -161,6 +219,11 @@ class StrategyPickerPopup(QWidget):
         lay.addWidget(apply_btn)
 
         outer.addWidget(card)
+
+    def _filter_checks(self, text: str):
+        q = text.strip().lower()
+        for cb in self._checks:
+            cb.setVisible(q in cb.text().lower())
 
     def _apply(self):
         for i, cb in enumerate(self._checks):
@@ -327,7 +390,7 @@ class LiveViewerWindow(QWidget):
     """
 
     # Emitted from the GUI thread to drive work on the worker thread.
-    _request_read     = Signal(bool, float)   # force_slow, settle_seconds
+    _request_read     = Signal(bool, float, list)  # force_slow, settle_seconds, strategies
     _request_shutdown = Signal()              # release COM on the worker thread
     data_updated      = Signal(list, list)    # headers, data — for downstream consumers
 
@@ -369,6 +432,8 @@ class LiveViewerWindow(QWidget):
         self._idle_count         = 0       # consecutive no-change ticks
         self._worker             = None
         self._worker_thread      = None
+        self._initial_load_done  = False   # set on the first successful read
+        self._initial_render_done = False  # set once _render_initial_table has run
 
         self.setWindowTitle("Live Master View")
         self.resize(1300, 700)
@@ -499,6 +564,15 @@ class LiveViewerWindow(QWidget):
         self._table.setShowGrid(True)
         root.addWidget(self._table, 1)
 
+        # ── Bottom bar ────────────────────────────────────────────────────────
+        bottom = QHBoxLayout()
+        self._stock_count_lbl = QLabel("Stocks : 0")
+        self._stock_count_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._stock_count_lbl.setStyleSheet(f"color: {text_s};")
+        bottom.addWidget(self._stock_count_lbl)
+        bottom.addStretch()
+        root.addLayout(bottom)
+
         # ── Pulse timer ───────────────────────────────────────────────────────
         self._pulse_timer = QTimer(self)
         self._pulse_timer.setInterval(800)
@@ -515,9 +589,9 @@ class LiveViewerWindow(QWidget):
         self._refreshing = False   # re-entrancy guard so fast ticks don't pile up
 
         # Stateful reader: caches COM handles + slow sources (Reliable/Nifty).
-        # Shared by the synchronous initial load and the worker thread; only
-        # one of them touches it at a time (initial load completes before the
-        # worker thread starts polling).
+        # Used exclusively by the worker thread — including the very first
+        # read, so a slow ExternalImport "database" fetch never blocks the
+        # GUI thread even on initial load.
         self._reader = LiveDataReader(
             self._sharekhan_path, self._reliable_path, self._nifty_paths,
             self._script_name_data, expiry_date=self._expiry_date,
@@ -526,11 +600,12 @@ class LiveViewerWindow(QWidget):
             external_mode=self._external_mode,
         )
 
-        # Worker thread: all polled reads/merges run here so a slow read never
-        # blocks the UI.  Requests go out via _request_read; results come back
-        # via queued signals (thread-safe).
+        # Worker thread: all reads/merges AND strategy-formula computation run
+        # here so neither a slow read nor a large apply_strategies() call ever
+        # blocks the UI.  Requests go out via _request_read; results come
+        # back via queued signals (thread-safe).
         self._worker_thread = QThread(self)
-        self._worker        = _LiveDataWorker(self._reader)
+        self._worker        = _LiveDataWorker(self._reader, self._sector_map)
         self._worker.moveToThread(self._worker_thread)
         self._request_read.connect(self._worker.do_read)
         self._request_shutdown.connect(self._worker.shutdown)
@@ -587,6 +662,14 @@ class LiveViewerWindow(QWidget):
         # so it does NOT start COM here — COM is initialised and used solely on
         # the worker thread (COM apartment affinity).  This first read therefore
         # uses the disk fallback; the worker's COM reads take over thereafter.
+        #
+        # This is intentionally NOT routed through the worker thread like
+        # regular ticks are: doing so once made every construction dispatch
+        # real cross-thread work immediately, and tearing the window down
+        # (e.g. test teardown, or a user closing it right after opening)
+        # before that in-flight work finished crashed the process — Qt
+        # delivering a queued signal to a receiver mid-destruction. A
+        # synchronous first read has no such race.
         try:
             headers, data = self._reader.read_merged(force_slow=True)
         except Exception as exc:
@@ -595,22 +678,37 @@ class LiveViewerWindow(QWidget):
         headers, data = self._inject_sector(headers, data)
         self._headers = headers
         self._data    = data
+        self._initial_load_done = True
         # All columns visible by default
         self._visible_cols = set(range(len(headers)))
-        self._populate_table(data, changed_keys=set())
-        self._apply_sector_filter()
-        self._update_filter_btn_label()
+        # Defer the actual table build (strategy evaluation across every row
+        # plus creating thousands of QTableWidgetItems) to the next event-loop
+        # turn, so the window can be shown and painted first instead of
+        # blocking behind it — this synchronous build-before-show was what
+        # produced a blank / "Not Responding" window while it ran.
+        QTimer.singleShot(0, self._render_initial_table)
+
+    def _render_initial_table(self):
+        try:
+            self._populate_table(self._data, changed_keys=set())
+            self._apply_sector_filter()
+            self._update_filter_btn_label()
+        except Exception as exc:
+            # A malformed strategy (e.g. from a schema-less import) must not
+            # leave the window construction path half-finished — report it
+            # and keep the window usable instead of crashing/going blank.
+            from services.error_logging import error_logger
+            error_logger.exception("LMV initial render failed")
+            self._status_lbl.setText(f"Render error: {exc}")
+        finally:
+            # Set even on failure — otherwise a set_strategies() call after a
+            # bad initial render would wait forever for a render pass that
+            # already happened (see set_strategies below).
+            self._initial_render_done = True
 
     def _inject_sector(self, headers: list, data: list) -> tuple:
         """Prepend a Sector column to headers and every data row."""
-        scrip_idx = headers.index("Scrip Name") if "Scrip Name" in headers else -1
-        new_headers = ["Sector"] + list(headers)
-        new_data = []
-        for row in data:
-            scrip = row[scrip_idx] if scrip_idx >= 0 and scrip_idx < len(row) else ""
-            sector = self._sector_map.get(str(scrip).strip().upper(), "—")
-            new_data.append([sector] + list(row))
-        return new_headers, new_data
+        return _inject_sector_rows(headers, data, self._sector_map)
 
     def _refresh_from_disk(self):
         # Disk-based saves (e.g. Sharekhan export on macOS) may still be
@@ -622,29 +720,47 @@ class LiveViewerWindow(QWidget):
         # settle delay, keeping the LMV in lock-step with the sheet.
         self._request_refresh(settle=0.0)
 
-    def _request_refresh(self, settle: float):
+    def _request_refresh(self, settle: float, force: bool = False):
         # Skip if a previous read is still in flight, so fast ticks collapse
         # instead of queueing up and lagging behind.
         if self._refreshing or self._worker is None:
             return
         self._refreshing = True
-        self._request_read.emit(False, settle)
+        # Snapshot, not a live reference — the worker thread must never touch
+        # GUI-thread-owned state concurrently.
+        strategies_snapshot = list(self._filtered_strategies())
+        self._request_read.emit(force, settle, strategies_snapshot)
 
     def _on_read_failed(self, msg: str):
         self._refreshing = False
-        self._status_lbl.setText(f"Read error: {msg}")
+        self._status_lbl.setText(msg)
 
-    def _on_data_ready(self, headers: list, new_data: list):
+    def _on_data_ready(self, headers: list, new_data: list,
+                      disp_headers: list, disp_data: list):
         from datetime import datetime
         try:
-            headers, new_data = self._inject_sector(headers, new_data)
             self._data    = new_data
             self._headers = headers
-            self._populate_table(new_data, changed_keys=None)  # diff internally
+            if not self._initial_load_done:
+                self._initial_load_done = True
+                self._visible_cols = set(range(len(headers)))
+            # disp_headers/disp_data already have apply_strategies() applied
+            # (computed on the worker thread) — _populate_table only needs to
+            # turn them into Qt widgets here.
+            self._populate_table(new_data, changed_keys=None,
+                                 precomputed_disp=(disp_headers, disp_data))
             self._apply_sector_filter()
+            self._update_filter_btn_label()
             self._status_lbl.setText(f"Updated: {datetime.now().strftime('%H:%M:%S')}")
             self._adapt_poll_rate(getattr(self, "_last_change_count", 0))
             self.data_updated.emit(self._headers, self._data)
+        except Exception as exc:
+            # A bad tick (e.g. a malformed strategy formula) must not crash
+            # the poll loop or leave the table stuck half-rendered/blank —
+            # report it and keep polling; the next good tick self-heals it.
+            from services.error_logging import error_logger
+            error_logger.exception("LMV render failed for this tick")
+            self._status_lbl.setText(f"Render error: {exc}")
         finally:
             self._refreshing = False
 
@@ -677,7 +793,7 @@ class LiveViewerWindow(QWidget):
             return ""
         return str(val)
 
-    def _populate_table(self, data: list[list], changed_keys=set()):
+    def _populate_table(self, data: list[list], changed_keys=set(), precomputed_disp=None):
         """
         Render *data* into the table.
 
@@ -685,15 +801,25 @@ class LiveViewerWindow(QWidget):
         value changed are diffed against the table's current contents and
         flashed amber.  A real set (incl. the empty set) marks a structural
         re-render (theme/strategy/category change) where no highlight is wanted.
+
+        ``precomputed_disp``, when given, is the ``(disp_headers, disp_data)``
+        already computed by apply_strategies() on the worker thread (see
+        _LiveDataWorker.do_read / _on_data_ready) — the live-tick and initial-
+        load paths always pass this, so the O(rows x strategies x columns)
+        formula evaluation never runs on the GUI thread. Interactive paths
+        (toggling a strategy, changing category) omit it and compute inline
+        here instead, since those are one-off and already fast.
         """
         from services.strategy_engine import apply_strategies, get_cell_color
 
         highlight = changed_keys is None
         self._last_change_count = 0
 
-        # Apply active strategies — may extend headers and data
         active_strategies = [s for s in self._filtered_strategies() if s.get("active")]
-        if active_strategies:
+        if precomputed_disp is not None:
+            disp_headers, disp_data = precomputed_disp
+        elif active_strategies:
+            # Apply active strategies — may extend headers and data
             disp_headers, disp_data = apply_strategies(
                 active_strategies, self._headers, data
             )
@@ -725,6 +851,10 @@ class LiveViewerWindow(QWidget):
                 strat_col_defs.append(col)
 
         all_dicts = [dict(zip(disp_headers, row)) for row in disp_data]
+        # Memoizes SUM_ALL/AVG_ALL/etc. fmt-rule aggregates for this render
+        # pass, so a conditional-format rule referencing an aggregate is
+        # computed once instead of once per cell.
+        agg_cache: dict = {}
 
         # ── Fast path ───────────────────────────────────────────────────────
         # When only cell values changed (same headers, same row count, same
@@ -743,7 +873,7 @@ class LiveViewerWindow(QWidget):
             self._update_cells_in_place(
                 disp_data, all_dicts, strat_col_defs,
                 base_col_count, norm_bg, norm_txt, strat_hdr, get_cell_color,
-                highlight,
+                highlight, agg_cache,
             )
             self._update_strat_btn_label()
             return
@@ -775,6 +905,7 @@ class LiveViewerWindow(QWidget):
                 self._apply_cell_style(
                     item, c, val, row_dict, all_dicts, strat_col_defs,
                     base_col_count, norm_bg, norm_txt, strat_hdr, get_cell_color,
+                    agg_cache,
                 )
                 self._table.setItem(r, c, item)
 
@@ -835,14 +966,16 @@ class LiveViewerWindow(QWidget):
 
     def _apply_cell_style(self, item, c, val, row_dict, all_dicts,
                           strat_col_defs, base_col_count,
-                          norm_bg, norm_txt, strat_hdr, get_cell_color):
+                          norm_bg, norm_txt, strat_hdr, get_cell_color,
+                          agg_cache=None):
         """Set foreground/background for one cell, incl. strategy formatting."""
         item.setForeground(QBrush(norm_txt))
         item.setBackground(QBrush(norm_bg))
         strat_idx = c - base_col_count
         if 0 <= strat_idx < len(strat_col_defs):
             col_def = strat_col_defs[strat_idx]
-            cell_color = get_cell_color(col_def, val, row_dict, all_dicts)
+            cell_color = get_cell_color(col_def, val, row_dict, all_dicts,
+                                        agg_cache)
             if cell_color:
                 item.setBackground(QBrush(QColor(cell_color)))
                 qc = QColor(cell_color)
@@ -854,7 +987,7 @@ class LiveViewerWindow(QWidget):
     def _update_cells_in_place(self, disp_data, all_dicts,
                                strat_col_defs, base_col_count,
                                norm_bg, norm_txt, strat_hdr, get_cell_color,
-                               highlight):
+                               highlight, agg_cache=None):
         """
         Update existing QTableWidgetItems in place (no recreation).
 
@@ -884,6 +1017,7 @@ class LiveViewerWindow(QWidget):
                 self._apply_cell_style(
                     item, c, val, row_dict, all_dicts, strat_col_defs,
                     base_col_count, norm_bg, norm_txt, strat_hdr, get_cell_color,
+                    agg_cache,
                 )
 
                 if not highlight:
@@ -927,9 +1061,23 @@ class LiveViewerWindow(QWidget):
     # ── Strategy picker ───────────────────────────────────────────────────────
 
     def set_strategies(self, strategies: list):
-        """Inject strategies from StrategyBuilderScreen."""
+        """Inject strategies from StrategyBuilderScreen.
+
+        Called synchronously right after construction+show() (see
+        DataImportScreen._run_watcher / app_window._on_lmv_ready) — i.e.
+        typically before the event loop has had a turn to run the deferred
+        initial render scheduled by _load_initial. Rendering here too would
+        both re-block the GUI thread (the exact freeze _load_initial's
+        QTimer.singleShot defers around) and duplicate that render's work.
+        The deferred render reads self._strategies fresh when it runs, so
+        setting it and returning is enough — it picks the assignment up in
+        its one pass. Once that first render has happened, later calls (if
+        any) render immediately as before.
+        """
         self._strategies = [dict(s) for s in strategies]
         self._update_strat_btn_label()
+        if not self._initial_render_done:
+            return
         self._populate_table(self._data, set())
         self._apply_sector_filter()
 
@@ -979,9 +1127,19 @@ class LiveViewerWindow(QWidget):
 
     # ── Filter panel ──────────────────────────────────────────────────────────
 
+    def _current_column_labels(self) -> list:
+        """Header text for every column actually rendered right now — base
+        merged columns plus any active strategy's output columns — read
+        straight from the table so it always matches what's on screen,
+        regardless of whether strategies are active."""
+        return [
+            self._table.horizontalHeaderItem(c).text() if self._table.horizontalHeaderItem(c) else ""
+            for c in range(self._table.columnCount())
+        ]
+
     def _show_filter_panel(self):
         sectors = sorted(set(self._sector_map.values()))
-        col_total   = len(self._headers)
+        col_total   = self._table.columnCount()
         col_visible = len(self._visible_cols)
         popup = FilterPanelPopup(
             current_category=self._cat_combo.currentText(),
@@ -1004,16 +1162,18 @@ class LiveViewerWindow(QWidget):
     def _clear_all_filters(self):
         self._cat_combo.setCurrentText("All")
         self._sector_combo.setCurrentText("All")
-        if self._headers:
-            self._visible_cols = set(range(len(self._headers)))
-            for c in range(len(self._headers)):
+        col_count = self._table.columnCount()
+        if col_count:
+            self._visible_cols = set(range(col_count))
+            for c in range(col_count):
                 self._table.setColumnHidden(c, False)
         self._update_filter_btn_label()
 
     def _show_col_filter(self):
-        if not self._headers:
+        headers = self._current_column_labels()
+        if not headers:
             return
-        popup = ColumnFilterPopup(self._headers, self._visible_cols, self._theme, self)
+        popup = ColumnFilterPopup(headers, self._visible_cols, self._theme, self)
         popup.columns_changed.connect(self._apply_col_filter)
         btn_pos = self._filter_btn.mapToGlobal(self._filter_btn.rect().bottomLeft())
         popup.adjustSize()
@@ -1025,7 +1185,7 @@ class LiveViewerWindow(QWidget):
         if "Scrip Name" in self._headers:
             visible.add(self._headers.index("Scrip Name"))
         self._visible_cols = visible
-        for c in range(len(self._headers)):
+        for c in range(self._table.columnCount()):
             self._table.setColumnHidden(c, c not in self._visible_cols)
         self._update_filter_btn_label()
 
@@ -1043,7 +1203,7 @@ class LiveViewerWindow(QWidget):
             active += 1
         if self._sector_combo.currentText() != "All":
             active += 1
-        total   = len(self._headers)
+        total   = self._table.columnCount()
         visible = len(self._visible_cols)
         if total > 0 and visible < total:
             active += 1
@@ -1145,6 +1305,17 @@ class LiveViewerWindow(QWidget):
                 item = self._table.item(r, 0)   # Sector is always col 0
                 self._table.setRowHidden(r, item is None or item.text() != selected)
         self._update_filter_btn_label()
+        self._update_stock_count_label()
+
+    def _update_stock_count_label(self):
+        """Count of currently visible (non-filtered-out) rows — kept in sync
+        wherever row visibility can change (sector filter, strategy apply,
+        category change, live ticks all end in _apply_sector_filter)."""
+        visible = sum(
+            1 for r in range(self._table.rowCount())
+            if not self._table.isRowHidden(r)
+        )
+        self._stock_count_lbl.setText(f"Stocks : {visible}")
 
     # ── Controls ─────────────────────────────────────────────────────────────
 

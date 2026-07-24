@@ -9,12 +9,17 @@ ExternalImport View popup, the Live Master View merge) treat "file" and
 "database" interchangeably without knowing which one is active.
 """
 
+import concurrent.futures
 from datetime import date, timedelta
 
 from api import historic_api, holidays_api
 from services import config_store, formula_engine, formula_tokens
 
 FORMULA_LOOKBACK_DAYS = 100
+# Historic snapshot fetches are independent, read-only GETs — fire them
+# concurrently instead of one-by-one, especially significant on a cold
+# snapshot_cache (e.g. the first fetch of an LMV session).
+_MAX_PARALLEL_SNAPSHOT_FETCHES = 8
 
 
 def _load_custom_defs() -> dict:
@@ -37,17 +42,19 @@ def _load_custom_defs() -> dict:
     return custom_defs
 
 
-def read_external_import_db(target: date = None) -> tuple[list, list]:
+def read_external_import_db(target: date = None,
+                            snapshot_cache: dict | None = None) -> tuple[list, list]:
     """Return (headers, rows) computed as of ``target`` (default: today).
 
     Returns ([], []) if no historic data has been uploaded yet. Network/API
     errors propagate to the caller — this function has no UI concerns.
     """
-    headers, rows, _ = _fetch(target)
+    headers, rows, _ = _fetch(target, snapshot_cache)
     return headers, rows
 
 
-def read_external_import_db_with_live_baseline(target: date = None) -> tuple[list, list, dict]:
+def read_external_import_db_with_live_baseline(
+        target: date = None, snapshot_cache: dict | None = None) -> tuple[list, list, dict]:
     """Like read_external_import_db, but also returns the per-symbol live-
     overlay baseline (see formula_engine.compute_live_baseline_for_symbol),
     keyed by the same ``symbol`` string as each row's own first column.
@@ -56,10 +63,10 @@ def read_external_import_db_with_live_baseline(target: date = None) -> tuple[lis
     with today's live Sharekhan tick — the static ExternalImport "database"
     preview popup uses read_external_import_db instead and never needs it.
     """
-    return _fetch(target)
+    return _fetch(target, snapshot_cache)
 
 
-def _fetch(target: date = None) -> tuple[list, list, dict]:
+def _fetch(target: date = None, snapshot_cache: dict | None = None) -> tuple[list, list, dict]:
     target = target or date.today()
     date_from = target - timedelta(days=FORMULA_LOOKBACK_DAYS)
 
@@ -78,10 +85,37 @@ def _fetch(target: date = None) -> tuple[list, list, dict]:
         return [], [], {}
 
     latest_available = available_dates[-1]
+
+    # Every date except the latest is a finalized historic upload that won't
+    # change tick to tick — reuse it from the caller-owned cache (e.g. one
+    # per live LiveDataReader session) instead of re-fetching over HTTP on
+    # every ~1s slow-source refresh. The latest date is always re-fetched
+    # fresh, same as before, in case it's still being amended. Whatever isn't
+    # already cached gets fetched in parallel — these are independent,
+    # read-only GETs, so there's no reason to wait for one before starting
+    # the next (this is what makes a cold cache, e.g. the first fetch of an
+    # LMV session, slow otherwise).
+    to_fetch = [
+        d for d in available_dates
+        if d == latest_available or snapshot_cache is None or d not in snapshot_cache
+    ]
+    fetched = {}
+    if to_fetch:
+        workers = min(_MAX_PARALLEL_SNAPSHOT_FETCHES, len(to_fetch))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            future_to_date = {pool.submit(historic_api.get_snapshot, d): d for d in to_fetch}
+            for future in concurrent.futures.as_completed(future_to_date):
+                fetched[future_to_date[future]] = future.result()
+
     raw_by_date = {}
     display_names = {}
     for d in available_dates:
-        snapshot = historic_api.get_snapshot(d)
+        if d in fetched:
+            snapshot = fetched[d]
+            if snapshot_cache is not None and d != latest_available:
+                snapshot_cache[d] = snapshot
+        else:
+            snapshot = snapshot_cache[d]
         stocks = snapshot.get("stocks", [])
         raw_by_date[d] = {s["symbol"]: s.get("metrics", {}) for s in stocks}
         if d == latest_available:

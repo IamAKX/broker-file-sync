@@ -1,6 +1,6 @@
 import font_scale
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QPushButton, QLineEdit
 )
 from PySide6.QtCore import Qt
@@ -82,11 +82,25 @@ class HistoricDataViewer(QWidget):
         for r, row in enumerate(rows):
             for c in range(len(headers)):
                 value = row[c] if c < len(row) else ""
-                item = QTableWidgetItem("" if value is None else str(value))
+                if value is None:
+                    cell_text = ""
+                elif isinstance(value, float):
+                    cell_text = f"{value:.4f}"
+                else:
+                    cell_text = str(value)
+                item = QTableWidgetItem(cell_text)
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 self._table.setItem(r, c, item)
 
         layout.addWidget(self._table, 1)
+
+        bottom = QHBoxLayout()
+        self._stock_count_lbl = QLabel(f"Stocks : {len(rows)}")
+        self._stock_count_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._stock_count_lbl.setStyleSheet(f"color: {text_s};")
+        bottom.addWidget(self._stock_count_lbl)
+        bottom.addStretch()
+        layout.addLayout(bottom)
 
     def _show_col_filter(self):
         if not self._headers:
@@ -113,6 +127,14 @@ class HistoricDataViewer(QWidget):
             item = self._table.item(row, self._symbol_col)
             match = not query or (item is not None and query in item.text().lower())
             self._table.setRowHidden(row, not match)
+        self._update_stock_count_label()
+
+    def _update_stock_count_label(self):
+        visible = sum(
+            1 for r in range(self._table.rowCount())
+            if not self._table.isRowHidden(r)
+        )
+        self._stock_count_lbl.setText(f"Stocks : {visible}")
 
     def refresh_theme(self):
         self._table.repaint()
