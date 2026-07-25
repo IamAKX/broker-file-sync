@@ -383,8 +383,9 @@ def _evaluate_verbose(tokens: list, row_data: dict, all_data: list,
                       self_value=None):
     """Like evaluate() but returns (result, error). error is None on success.
 
-    Unlike evaluate(), this surfaces the real Python exception so the compile
-    test can report a specific, correct reason for failure.
+    Unlike evaluate(), this surfaces the real exception object (rather than
+    swallowing it) so the compile test can translate it into a plain-language
+    reason for failure — see _friendly_exception.
     """
     if not tokens:
         return None, "Formula is empty."
@@ -394,7 +395,30 @@ def _evaluate_verbose(tokens: list, row_data: dict, all_data: list,
     try:
         return eval(expr, _EVAL_BUILTINS), None   # noqa: S307
     except Exception as exc:
-        return None, f"{type(exc).__name__}: {exc}"
+        return None, exc
+
+
+def _friendly_exception(exc) -> str:
+    """Translate a raw Python exception from evaluating a formula into a
+    plain-language explanation a non-technical user can act on."""
+    if isinstance(exc, ZeroDivisionError):
+        return ("The formula divides by zero somewhere. Check the column or "
+                "value used as the divisor — it's zero (or empty) for this row.")
+    if isinstance(exc, TypeError):
+        if "NoneType" in str(exc):
+            return ("The formula tried to do math with an empty cell — one "
+                    "of the columns it uses has no value for this row. "
+                    "Check the data in that row of your sheet.")
+        return ("The formula combines values that don't work together — for "
+                "example mixing text with a number. Check the columns and "
+                "operators (+, -, *, /) you're using.")
+    if isinstance(exc, ValueError):
+        return ("One of the values isn't in a format the formula expects — "
+                "for example text where a number was needed. Check the data "
+                "in the columns this formula uses.")
+    if isinstance(exc, (KeyError, IndexError)):
+        return "The formula refers to something that isn't available in the data."
+    return f"Something went wrong while calculating the formula: {exc}"
 
 
 def _referenced_columns(tokens: list) -> list:
@@ -563,12 +587,18 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     row_data = row_data or {}
     all_data = all_data or []
 
-    # 1. Structural check — does the expression even parse?
+    # 1. Structural check — does the expression even parse? (The Expression
+    # Editor already checks brackets/parentheses against the raw text before
+    # reaching here, so this is mainly a safety net for tokens built some
+    # other way, e.g. a JSON import.)
     expr = _tokens_to_expr(tokens, row_data, all_data, self_value)
     try:
         compile(expr, "<formula>", "eval")  # noqa: S307
-    except SyntaxError as exc:
-        return False, f"Syntax error: {exc}"
+    except SyntaxError:
+        return False, ("This formula isn't structured correctly. Check that "
+                       "every '(' has a matching ')', every '[' has a "
+                       "matching ']', and that every operator (+, -, *, /) "
+                       "has a value on both sides.")
 
     # 2. A THIS token needs the column's own value to test against.
     uses_self = any(tok.get("type") == "self" for tok in tokens)
@@ -588,18 +618,20 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     if unknown:
         names = ", ".join(f"[{c}]" for c in unknown)
         return False, (f"Unknown column(s): {names}. "
-                       f"Check the column name against the loaded sheet.")
+                       f"This name doesn't match any column in your data — "
+                       f"check the spelling, spaces and capitalization, or "
+                       f"pick it from the Fields list instead of typing it.")
 
     # 5. Evaluate against the real first row, surfacing the actual error.
     result, err = _evaluate_verbose(tokens, row_data, all_data, self_value)
     if err:
-        return False, err
+        return False, (_friendly_exception(err) if isinstance(err, Exception) else err)
 
     if result is None:
         # Formula ran but produced no value — usually an empty cell feeding a
         # numeric function in this particular row.
-        return False, ("Formula evaluated to None on the first row "
-                       "(an input cell is likely empty). "
-                       "Verify the data in the loaded sheet.")
+        return False, ("This formula didn't produce a result for the first "
+                       "row — usually because one of the cells it uses is "
+                       "empty. Check the data in that row of your sheet.")
 
     return True, str(result)

@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QTextEdit, QFrame, QScrollArea, QSizePolicy, QMessageBox,
 )
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QColor, QTextCursor
+from PySide6.QtGui import QFont, QColor, QTextCursor, QTextCharFormat
 
 # ── Catalogues ────────────────────────────────────────────────────────────────
 
@@ -266,9 +266,82 @@ def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
     return m.end(), col
 
 
+class FormulaParseError(ValueError):
+    """A parse failure that also knows which part of the formula text is at
+    fault, so the editor can point the user straight at it instead of just
+    describing the problem in words. ``start``/``end`` are character offsets
+    into the original text (end exclusive) suitable for highlighting."""
+
+    def __init__(self, message: str, start: int, end: int | None = None):
+        super().__init__(message)
+        self.start = start
+        self.end = end if end is not None else start + 1
+
+
+def _find_structural_error(text: str):
+    """Scan the raw formula text for an unclosed/unmatched '[', ']', '(' or
+    ')' — the single most common mistake non-technical users make — and
+    report exactly where it is, in plain language.
+
+    Returns (message, start, end) for the first problem found, or None if
+    brackets and parentheses all balance out (the rest of parsing may still
+    fail for other reasons — this is just the first, cheapest check).
+    """
+    stack = []  # [(char, position), ...]
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in ('"', "'"):
+            close = text.find(ch, i + 1)
+            if close == -1:
+                kind = "double" if ch == '"' else "single"
+                return (f"There's a {kind} quote at position {i + 1} that's "
+                        f"never closed. Add a matching {ch} to finish it.",
+                        i, n)
+            i = close + 1
+            continue
+        if ch in "[(":
+            stack.append((ch, i))
+        elif ch == "]":
+            if stack and stack[-1][0] == "[":
+                stack.pop()
+            elif stack and stack[-1][0] == "(":
+                open_ch, open_pos = stack[-1]
+                return (f"The '(' at position {open_pos + 1} is closed with ']' "
+                        f"instead of ')'. Use ')' to close it.", open_pos, i + 1)
+            else:
+                return (f"There's a closing bracket ']' at position {i + 1} "
+                        f"with no '[' before it to match. Remove it, or add a "
+                        f"'[' where the field should start.", i, i + 1)
+        elif ch == ")":
+            if stack and stack[-1][0] == "(":
+                stack.pop()
+            elif stack and stack[-1][0] == "[":
+                open_ch, open_pos = stack[-1]
+                return (f"The '[' at position {open_pos + 1} is closed with ')' "
+                        f"instead of ']'. Use ']' to close a field name.",
+                        open_pos, i + 1)
+            else:
+                return (f"There's a closing parenthesis ')' at position {i + 1} "
+                        f"with no '(' before it to match. Remove it, or add a "
+                        f"'(' where the group should start.", i, i + 1)
+        i += 1
+
+    if stack:
+        ch, pos = stack[-1]
+        if ch == "[":
+            return (f"The field starting with '[' at position {pos + 1} is "
+                     f"missing its closing ']'. Add a ']' right after the "
+                     f"column name, e.g. [Open].", pos, n)
+        return (f"The '(' at position {pos + 1} is missing its closing ')'. "
+                f"Add a ')' to close it.", pos, n)
+    return None
+
+
 def parse_expression_text(text: str, known_headers=None) -> list:
     """Parse the preview box's plain text into the structured token list.
-    Raises ValueError with a human-readable message on malformed input.
+    Raises FormulaParseError (a ValueError) with a human-readable message
+    and the character span at fault on malformed input.
 
     ``known_headers``, when given, disambiguates "[Col of Symbol]" from a
     literal header that happens to contain " of " — see _split_field_of.
@@ -278,7 +351,11 @@ def parse_expression_text(text: str, known_headers=None) -> list:
     while pos < n:
         m = _TOKEN_RE.match(text, pos)
         if not m:
-            raise ValueError(f"Unexpected character {text[pos]!r} at position {pos + 1}")
+            raise FormulaParseError(
+                f"The character '{text[pos]}' at position {pos + 1} isn't "
+                f"something this formula understands. Remove it or fix the typo.",
+                pos, pos + 1,
+            )
         kind = m.lastgroup
         val = m.group(kind)
         pos = m.end()
@@ -314,9 +391,12 @@ def parse_expression_text(text: str, known_headers=None) -> list:
                         tokens.append({"type": "func", "value": f"{val}("})
                         pos = look + 1
                 else:
-                    raise ValueError(
-                        f"Unknown identifier '{val}' — expected a column like [Name], "
-                        f"a function call like {val}(...), or a constant."
+                    raise FormulaParseError(
+                        f"'{val}' isn't a recognized column, function, or word. "
+                        f"If you meant a column, wrap it in brackets like [{val}]. "
+                        f"If you meant a function, check the spelling — a function "
+                        f"name must be followed by '(', e.g. {val}(...).",
+                        pos - len(val), pos,
                     )
         elif kind in ("op3", "op2", "op1"):
             tokens.append({"type": "op", "value": val})
@@ -787,18 +867,78 @@ class ExpressionEditorDialog(QDialog):
         self._compiled_ok = False
         self._save_btn.setEnabled(False)
         self._set_preview_style(compiled=False)
+        self._clear_error_highlight()
+
+    # ── Error highlighting ───────────────────────────────────────────────────
+    # Points the user at exactly the part of the formula that's wrong instead
+    # of leaving them to hunt for it — a red highlight under the offending
+    # text in the preview box, alongside the plain-language message.
+
+    def _clear_error_highlight(self):
+        self._preview_edit.setExtraSelections([])
+
+    def _highlight_error_span(self, start: int, end: int):
+        text_len = len(self._preview_edit.toPlainText())
+        start = max(0, min(start, text_len))
+        end = max(start, min(end, text_len))
+        if start == end:
+            self._clear_error_highlight()
+            return
+        cursor = self._preview_edit.textCursor()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        fmt = QTextCharFormat()
+        fmt.setBackground(QColor("#c0392b"))
+        fmt.setForeground(QColor("#ffffff"))
+        sel = QTextEdit.ExtraSelection()
+        sel.cursor = cursor
+        sel.format = fmt
+        self._preview_edit.setExtraSelections([sel])
+
+    _UNKNOWN_COL_RE = re.compile(r"^Unknown column\(s\):\s*(.+?)\.")
+
+    def _highlight_named_column(self, msg: str, text: str):
+        """Best-effort: compile_check's "Unknown column(s): [X], [Y]." names
+        the offending column(s) but not their text position (it only sees
+        tokens, not the original text) — find the first one in the preview
+        and highlight it there."""
+        m = self._UNKNOWN_COL_RE.match(msg)
+        if not m:
+            return
+        first = m.group(1).split(",")[0].strip()
+        idx = text.find(first)
+        if idx != -1:
+            self._highlight_error_span(idx, idx + len(first))
 
     # ── Compile & Test ────────────────────────────────────────────────────────
 
     def _compile_and_test(self):
         from services.strategy_engine import compile_check
+        self._clear_error_highlight()
+        text = self._preview_edit.toPlainText()
         known_headers = self._lmv_headers + self._strategy_col_headers
+
+        struct_err = _find_structural_error(text)
+        if struct_err:
+            msg, start, end = struct_err
+            self._compiled_ok = False
+            self._save_btn.setEnabled(False)
+            self._highlight_error_span(start, end)
+            QMessageBox.warning(self, "Formula needs a fix", msg)
+            return
+
         try:
-            tokens = parse_expression_text(self._preview_edit.toPlainText(), known_headers)
+            tokens = parse_expression_text(text, known_headers)
+        except FormulaParseError as exc:
+            self._compiled_ok = False
+            self._save_btn.setEnabled(False)
+            self._highlight_error_span(exc.start, exc.end)
+            QMessageBox.warning(self, "Formula needs a fix", str(exc))
+            return
         except ValueError as exc:
             self._compiled_ok = False
             self._save_btn.setEnabled(False)
-            QMessageBox.warning(self, "Compile Error", f"Formula error:\n\n{exc}")
+            QMessageBox.warning(self, "Formula needs a fix", str(exc))
             return
 
         # Merge computed strategy-column values into the test row so a row
@@ -815,12 +955,14 @@ class ExpressionEditorDialog(QDialog):
             self._compiled_ok = True
             self._save_btn.setEnabled(True)
             self._set_preview_style(compiled=True)
-            QMessageBox.information(self, "Compile OK",
-                                    f"Formula compiled successfully.\n\nResult on first row: {msg}")
+            QMessageBox.information(self, "Formula looks good",
+                                    f"This formula works. For the first row in "
+                                    f"your sheet, it works out to: {msg}")
         else:
             self._compiled_ok = False
             self._save_btn.setEnabled(False)
-            QMessageBox.warning(self, "Compile Error", f"Formula error:\n\n{msg}")
+            self._highlight_named_column(msg, text)
+            QMessageBox.warning(self, "Formula needs a fix", msg)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
