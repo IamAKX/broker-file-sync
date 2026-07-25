@@ -135,8 +135,12 @@ def generate_master(
     for row in rs_rows:
         full_name = _strip_rolling_suffix(_normalise(row[_RS_FK_IDX]))
         symbol = name_to_symbol.get(full_name.lower())
-        if symbol:
-            key = _normalise(symbol).upper()
+        # See services.live_merge.merge_broker_sources' identical fallback:
+        # a "database"-sourced ReliableSoftware row already carries the
+        # resolved symbol in this column, not a full name, so it falls
+        # through to a direct match here.
+        key = _normalise(symbol).upper() if symbol else full_name.upper()
+        if key:
             rs_lookup[key] = row
 
     # NiftyInvest: symbol is already the key

@@ -1,4 +1,5 @@
 import font_scale
+import html
 import os
 import sys
 import time
@@ -233,6 +234,68 @@ class StrategyPickerPopup(QWidget):
         self.close()
 
 
+class _StrategyNamesPopup(QWidget):
+    """Read-only, vertically scrollable list of every active strategy name —
+    opened from LiveViewerWindow's bottom-right "view more" link when there
+    are more active strategies than fit inline (see
+    LiveViewerWindow._update_strategy_names_label)."""
+
+    _MAX_HEIGHT = 260
+
+    def __init__(self, names: list, theme=None, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self._names = names
+        self._theme = theme
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._build()
+
+    def _build(self):
+        t      = self._theme
+        bg     = t.get("card_bg")        if t else "#1c2128"
+        border = t.get("border")         if t else "#30363d"
+        txt    = t.get("text_primary")   if t else "#e6edf3"
+        txt_s  = t.get("text_secondary") if t else "#8b949e"
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        card = QFrame()
+        card.setFixedWidth(260)
+        card.setStyleSheet(
+            f"QFrame {{ background: {bg}; border: 1px solid {border}; border-radius: 10px; }}"
+        )
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(8)
+
+        title = QLabel(f"Active Strategies ({len(self._names)})")
+        title.setFont(font_scale.font(font_scale.MEDIUM, True))
+        title.setStyleSheet(f"color: {txt}; border: none;")
+        lay.addWidget(title)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFixedHeight(self._MAX_HEIGHT)
+        scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
+        list_widget = QWidget()
+        list_widget.setStyleSheet("background: transparent;")
+        list_lay = QVBoxLayout(list_widget)
+        list_lay.setContentsMargins(0, 0, 0, 0)
+        list_lay.setSpacing(4)
+        for name in self._names:
+            lbl = QLabel(name)
+            lbl.setFont(font_scale.font(font_scale.SMALL, False))
+            lbl.setStyleSheet(f"color: {txt_s}; border: none;")
+            lbl.setWordWrap(True)
+            list_lay.addWidget(lbl)
+        list_lay.addStretch()
+        scroll.setWidget(list_widget)
+        lay.addWidget(scroll)
+
+        outer.addWidget(card)
+
+
 class FilterPanelPopup(QWidget):
     """Unified floating filter panel — columns, category, and sector in one place."""
 
@@ -343,7 +406,7 @@ class FilterPanelPopup(QWidget):
 
         # ── Category row ──────────────────────────────────────────────────────
         cat_combo = QComboBox()
-        cat_combo.addItems(["All", "Daily", "Weekly", "Monthly"])
+        cat_combo.addItems(["All", "Daily", "Weekly", "Monthly", "Common"])
         cat_combo.setCurrentText(self._current_category)
         cat_combo.setFixedHeight(32)
         cat_combo.setFont(font_scale.font(font_scale.SMALL, False))
@@ -398,6 +461,8 @@ class LiveViewerWindow(QWidget):
                  nifty_paths, script_name_data: list,
                  expiry_date=None, external_path=None,
                  market_profile_path=None, external_mode: str = "file",
+                 reliable_mode: str = "file", nifty_mode: str = "file",
+                 market_profile_mode: str = "file",
                  theme=None, controller=None, parent=None):
         super().__init__(parent)
         self._sharekhan_path   = sharekhan_path
@@ -406,6 +471,9 @@ class LiveViewerWindow(QWidget):
         self._nifty_paths      = nifty_paths
         self._external_path    = external_path
         self._external_mode    = external_mode
+        self._reliable_mode    = reliable_mode
+        self._nifty_mode       = nifty_mode
+        self._market_profile_mode = market_profile_mode
         self._market_profile_path = market_profile_path
         self._script_name_data = script_name_data
         self._expiry_date      = expiry_date
@@ -473,7 +541,7 @@ class LiveViewerWindow(QWidget):
         # Hidden combos — keep as instance attrs so existing logic / tests can
         # read their current selection without touching the toolbar layout.
         self._cat_combo = QComboBox(self)
-        self._cat_combo.addItems(["All", "Daily", "Weekly", "Monthly"])
+        self._cat_combo.addItems(["All", "Daily", "Weekly", "Monthly", "Common"])
         self._cat_combo.setCurrentText("All")
         self._cat_combo.hide()
         self._cat_combo.currentTextChanged.connect(self._on_category_changed)
@@ -571,6 +639,13 @@ class LiveViewerWindow(QWidget):
         self._stock_count_lbl.setStyleSheet(f"color: {text_s};")
         bottom.addWidget(self._stock_count_lbl)
         bottom.addStretch()
+        self._strategy_names_lbl = QLabel("")
+        self._strategy_names_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._strategy_names_lbl.setStyleSheet(f"color: {text_s};")
+        self._strategy_names_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self._strategy_names_lbl.linkActivated.connect(self._show_strategy_names_popup)
+        self._all_active_strategy_names: list = []
+        bottom.addWidget(self._strategy_names_lbl)
         root.addLayout(bottom)
 
         # ── Pulse timer ───────────────────────────────────────────────────────
@@ -598,6 +673,8 @@ class LiveViewerWindow(QWidget):
             use_com=self._use_com, external_path=self._external_path,
             market_profile_path=self._market_profile_path,
             external_mode=self._external_mode,
+            reliable_mode=self._reliable_mode, nifty_mode=self._nifty_mode,
+            market_profile_mode=self._market_profile_mode,
         )
 
         # Worker thread: all reads/merges AND strategy-formula computation run
@@ -1124,6 +1201,34 @@ class LiveViewerWindow(QWidget):
             self._strat_btn.setText("⚡  Strategies  off")
         else:
             self._strat_btn.setText(f"⚡  Strategies  {active}/{total}")
+        self._update_strategy_names_label()
+
+    _MAX_INLINE_STRATEGY_NAMES = 10
+
+    def _update_strategy_names_label(self):
+        """Bottom-right counterpart to the bottom-left stock count — names
+        the currently active (applied) strategies, same font/style as
+        self._stock_count_lbl. Beyond _MAX_INLINE_STRATEGY_NAMES, the extra
+        names are truncated inline and a "view more" link opens the full,
+        scrollable list (see _show_strategy_names_popup)."""
+        names = [s.get("name", "Unnamed") for s in self._filtered_strategies() if s.get("active")]
+        self._all_active_strategy_names = names
+        if not names:
+            self._strategy_names_lbl.setText("")
+            return
+        shown = names[:self._MAX_INLINE_STRATEGY_NAMES]
+        text = f"Strategies : {', '.join(html.escape(n) for n in shown)}"
+        if len(names) > self._MAX_INLINE_STRATEGY_NAMES:
+            accent = self._theme.get("accent") if self._theme else "#39d353"
+            text += f", <a href='more' style='color:{accent};'>view more</a>"
+        self._strategy_names_lbl.setText(text)
+
+    def _show_strategy_names_popup(self, _link: str):
+        popup = _StrategyNamesPopup(self._all_active_strategy_names, self._theme, self)
+        pos = self._strategy_names_lbl.mapToGlobal(self._strategy_names_lbl.rect().topRight())
+        popup.adjustSize()
+        popup.move(pos.x() - popup.width(), pos.y() - popup.height())
+        popup.show()
 
     # ── Filter panel ──────────────────────────────────────────────────────────
 

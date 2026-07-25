@@ -537,26 +537,36 @@ def test_live_viewer_accepts_external_path(qapp, tmp_path, monkeypatch):
     assert lmv._external_path is not None
 
 
-# ── ExternalImport file/database source toggle ─────────────────────────────────
+# ── global File/database source toggle ──────────────────────────────────────
 
-def test_external_import_card_has_source_toggle(qapp):
+def test_data_import_has_single_global_source_toggle(qapp):
     from app import AppController
     from screens.data_import import DataImportScreen
     screen = DataImportScreen(AppController(qapp))
-    card = screen._cards["ExternalImport"]
-    assert card._show_source_toggle is True
-    assert card._source_mode == "file"
-    assert card._browse_btn.text() == "Browse"
-
-
-def test_other_cards_have_no_source_toggle(qapp):
-    from app import AppController
-    from screens.data_import import DataImportScreen
-    screen = DataImportScreen(AppController(qapp))
-    for broker in ["Sharekhan", "ReliableSoftware", "NiftyInvest", "MarketProfile"]:
+    assert hasattr(screen, "_source_toggle")
+    assert screen._source_toggle.isChecked() is False
+    for broker in ["Sharekhan", "ReliableSoftware", "NiftyInvest",
+                   "ExternalImport", "MarketProfile"]:
         card = screen._cards[broker]
-        assert card._show_source_toggle is False
         assert not hasattr(card, "_source_toggle")
+        assert card._source_mode == "file"
+        assert card._browse_btn.text() == "Browse"
+
+
+def test_toggling_global_switch_leaves_sharekhan_in_file_mode(qapp):
+    from app import AppController
+    from screens.data_import import DataImportScreen
+    screen = DataImportScreen(AppController(qapp))
+    screen._on_global_source_toggled(True)
+    assert screen._cards["Sharekhan"]._source_mode == "file"
+    for broker in ["ReliableSoftware", "NiftyInvest", "ExternalImport", "MarketProfile"]:
+        assert screen._cards[broker]._source_mode == "database"
+        assert screen._cards[broker]._browse_btn.text() == "View"
+
+    screen._on_global_source_toggled(False)
+    for broker in ["ReliableSoftware", "NiftyInvest", "ExternalImport", "MarketProfile"]:
+        assert screen._cards[broker]._source_mode == "file"
+        assert screen._cards[broker]._browse_btn.text() == "Browse"
 
 
 def test_toggling_to_database_renames_browse_button_to_view(qapp):
@@ -564,11 +574,11 @@ def test_toggling_to_database_renames_browse_button_to_view(qapp):
     from screens.data_import import DataImportScreen
     screen = DataImportScreen(AppController(qapp))
     card = screen._cards["ExternalImport"]
-    card._on_source_toggled(True)
+    card.set_source_mode("database")
     assert card._source_mode == "database"
     assert card._browse_btn.text() == "View"
 
-    card._on_source_toggled(False)
+    card.set_source_mode("file")
     assert card._source_mode == "file"
     assert card._browse_btn.text() == "Browse"
 
@@ -618,23 +628,23 @@ def test_database_mode_calculates_and_shows_table(qapp, monkeypatch):
 
     screen = DataImportScreen(AppController(qapp))
     card = screen._cards["ExternalImport"]
-    card._on_source_toggled(True)
+    card.set_source_mode("database")
     card._on_primary_action()
 
-    assert isinstance(card._formula_viewer, HistoricDataViewer)
-    assert card._formula_viewer._headers == ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES
-    assert card._formula_viewer._table.rowCount() == 1
-    assert card._formula_viewer._table.item(0, 0).text() == "INFY"
+    assert isinstance(card._preview_viewer, HistoricDataViewer)
+    assert card._preview_viewer._headers == ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES
+    assert card._preview_viewer._table.rowCount() == 1
+    assert card._preview_viewer._table.item(0, 0).text() == "INFY"
     # DAY TO must be non-blank — (Quantity*AvgRate)/1e7 * abs(DiffPcnt)/100 is fully known
-    day_to_col = card._formula_viewer._headers.index("DAY TO")
-    assert card._formula_viewer._table.item(0, day_to_col).text() != ""
+    day_to_col = card._preview_viewer._headers.index("DAY TO")
+    assert card._preview_viewer._table.item(0, day_to_col).text() != ""
     # Browse button restored to "View" after the (synchronous) load completes
     assert card._browse_btn.text() == "View"
     assert card._browse_btn.isEnabled()
     # Title must say ExternalImport and clearly mark the reference date as
     # "as of" today (the calculation is always anchored to today, not the
     # latest date with data).
-    assert card._formula_viewer.windowTitle() == f"External Import — as of {today.strftime('%d-%b-%Y')}"
+    assert card._preview_viewer.windowTitle() == f"External Import — as of {today.strftime('%d-%b-%Y')}"
 
 
 def test_database_mode_no_data_shows_message(qapp, monkeypatch):
@@ -650,8 +660,8 @@ def test_database_mode_no_data_shows_message(qapp, monkeypatch):
 
     screen = DataImportScreen(AppController(qapp))
     card = screen._cards["ExternalImport"]
-    card._on_source_toggled(True)
+    card.set_source_mode("database")
     card._on_primary_action()
 
-    assert card._formula_viewer is None
+    assert card._preview_viewer is None
     assert len(shown) == 1

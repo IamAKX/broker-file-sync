@@ -132,13 +132,13 @@ def _fetch(target: date = None, snapshot_cache: dict | None = None) -> tuple[lis
     rows = []
     for symbol in sorted(results.keys()):
         values = results[symbol]
-        row = [symbol, display_names.get(symbol, "")]
-        for code in formula_engine.FORMULA_CODES:
-            v = values.get(code)
-            row.append("" if v is None else round(v, 4))
         custom_values = custom_results.get(symbol, {})
-        for code in custom_defs:
-            v = custom_values.get(code)
-            row.append("" if v is None else round(v, 4))
+        row = [symbol, display_names.get(symbol, "")]
+        row += [_rounded_or_blank(values.get(code)) for code in formula_engine.FORMULA_CODES]
+        row += [_rounded_or_blank(custom_values.get(code)) for code in custom_defs]
         rows.append(row)
     return headers, rows, live_baselines
+
+
+def _rounded_or_blank(v):
+    return "" if v is None else round(v, 4)

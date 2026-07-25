@@ -50,8 +50,15 @@ def merge_broker_sources(
     for row in rs_rows:
         full_name = _strip_rolling_suffix(_normalise(row[_RS_FK_IDX]))
         sym = name_to_symbol.get(full_name.lower())
-        if sym:
-            rs_lookup[_normalise(sym).upper()] = row
+        # File-mode ReliableSoftware rows carry a full company name that must
+        # resolve through the Script Name config table first. DB-mode rows
+        # (services.broker_db_source.read_reliable_software_db) carry the
+        # already-resolved symbol directly instead — that never matches a
+        # config full-name key, so it falls through to here and is used as
+        # the join key as-is, same as NiftyInvest/MarketProfile/ExternalImport.
+        key = _normalise(sym).upper() if sym else full_name.upper()
+        if key:
+            rs_lookup[key] = row
 
     ni_lookup: dict = {}
     for row in ni_rows:
@@ -116,7 +123,9 @@ class LiveDataReader:
                  script_name_data, expiry_date=None,
                  use_com=False, slow_interval_s: float = 1.0,
                  clock=time.monotonic, external_path=None,
-                 market_profile_path=None, external_mode: str = "file"):
+                 market_profile_path=None, external_mode: str = "file",
+                 reliable_mode: str = "file", nifty_mode: str = "file",
+                 market_profile_mode: str = "file"):
         self._sharekhan_path   = sharekhan_path
         self._reliable_path    = reliable_path
         # nifty_paths may be a single path (str) or a list — NiftyInvest is
@@ -133,6 +142,15 @@ class LiveDataReader:
         # the ext-join logic below never needs to know which mode is active.
         self._external_mode    = external_mode
         self._market_profile_path = market_profile_path
+        # Independent File/DB mode per source — screens.data_import currently
+        # drives all three (plus external_mode above) with a single combined
+        # UI toggle, but each is its own flag here so this reader stays
+        # testable/usable per-source in isolation. "database" reads
+        # services.broker_db_source instead of the source's own file — see
+        # _read_reliable / _read_nifty / _read_market_profile.
+        self._reliable_mode         = reliable_mode
+        self._nifty_mode            = nifty_mode
+        self._market_profile_mode   = market_profile_mode
         self._script_name_data = script_name_data
         self._expiry_date      = expiry_date
         self._use_com          = use_com
@@ -155,6 +173,16 @@ class LiveDataReader:
         # re-fetching up to FORMULA_LOOKBACK_DAYS of already-finalized
         # historic snapshots over HTTP on every slow-source refresh.
         self._ext_snapshot_cache: dict = {}
+
+        # services.broker_db_source cache for Reliable/Nifty/MarketProfile's
+        # "database" mode — all three (when active) read the same last-
+        # trading-day LMV snapshot, so this dict (keyed by that date) makes
+        # the underlying GET fire once per session, not once per broker per
+        # slow-source refresh. The date itself is resolved once and cached
+        # too — it needs a holidays_api call, no reason to repeat that every
+        # ~1s tick for a value that can't change mid-session.
+        self._broker_db_snapshot_cache: dict = {}
+        self._db_trade_date_cache = None
 
         # Cached symbol-resolution map (rebuilt only when script data changes).
         self._name_to_symbol = None
@@ -191,7 +219,17 @@ class LiveDataReader:
                 return result
         return read_sharekhan(self._sharekhan_path)
 
+    def _db_trade_date(self):
+        if self._db_trade_date_cache is None:
+            from services.broker_db_source import last_trading_day
+            self._db_trade_date_cache = last_trading_day()
+        return self._db_trade_date_cache
+
     def _read_reliable(self):
+        if self._reliable_mode == "database":
+            from services.broker_db_source import read_reliable_software_db
+            return read_reliable_software_db(
+                self._db_trade_date(), snapshot_cache=self._broker_db_snapshot_cache)
         from services.file_reader import (
             read_reliable_software, _RELIABLE_COLS, _RELIABLE_HEADER_ROW,
         )
@@ -203,10 +241,25 @@ class LiveDataReader:
                 return result
         return read_reliable_software(self._reliable_path)
 
-    def _read_slow_sources(self, force: bool = False):
-        """Refresh Reliable + Nifty + External if the slow interval has elapsed."""
-        from services.file_reader import read_nifty_invest_multi, read_market_profile
+    def _read_nifty(self):
+        if self._nifty_mode == "database":
+            from services.broker_db_source import read_nifty_invest_db
+            return read_nifty_invest_db(
+                self._db_trade_date(), snapshot_cache=self._broker_db_snapshot_cache)
+        from services.file_reader import read_nifty_invest_multi
+        return read_nifty_invest_multi(self._nifty_paths)
 
+    def _read_market_profile(self):
+        if self._market_profile_mode == "database":
+            from services.broker_db_source import read_market_profile_db
+            return read_market_profile_db(
+                self._db_trade_date(), snapshot_cache=self._broker_db_snapshot_cache)
+        from services.file_reader import read_market_profile
+        return read_market_profile(self._market_profile_path) if self._market_profile_path else ([], [])
+
+    def _read_slow_sources(self, force: bool = False):
+        """Refresh Reliable + Nifty + External + MarketProfile if the slow
+        interval has elapsed."""
         now = self._clock()
         due = (
             force
@@ -215,10 +268,9 @@ class LiveDataReader:
         )
         if due:
             self._rs_cache  = self._read_reliable()
-            self._ni_cache  = read_nifty_invest_multi(self._nifty_paths)
+            self._ni_cache  = self._read_nifty()
             self._ext_cache = self._read_external()
-            self._mp_cache  = (read_market_profile(self._market_profile_path)
-                               if self._market_profile_path else ([], []))
+            self._mp_cache  = self._read_market_profile()
             self._slow_stamp = now
 
     def _read_external(self):

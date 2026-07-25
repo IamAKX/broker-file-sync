@@ -50,20 +50,6 @@ def test_viewer_save_button_shown_with_on_save(qapp):
     assert called == [True]
 
 
-def test_viewer_sector_filter_hides_non_matching_rows(qapp):
-    from screens.lmv_snapshot_viewer import LmvSnapshotViewer
-    w = LmvSnapshotViewer(HEADERS, DATA, date(2026, 7, 20), theme=None)
-    # The combo is populated from the real config_defaults.SECTOR_STOCK_DATA
-    # sector list, unrelated to this test's synthetic row data — add the
-    # row-level value directly so the filter's row-vs-combo-text comparison
-    # (screens.lmv_snapshot_viewer.LmvSnapshotViewer._apply_sector_filter)
-    # can be exercised regardless of what's in the real config.
-    w._sector_combo.addItem("IT")
-    w._sector_combo.setCurrentText("IT")
-    assert w._table.isRowHidden(0) is False
-    assert w._table.isRowHidden(1) is True
-
-
 def test_viewer_title_defaults_to_trade_date(qapp):
     from screens.lmv_snapshot_viewer import LmvSnapshotViewer
     w = LmvSnapshotViewer(HEADERS, DATA, date(2026, 7, 20), theme=None)

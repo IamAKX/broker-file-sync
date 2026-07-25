@@ -81,7 +81,7 @@ class LmvSnapshotViewer(QWidget):
         # logic (category/sector) can read current selection without its own
         # visible widgets cluttering this toolbar.
         self._cat_combo = QComboBox(self)
-        self._cat_combo.addItems(["All", "Daily", "Weekly", "Monthly"])
+        self._cat_combo.addItems(["All", "Daily", "Weekly", "Monthly", "Common"])
         self._cat_combo.setCurrentText("All")
         self._cat_combo.hide()
         self._cat_combo.currentTextChanged.connect(self._on_category_changed)

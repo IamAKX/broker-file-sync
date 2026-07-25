@@ -30,13 +30,18 @@ _BROKER_ROW_COUNTERS = {
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
 
 BROKERS = [
-    # broker, color_token, hint, exts, show_date_picker, show_source_toggle, show_multi_file
-    ("Sharekhan",        "status_red",    "TradeBook export (.xlsx / .xls)",        (".xlsx", ".xls"),        True,  False, False),
-    ("ReliableSoftware", "status_blue",   "Transactions export (.xlsx / .xls)",     (".xlsx", ".xls"),        True,  False, False),
-    ("NiftyInvest",      "status_orange", "Portfolio export (.csv) — multiple allowed", (".csv",),            False, False, True),
-    ("ExternalImport",   "status_purple", "Any file — columns auto-detected",       (".xlsx", ".xls", ".csv"), False, True,  False),
-    ("MarketProfile",    "status_pink",   "Market Profile export (.csv / .xlsx)",   (".csv", ".xlsx", ".xls"), True,  False, False),
+    # broker, color_token, hint, exts, show_date_picker, show_multi_file
+    ("Sharekhan",        "status_red",    "TradeBook export (.xlsx / .xls)",        (".xlsx", ".xls"),        True,  False),
+    ("ReliableSoftware", "status_blue",   "Transactions export (.xlsx / .xls)",     (".xlsx", ".xls"),        False, False),
+    ("NiftyInvest",      "status_orange", "Portfolio export (.csv) — multiple allowed", (".csv",),            False, True),
+    ("ExternalImport",   "status_purple", "Any file — columns auto-detected",       (".xlsx", ".xls", ".csv"), False, False),
+    ("MarketProfile",    "status_pink",   "Market Profile export (.csv / .xlsx)",   (".csv", ".xlsx", ".xls"), False, False),
 ]
+
+# Brokers whose card supports the screen-level File/DB toggle (all except
+# Sharekhan, which has no "database" source — see
+# DataImportScreen._on_global_source_toggled).
+_DB_CAPABLE_BROKERS = {"ReliableSoftware", "NiftyInvest", "ExternalImport", "MarketProfile"}
 
 
 def _svg_icon(filename: str, color: str) -> QIcon:
@@ -68,7 +73,7 @@ class BrokerImportCard(QFrame):
 
     def __init__(self, broker: str, color_token: str, hint: str, theme,
                  exts: tuple = (".xlsx", ".xls"), show_date_picker: bool = False,
-                 show_source_toggle: bool = False, show_multi_file: bool = False,
+                 show_multi_file: bool = False, db_preview=None,
                  compare_date_provider=None, parent=None):
         super().__init__(parent)
         self._theme = theme
@@ -89,10 +94,16 @@ class BrokerImportCard(QFrame):
         self._row_count = 0
         self._progress_value = 0
         self._show_date_picker = show_date_picker
-        self._show_source_toggle = show_source_toggle
         self._show_multi_file = show_multi_file
+        # "file" or "database" — driven externally by
+        # DataImportScreen's single global File/DB toggle (see
+        # set_source_mode), not owned by this card. db_preview is a zero-arg
+        # callable() -> (title, headers, rows) used by the View popup in
+        # database mode; None (Sharekhan) means this card has no database
+        # source at all.
         self._source_mode = "file"
-        self._formula_viewer = None
+        self._db_preview = db_preview
+        self._preview_viewer = None
         self.setObjectName("brokerPanel")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -166,10 +177,10 @@ class BrokerImportCard(QFrame):
         info_col.addWidget(self._file_lbl)
         layout.addLayout(info_col, 1)
 
-        # Middle control slot — date picker, File/DB toggle, or nothing,
-        # depending on the broker. Always reserved at the same fixed width so
-        # Browse/status/delete line up at the same x-position on every card
-        # regardless of which (if any) control a given row actually shows.
+        # Middle control slot — date picker or nothing, depending on the
+        # broker. Always reserved at the same fixed width so Browse/status/
+        # delete line up at the same x-position on every card regardless of
+        # whether a given row actually shows a control there.
         _MIDDLE_SLOT_WIDTH = 130
         middle_slot = QWidget()
         middle_slot.setFixedWidth(_MIDDLE_SLOT_WIDTH)
@@ -177,26 +188,7 @@ class BrokerImportCard(QFrame):
         middle_lay = QHBoxLayout(middle_slot)
         middle_lay.setContentsMargins(0, 0, 0, 0)
 
-        # File / Database source toggle (only for ExternalImport, for now)
-        if self._show_source_toggle:
-            from screens.notifications import ToggleSwitch
-
-            source_row = QHBoxLayout()
-            source_row.setSpacing(6)
-            self._file_mode_lbl = QLabel("File")
-            self._file_mode_lbl.setFont(font_scale.font(font_scale.SMALL, True))
-            self._source_toggle = ToggleSwitch(False)
-            self._source_toggle.toggled.connect(self._on_source_toggled)
-            self._db_mode_lbl = QLabel("DB")
-            self._db_mode_lbl.setFont(font_scale.font(font_scale.SMALL, False))
-            source_row.addWidget(self._file_mode_lbl)
-            source_row.addWidget(self._source_toggle)
-            source_row.addWidget(self._db_mode_lbl)
-            middle_lay.addLayout(source_row)
-            self._update_source_mode_style()
-
-        # Date picker (Sharekhan: F&O expiry date; ReliableSoftware: plain
-        # manual date, no expiry semantics)
+        # Date picker (Sharekhan only: F&O expiry date)
         if self._show_date_picker:
             if self._broker == "Sharekhan":
                 from services.master_generator import last_tuesday_of_month
@@ -430,30 +422,35 @@ class BrokerImportCard(QFrame):
     def _on_primary_action(self):
         """Dispatch the browse-button/card-click action for the current source mode."""
         if self._source_mode == "database":
-            self._open_formula_viewer()
+            if self._db_preview is not None:
+                self._open_db_preview()
         else:
             self._browse()
 
-    def _on_source_toggled(self, checked: bool):
-        self._source_mode = "database" if checked else "file"
-        self._browse_btn.setText("View" if checked else "Browse")
-        self._update_source_mode_style()
-        if self._source_mode == "database":
+    def set_source_mode(self, mode: str) -> None:
+        """Driven externally by DataImportScreen's single File/DB toggle
+        (see DataImportScreen._on_global_source_toggled) — this card no
+        longer owns its own per-row toggle. mode is "file" or "database"."""
+        if mode == self._source_mode:
+            return
+        self._source_mode = mode
+        if mode == "database":
+            self._browse_btn.setText("View")
             # Selecting the database source is itself "configured" — glow
             # regardless of whether a file was ever picked in file mode.
             self._set_status_imported()
             self.source_active.emit(self._broker, True, -1)
         else:
+            self._browse_btn.setText("Browse")
             # Back to file mode: restore whichever status actually applies —
             # a real completed import, or Awaiting if none — since the
             # database-mode toggle may have overwritten it with "Imported".
-            if self._selected_file:
+            has_file = bool(self._selected_file or self._selected_files)
+            if has_file:
                 self._set_status_imported()
             else:
                 self._set_status_awaiting()
-            self.source_active.emit(
-                self._broker, bool(self._selected_file), self._row_count
-            )
+            self.source_active.emit(self._broker, has_file, self._row_count)
 
     def _set_status_imported(self):
         acc = self._theme.get('accent')
@@ -471,29 +468,21 @@ class BrokerImportCard(QFrame):
             "border-radius: 4px; padding: 1px 8px;"
         )
 
-    def _update_source_mode_style(self):
-        t = self._theme
-        active = t.get("text_primary")
-        inactive = t.get("text_secondary")
-        is_file = self._source_mode == "file"
-        self._file_mode_lbl.setFont(font_scale.font(font_scale.SMALL, is_file))
-        self._file_mode_lbl.setStyleSheet(f"color: {active if is_file else inactive};")
-        self._db_mode_lbl.setFont(font_scale.font(font_scale.SMALL, not is_file))
-        self._db_mode_lbl.setStyleSheet(f"color: {inactive if is_file else active};")
-
-    def _open_formula_viewer(self):
-        """Fetch stored historic data, run it through the formula engine, and
-        show the calculated per-stock table for the database source."""
-        if self._formula_viewer is not None and not self._formula_viewer.isHidden():
-            self._formula_viewer.raise_()
-            self._formula_viewer.activateWindow()
+    def _open_db_preview(self):
+        """Fetch this broker's database-sourced data (self._db_preview,
+        supplied per-broker by DataImportScreen._build) and show it in a
+        read-only popup — same idea for every DB-capable broker, whether
+        it's ExternalImport's formula-engine computation or
+        ReliableSoftware/NiftyInvest/MarketProfile's last-trading-day LMV
+        snapshot columns (services.broker_db_source)."""
+        if self._preview_viewer is not None and not self._preview_viewer.isHidden():
+            self._preview_viewer.raise_()
+            self._preview_viewer.activateWindow()
             return
 
-        from datetime import date
         from PySide6.QtWidgets import QApplication, QMessageBox
         from api.exceptions import ApiError, NetworkError
         from components.error_popup import show_api_error
-        from services.external_import_source import read_external_import_db
         from screens.historic_viewer import HistoricDataViewer
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -501,11 +490,8 @@ class BrokerImportCard(QFrame):
         original_text = self._browse_btn.text()
         self._browse_btn.setText("Loading...")
         try:
-            # Always calculate as of today — CWH/CMH/etc. must mean the actual
-            # current week/month, not the week of the last upload.
-            target = date.today()
             try:
-                headers, rows = read_external_import_db(target)
+                title, headers, rows = self._db_preview()
             except (ApiError, NetworkError) as exc:
                 show_api_error(self._theme, self, exc)
                 return
@@ -513,18 +499,15 @@ class BrokerImportCard(QFrame):
             if not rows:
                 QMessageBox.information(
                     self, "No Data",
-                    "No historic data has been saved yet — upload some via "
-                    "Historic Upload first."
+                    f"No database data is available for {self._broker} yet."
                 )
                 return
 
-            target_str = target.strftime("%d-%b-%Y")
-            self._formula_viewer = HistoricDataViewer(
-                headers, rows, target_str, theme=self._theme,
-                title=f"External Import — as of {target_str}",
+            self._preview_viewer = HistoricDataViewer(
+                headers, rows, "", theme=self._theme, title=title,
             )
-            self._formula_viewer.setWindowFlag(Qt.WindowType.Window)
-            self._formula_viewer.show()
+            self._preview_viewer.setWindowFlag(Qt.WindowType.Window)
+            self._preview_viewer.show()
         finally:
             self._browse_btn.setEnabled(True)
             self._browse_btn.setText(original_text)
@@ -593,8 +576,6 @@ class BrokerImportCard(QFrame):
         """Re-apply styles to match current theme after a toggle."""
         if self._show_date_picker and hasattr(self, "_date_btn"):
             self._update_date_btn_style()
-        if self._show_source_toggle:
-            self._update_source_mode_style()
 
     def _show_calendar(self):
         """Show a themed calendar popup to pick the expiry date."""
@@ -785,9 +766,10 @@ class DataImportScreen(QWidget):
         cards_col.setContentsMargins(0, 0, 0, 0)
         cards_col.setSpacing(10)
         self._cards: dict[str, BrokerImportCard] = {}
-        for broker, color_token, hint, exts, show_date, show_source_toggle, show_multi_file in BROKERS:
+        for broker, color_token, hint, exts, show_date, show_multi_file in BROKERS:
+            db_preview = self._make_db_preview(broker) if broker in _DB_CAPABLE_BROKERS else None
             card = BrokerImportCard(broker, color_token, hint, t, exts, show_date,
-                                     show_source_toggle, show_multi_file)
+                                     show_multi_file, db_preview=db_preview)
             card.import_done.connect(self.broker_imported)
             card.import_reset.connect(self.broker_reset)
             card.import_done.connect(self._on_card_imported)
@@ -799,9 +781,26 @@ class DataImportScreen(QWidget):
         layout.addLayout(cards_col)
         layout.addStretch()
 
-        # Bottom button row — Run Watcher
+        # Bottom row — single File/DB toggle (applies to every broker except
+        # Sharekhan; replaces the old per-card ExternalImport-only toggle)
+        # plus Run Watcher, both right-aligned.
+        from screens.notifications import ToggleSwitch
+
         gen_row = QHBoxLayout()
         gen_row.addStretch()
+
+        self._file_mode_lbl = QLabel("File")
+        self._file_mode_lbl.setFont(font_scale.font(font_scale.SMALL, True))
+        self._source_toggle = ToggleSwitch(False)
+        self._source_toggle.toggled.connect(self._on_global_source_toggled)
+        self._db_mode_lbl = QLabel("DB")
+        self._db_mode_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        gen_row.addWidget(self._file_mode_lbl)
+        gen_row.addWidget(self._source_toggle)
+        gen_row.addWidget(self._db_mode_lbl)
+        self._update_global_toggle_style()
+
+        gen_row.addSpacing(20)
 
         self._watcher_btn = QPushButton("  Run Watcher")
         self._watcher_btn.setFixedHeight(40)
@@ -814,6 +813,53 @@ class DataImportScreen(QWidget):
 
         layout.addLayout(gen_row)
 
+    def _make_db_preview(self, broker: str):
+        """Zero-arg callable() -> (title, headers, rows) for broker's View
+        popup in database mode (see BrokerImportCard._open_db_preview).
+        ExternalImport computes today's formula_engine table from stored
+        historic uploads; the other three just read last trading day's
+        already-merged LMV columns back out (services.broker_db_source)."""
+        if broker == "ExternalImport":
+            def preview():
+                from datetime import date
+                from services.external_import_source import read_external_import_db
+                target = date.today()
+                headers, rows = read_external_import_db(target)
+                return f"External Import — as of {target.strftime('%d-%b-%Y')}", headers, rows
+            return preview
+
+        from services import broker_db_source
+        reader = {
+            "ReliableSoftware": broker_db_source.read_reliable_software_db,
+            "NiftyInvest": broker_db_source.read_nifty_invest_db,
+            "MarketProfile": broker_db_source.read_market_profile_db,
+        }[broker]
+
+        def preview():
+            target = broker_db_source.last_trading_day()
+            headers, rows = reader(target)
+            return f"{broker} — as of {target.strftime('%d-%b-%Y')} (last trading day)", headers, rows
+        return preview
+
+    def _on_global_source_toggled(self, checked: bool):
+        mode = "database" if checked else "file"
+        for broker, card in self._cards.items():
+            if broker == "Sharekhan":
+                continue
+            card.set_source_mode(mode)
+        self._update_global_toggle_style()
+        self._update_watcher_btn()
+
+    def _update_global_toggle_style(self):
+        t = self._controller.theme
+        active = t.get("text_primary")
+        inactive = t.get("text_secondary")
+        is_file = not self._source_toggle.isChecked()
+        self._file_mode_lbl.setFont(font_scale.font(font_scale.SMALL, is_file))
+        self._file_mode_lbl.setStyleSheet(f"color: {active if is_file else inactive};")
+        self._db_mode_lbl.setFont(font_scale.font(font_scale.SMALL, not is_file))
+        self._db_mode_lbl.setStyleSheet(f"color: {inactive if is_file else active};")
+
     def _on_card_imported(self, broker: str, rows: int):
         self._imported_brokers.add(broker)
         self._update_watcher_btn()
@@ -823,8 +869,8 @@ class DataImportScreen(QWidget):
         self._update_watcher_btn()
 
     def _on_card_source_active(self, broker: str, active: bool, rows: int):
-        # ExternalImport's File/DB toggle can change whether the required
-        # brokers are all "ready" — re-evaluate the Run Watcher gate.
+        # The global File/DB toggle can change whether the required brokers
+        # are all "ready" — re-evaluate the Run Watcher gate.
         self._update_watcher_btn()
 
     def _on_watcher_started(self):
@@ -854,14 +900,15 @@ class DataImportScreen(QWidget):
         )
 
     def _required_brokers_ready(self) -> bool:
-        """A broker is "ready" once it has imported a file — except
-        ExternalImport in database mode, which never fires import_done since
-        there's no file, but is just as valid a source once selected."""
+        """A broker is "ready" once it has imported a file — except a
+        DB-capable broker (see _DB_CAPABLE_BROKERS) currently in database
+        mode, which never fires import_done since there's no file, but is
+        just as valid a source once the global toggle selects it."""
         for broker in self._REQUIRED_BROKERS:
             if broker in self._imported_brokers:
                 continue
             card = self._cards.get(broker)
-            if broker == "ExternalImport" and card is not None and card._source_mode == "database":
+            if card is not None and card._source_mode == "database":
                 continue
             return False
         return True
@@ -892,12 +939,10 @@ class DataImportScreen(QWidget):
         from screens.live_viewer import LiveViewerWindow
 
         sharekhan_path = self._cards["Sharekhan"]._selected_file
-        reliable_path  = self._cards["ReliableSoftware"]._selected_file
-        nifty_paths    = self._cards["NiftyInvest"]._selected_files
+        reliable_card  = self._cards["ReliableSoftware"]
+        nifty_card     = self._cards["NiftyInvest"]
         external_card  = self._cards["ExternalImport"]
-        external_path  = external_card._selected_file
-        external_mode  = external_card._source_mode
-        market_profile_path = self._cards["MarketProfile"]._selected_file
+        market_profile_card = self._cards["MarketProfile"]
         expiry_date    = self._cards["Sharekhan"].get_expiry_date()
         # Reuse existing window if already open
         if self._live_viewer is not None and not self._live_viewer.isHidden():
@@ -906,12 +951,15 @@ class DataImportScreen(QWidget):
             return
 
         self._live_viewer = LiveViewerWindow(
-            sharekhan_path, reliable_path, nifty_paths,
+            sharekhan_path, reliable_card._selected_file, nifty_card._selected_files,
             SCRIPT_NAME_DATA,
             expiry_date=expiry_date,
-            external_path=external_path,
-            external_mode=external_mode,
-            market_profile_path=market_profile_path,
+            external_path=external_card._selected_file,
+            external_mode=external_card._source_mode,
+            market_profile_path=market_profile_card._selected_file,
+            reliable_mode=reliable_card._source_mode,
+            nifty_mode=nifty_card._source_mode,
+            market_profile_mode=market_profile_card._source_mode,
             theme=self._controller.theme,
             controller=self._controller,
         )
@@ -936,4 +984,5 @@ class DataImportScreen(QWidget):
         """Re-apply styles on all child cards after a theme toggle."""
         for card in self._cards.values():
             card.refresh_theme()
+        self._update_global_toggle_style()
 

@@ -599,9 +599,19 @@ class ExpressionEditorDialog(QDialog):
         self._populate_item_list(filtered)
 
     def _populate_item_list(self, entries: list):
+        # A few functions (Round, Log, ...) list more than one overload as
+        # separate entries sharing the same name — bare names alone would
+        # render as visually-identical duplicate rows. Whenever a name
+        # repeats in this list, show its signature instead so each overload
+        # is distinguishable; unique names keep the shorter bare-name label.
+        name_counts: dict = {}
+        for entry in entries:
+            name_counts[entry["name"]] = name_counts.get(entry["name"], 0) + 1
+
         self._item_list.clear()
         for entry in entries:
-            item = QListWidgetItem(entry["name"])
+            label = entry["signature"] if name_counts[entry["name"]] > 1 else entry["name"]
+            item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, entry)
             self._item_list.addItem(item)
 

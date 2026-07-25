@@ -895,7 +895,7 @@ class StrategyEditor(QWidget):
         cat_lbl = QLabel("Category:")
         cat_lbl.setFixedWidth(130)
         self._category_combo = QComboBox()
-        self._category_combo.addItems(["Daily", "Weekly", "Monthly"])
+        self._category_combo.addItems(["Daily", "Weekly", "Monthly", "Common"])
         self._category_combo.setCurrentText(self._strategy.get("category", "Daily"))
         self._category_combo.setFixedHeight(36)
         cat_row.addWidget(cat_lbl)
