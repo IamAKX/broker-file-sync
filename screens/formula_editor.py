@@ -112,11 +112,41 @@ def FIELD_CATALOGUE_FROM_HEADERS(headers: list) -> list:
         {
             "name": f"[{h}]",
             "signature": f"[{h}]",
-            "description": f"Value of column '{h}' for the current row.",
+            "description": (f"Value of column '{h}' for the current row. "
+                            f"Click a stock in the Rows section afterward to "
+                            f"reference another stock's row instead."),
             "token": {"type": "col", "value": h},
         }
         for h in headers
     ]
+
+
+ROW_SYMBOL_COLUMN = "Scrip Name"
+
+
+def ROW_CATALOGUE_FROM_DATA(all_data: list, symbol_col: str = ROW_SYMBOL_COLUMN) -> list:
+    """One entry per distinct stock present in the loaded sheet, used to turn
+    a field reference into a cross-row one, e.g. [Open] -> [Open of Nifty]."""
+    seen: set = set()
+    out = []
+    for rd in all_data:
+        sym = rd.get(symbol_col)
+        if not sym:
+            continue
+        sym = str(sym).strip()
+        key = sym.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "name": sym,
+            "signature": f"… of {sym}",
+            "description": (f"Reference {sym}'s row instead of the current one. "
+                            f"Click a Field first (e.g. [Open]), then click here "
+                            f"to turn it into [Open of {sym}]."),
+            "row_symbol": sym,
+        })
+    return out
 
 
 CONSTANTS_CATALOGUE = [
@@ -151,7 +181,8 @@ def _token_insert_text(tok: dict) -> str:
     kind = tok.get("type", "op")
     val = tok.get("value", "")
     if kind == "col":
-        return f"[{val}]"
+        of_sym = tok.get("of")
+        return f"[{val} of {of_sym}]" if of_sym else f"[{val}]"
     if kind == "self":
         return "THIS"
     if kind == "func":
@@ -200,6 +231,27 @@ _AGG_ARG_RE = re.compile(
     r"""\s*(?:\[([^\]]*)\]|([A-Za-z_][A-Za-z0-9_]*)|"([^"]*)"|'([^']*)')\s*\)"""
 )
 
+# Splits "[Open of Nifty]" bracket content on the LAST " of " (greedy left
+# group backtracks to the rightmost match), so "X of Y of Z" reads as
+# column "X of Y", stock "Z" — the stock name is what trails.
+_OF_SPLIT_RE = re.compile(r"^(.*\S)\s+of\s+(\S.*)$", re.IGNORECASE)
+
+
+def _split_field_of(inner: str, known_headers=None):
+    """Split a "[...]" bracket's inner text into (column, of_symbol|None).
+
+    A bracket whose full text is itself a known header wins outright, so
+    headers that happen to contain " of " (e.g. "% of Day Range") keep
+    working unchanged. Otherwise, "Column of Symbol" splits into a
+    cross-row reference; plain "Column" (no " of ") is unaffected.
+    """
+    if known_headers is not None and inner in known_headers:
+        return inner, None
+    m = _OF_SPLIT_RE.match(inner)
+    if m:
+        return m.group(1), m.group(2)
+    return inner, None
+
 
 def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
     """For SUM_ALL(...)-style aggregates, try to read the single column
@@ -214,9 +266,13 @@ def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
     return m.end(), col
 
 
-def parse_expression_text(text: str) -> list:
+def parse_expression_text(text: str, known_headers=None) -> list:
     """Parse the preview box's plain text into the structured token list.
-    Raises ValueError with a human-readable message on malformed input."""
+    Raises ValueError with a human-readable message on malformed input.
+
+    ``known_headers``, when given, disambiguates "[Col of Symbol]" from a
+    literal header that happens to contain " of " — see _split_field_of.
+    """
     tokens = []
     pos, n = 0, len(text)
     while pos < n:
@@ -230,7 +286,11 @@ def parse_expression_text(text: str) -> list:
         if kind == "ws":
             continue
         if kind == "field":
-            tokens.append({"type": "col", "value": val[1:-1]})
+            col, of_sym = _split_field_of(val[1:-1], known_headers)
+            tok = {"type": "col", "value": col}
+            if of_sym:
+                tok["of"] = of_sym
+            tokens.append(tok)
         elif kind in ("dstring", "sstring", "number"):
             tokens.append({"type": "num", "value": val})
         elif kind == "word":
@@ -382,7 +442,7 @@ class ExpressionEditorDialog(QDialog):
             f"QListWidget::item:selected{{background:{bd};color:{txt};"
             f"border-left:3px solid {acc};}}"
         )
-        for section in ["Functions", "Operators", "Fields", "Constants"]:
+        for section in ["Functions", "Operators", "Fields", "Rows", "Constants"]:
             self._nav_list.addItem(section)
         self._nav_list.currentRowChanged.connect(self._on_nav_changed)
         body_lay.addWidget(self._nav_list)
@@ -585,16 +645,22 @@ class ExpressionEditorDialog(QDialog):
             FUNCTION_CATALOGUE,
             OPERATOR_CATALOGUE,
             FIELD_CATALOGUE_FROM_HEADERS(all_headers),
+            ROW_CATALOGUE_FROM_DATA(self._all_lmv_data),
             CONSTANTS_CATALOGUE,
         ]
-        self._current_catalogue = catalogues[row] if 0 <= row < 4 else []
+        self._current_catalogue = catalogues[row] if 0 <= row < len(catalogues) else []
         self._populate_item_list(self._current_catalogue)
 
     def _on_search(self, text: str):
         q = text.strip().lower()
+        # Match on name/signature only, not "description": the Fields and
+        # Rows catalogues give every entry the same boilerplate description
+        # text (e.g. "...for the current row"), so matching against it made
+        # any query that happened to be a substring of that boilerplate
+        # (e.g. "cur") match every entry and effectively disable the filter.
         filtered = [
             e for e in self._current_catalogue
-            if q in e["name"].lower() or q in e.get("description", "").lower()
+            if q in e["name"].lower() or q in e.get("signature", "").lower()
         ] if q else self._current_catalogue
         self._populate_item_list(filtered)
 
@@ -627,7 +693,11 @@ class ExpressionEditorDialog(QDialog):
 
     def _on_item_clicked(self, item):
         entry = item.data(Qt.ItemDataRole.UserRole)
-        if entry and entry.get("token") is not None:
+        if not entry:
+            return
+        if entry.get("row_symbol") is not None:
+            self._add_row_symbol(entry["row_symbol"])
+        elif entry.get("token") is not None:
             self._add_token(entry["token"])
 
     # ── Token management ──────────────────────────────────────────────────────
@@ -642,6 +712,40 @@ class ExpressionEditorDialog(QDialog):
 
     def _add_token(self, token: dict):
         self._insert_at_cursor(_token_insert_text(token))
+
+    _TRAILING_FIELD_RE = re.compile(r"\[([^\[\]]*)\]$")
+
+    def _add_row_symbol(self, symbol: str):
+        """Turn the [Field] the cursor is in or just after into
+        [Field of Symbol] — click a Field, then click a Row to attach it."""
+        text = self._preview_edit.toPlainText()
+        pos = self._preview_edit.textCursor().position()
+        before, after = text[:pos], text[pos:]
+
+        last_open, last_close = before.rfind("["), before.rfind("]")
+        if last_open > last_close and after.startswith("]"):
+            # Cursor sits inside an still-open "[...]" — splice " of Symbol" here.
+            new_text = before + f" of {symbol}" + after
+            new_pos = pos + len(f" of {symbol}")
+        else:
+            m = self._TRAILING_FIELD_RE.search(before)
+            if m and " of " not in m.group(1).lower():
+                # Cursor sits right after a just-inserted "[Field]" — extend it.
+                head = before[:m.start()]
+                new_text = head + f"[{m.group(1)} of {symbol}]" + after
+                new_pos = len(head) + len(f"[{m.group(1)} of {symbol}]")
+            else:
+                QMessageBox.information(
+                    self, "Pick a Field first",
+                    "Click a Field (e.g. [Open]) first, then click a stock "
+                    "here to reference that stock's row — e.g. [Open of Nifty].")
+                return
+
+        self._preview_edit.setPlainText(new_text)
+        cursor = self._preview_edit.textCursor()
+        cursor.setPosition(new_pos)
+        self._preview_edit.setTextCursor(cursor)
+        self._preview_edit.setFocus()
 
     def _add_constant(self):
         text = self._const_input.text().strip()
@@ -688,8 +792,9 @@ class ExpressionEditorDialog(QDialog):
 
     def _compile_and_test(self):
         from services.strategy_engine import compile_check
+        known_headers = self._lmv_headers + self._strategy_col_headers
         try:
-            tokens = parse_expression_text(self._preview_edit.toPlainText())
+            tokens = parse_expression_text(self._preview_edit.toPlainText(), known_headers)
         except ValueError as exc:
             self._compiled_ok = False
             self._save_btn.setEnabled(False)
@@ -723,6 +828,7 @@ class ExpressionEditorDialog(QDialog):
         if self._compiled_ok and self._compiled_tokens is not None:
             return list(self._compiled_tokens)
         try:
-            return parse_expression_text(self._preview_edit.toPlainText())
+            known_headers = self._lmv_headers + self._strategy_col_headers
+            return parse_expression_text(self._preview_edit.toPlainText(), known_headers)
         except ValueError:
             return []

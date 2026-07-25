@@ -887,7 +887,7 @@ class LiveViewerWindow(QWidget):
         (toggling a strategy, changing category) omit it and compute inline
         here instead, since those are one-off and already fast.
         """
-        from services.strategy_engine import apply_strategies, get_row_fmt_colors
+        from services.strategy_engine import apply_strategies, get_row_fmt_colors, build_symbol_index
 
         highlight = changed_keys is None
         self._last_change_count = 0
@@ -932,6 +932,9 @@ class LiveViewerWindow(QWidget):
         # pass, so a conditional-format rule referencing an aggregate is
         # computed once instead of once per cell.
         agg_cache: dict = {}
+        # Symbol -> row-dict lookup for "[Col of Symbol]" fmt-rule conditions,
+        # built once per render pass instead of once per row.
+        sym_index = build_symbol_index(all_dicts)
 
         # ── Fast path ───────────────────────────────────────────────────────
         # When only cell values changed (same headers, same row count, same
@@ -950,7 +953,7 @@ class LiveViewerWindow(QWidget):
             self._update_cells_in_place(
                 disp_data, disp_headers, all_dicts, strat_col_defs,
                 base_col_count, norm_bg, norm_txt, strat_hdr,
-                highlight, agg_cache,
+                highlight, agg_cache, sym_index,
             )
             self._update_strat_btn_label()
             return
@@ -975,7 +978,8 @@ class LiveViewerWindow(QWidget):
         for r, row in enumerate(disp_data):
             row_dict = all_dicts[r]
             row_colors = get_row_fmt_colors(
-                strat_col_defs, row, base_col_count, row_dict, all_dicts, agg_cache)
+                strat_col_defs, row, base_col_count, row_dict, all_dicts,
+                agg_cache, sym_index)
             for c, val in enumerate(row):
                 item = QTableWidgetItem(self._fmt_cell(val))
                 item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -1069,7 +1073,7 @@ class LiveViewerWindow(QWidget):
     def _update_cells_in_place(self, disp_data, disp_headers, all_dicts,
                                strat_col_defs, base_col_count,
                                norm_bg, norm_txt, strat_hdr,
-                               highlight, agg_cache=None):
+                               highlight, agg_cache=None, sym_index=None):
         """
         Update existing QTableWidgetItems in place (no recreation).
 
@@ -1084,7 +1088,8 @@ class LiveViewerWindow(QWidget):
         for r, row in enumerate(disp_data):
             row_dict = all_dicts[r]
             row_colors = get_row_fmt_colors(
-                strat_col_defs, row, base_col_count, row_dict, all_dicts, agg_cache)
+                strat_col_defs, row, base_col_count, row_dict, all_dicts,
+                agg_cache, sym_index)
             for c, val in enumerate(row):
                 item = self._table.item(r, c)
                 if item is None:
@@ -1173,7 +1178,9 @@ class LiveViewerWindow(QWidget):
     def _on_category_changed(self, text: str):
         self._selected_category = text
         self._update_strat_btn_label()
-        self._visible_cols = set(range(len(self._headers)))
+        # Don't reset _visible_cols here — that would undo any column filter
+        # the user has applied. _populate_table already extends _visible_cols
+        # to cover any new strategy columns while leaving the rest untouched.
         self._populate_table(self._data, set())
         self._apply_sector_filter()
         self._update_filter_btn_label()
@@ -1194,7 +1201,9 @@ class LiveViewerWindow(QWidget):
         from services import strategy_store as store
         for s in updated:
             store.save_strategy(s)
-        self._visible_cols = set(range(len(self._headers)))
+        # Don't reset _visible_cols here — that would undo any column filter
+        # the user has applied. _populate_table already extends _visible_cols
+        # to cover any new strategy columns while leaving the rest untouched.
         self._populate_table(self._data, set())
         self._apply_sector_filter()
 

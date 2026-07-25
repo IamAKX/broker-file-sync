@@ -292,3 +292,63 @@ def test_row_filter_can_reference_strategy_own_column():
     # LTP 10 and 12 pass (<=15); 20 dropped.
     assert [r[1] for r in new_data] == ["10", "12"]
     assert [r[2] for r in new_data] == [10.0, 12.0]
+
+
+# ── "[Col of Symbol]" cross-row reference ────────────────────────────────────
+
+def tok_col_of(name, symbol):
+    return {"type": "col", "value": name, "of": symbol}
+
+
+def test_col_of_reads_another_rows_value():
+    row_a = {"Scrip Name": "NIFTY", "Open": "100"}
+    row_b = {"Scrip Name": "INFY", "Open": "1500"}
+    all_data = [row_a, row_b]
+    result = evaluate([tok_col_of("Open", "NIFTY")], row_b, all_data)
+    assert result == 100.0
+
+
+def test_col_of_is_case_insensitive_and_trims_whitespace():
+    row_a = {"Scrip Name": "NIFTY", "Open": "100"}
+    result = evaluate([tok_col_of("Open", " nifty ")], {}, [row_a])
+    assert result == 100.0
+
+
+def test_col_of_unknown_symbol_returns_none():
+    row_a = {"Scrip Name": "NIFTY", "Open": "100"}
+    result = evaluate([tok_col_of("Open", "DOES-NOT-EXIST")], {}, [row_a])
+    assert result is None
+
+
+def test_col_of_combines_with_current_row_column():
+    row_a = {"Scrip Name": "NIFTY", "Open": "100"}
+    row_b = {"Scrip Name": "INFY", "High": "20", "Open": "1500"}
+    tokens = [tok_col("High"), tok_op("/"), tok_col_of("Open", "NIFTY")]
+    result = evaluate(tokens, row_b, [row_a, row_b])
+    assert result == 0.2
+
+
+def test_col_of_does_not_collide_with_plain_col_signature():
+    # Same column name, with and without "of", must not share a compiled
+    # formula (the cache key must include the "of" field).
+    row_nifty = {"Scrip Name": "NIFTY", "Open": "100"}
+    row_self  = {"Scrip Name": "INFY", "Open": "1500"}
+    plain  = evaluate([tok_col("Open")], row_self, [row_nifty, row_self])
+    of_ref = evaluate([tok_col_of("Open", "NIFTY")], row_self, [row_nifty, row_self])
+    assert plain == 1500.0
+    assert of_ref == 100.0
+
+
+def test_apply_strategies_supports_col_of_formula():
+    from services.strategy_engine import apply_strategies
+    strat = {
+        "id": "1", "active": True, "row_filter": [],
+        "columns": [{"name": "VsNifty", "formula": [tok_col("LTP"), tok_op("/"),
+                                                     tok_col_of("LTP", "NIFTY")]}],
+    }
+    headers = ["Scrip Name", "LTP"]
+    data = [["NIFTY", "100"], ["INFY", "50"]]
+    new_headers, new_data = apply_strategies([strat], headers, data)
+    assert new_headers == ["Scrip Name", "LTP", "VsNifty"]
+    assert new_data[0][2] == 1.0    # NIFTY vs itself
+    assert new_data[1][2] == 0.5    # INFY (50) / NIFTY (100)

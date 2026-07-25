@@ -18,6 +18,9 @@ Each strategy is a dict:
 
 Tokens are plain dicts so JSON roundtrips cleanly:
   {"type": "col",  "value": "LTP"}
+  {"type": "col",  "value": "Open", "of": "Nifty"} — "Open" from the row
+      whose Scrip Name is "Nifty" instead of the current row, entered as
+      "[Open of Nifty]" in the Expression Editor
   {"type": "num",  "value": "1.05"}
   {"type": "op",   "value": "+"}
   {"type": "func", "value": "MAX("}

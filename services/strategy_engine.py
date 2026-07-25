@@ -133,17 +133,48 @@ def _col_literal(raw) -> str:
         return repr(str(raw))
 
 
+# ── cross-row lookup ("[Open of Nifty]") ─────────────────────────────────────
+
+SYMBOL_COLUMN = "Scrip Name"
+
+
+def build_symbol_index(all_data: list, symbol_col: str = SYMBOL_COLUMN) -> dict:
+    """Map normalised (stripped, upper-cased) stock symbol -> that row's dict.
+
+    Scrip Name isn't guaranteed unique (see services/master_generator.py), so
+    first match wins, same "first match wins" spirit used elsewhere in this
+    module.
+    """
+    idx: dict = {}
+    for rd in all_data:
+        sym = rd.get(symbol_col)
+        if not sym:
+            continue
+        norm = str(sym).strip().upper()
+        if norm and norm not in idx:
+            idx[norm] = rd
+    return idx
+
+
 # ── token → expression string ──────────────────────────────────────────────
 
 def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
                     self_value=None) -> str:
     parts = []
+    sym_index = None
     for tok in tokens:
         t = tok.get("type")
         v = tok.get("value", "")
 
         if t == "col":
-            parts.append(_col_literal(row_data.get(v)))
+            of_sym = tok.get("of")
+            if of_sym:
+                if sym_index is None:
+                    sym_index = build_symbol_index(all_data)
+                target = sym_index.get(str(of_sym).strip().upper())
+                parts.append(_col_literal(target.get(v) if target else None))
+            else:
+                parts.append(_col_literal(row_data.get(v)))
 
         elif t == "self":
             parts.append(_col_literal(self_value))
@@ -217,15 +248,19 @@ class _Compiled:
     """A formula's fixed structure, compiled once and reused across rows/ticks.
 
     ``col_vars`` maps referenced column name -> placeholder variable name
-    (e.g. "_c0"). ``agg_specs`` is [(placeholder, base_op, col_name), ...]
-    for _ALL aggregate functions, resolved once per tick rather than once
-    per row (they don't depend on the row being evaluated).
+    (e.g. "_c0"), resolved against the row being evaluated. ``col_of_vars``
+    is [(placeholder, col_name, symbol), ...] for "[Col of Symbol]" tokens,
+    resolved against a different row (looked up by stock symbol) instead.
+    ``agg_specs`` is [(placeholder, base_op, col_name), ...] for _ALL
+    aggregate functions, resolved once per tick rather than once per row
+    (they don't depend on the row being evaluated).
     """
-    __slots__ = ("code", "col_vars", "uses_self", "agg_specs")
+    __slots__ = ("code", "col_vars", "col_of_vars", "uses_self", "agg_specs")
 
-    def __init__(self, code, col_vars, uses_self, agg_specs):
+    def __init__(self, code, col_vars, col_of_vars, uses_self, agg_specs):
         self.code = code
         self.col_vars = col_vars
+        self.col_of_vars = col_of_vars
         self.uses_self = uses_self
         self.agg_specs = agg_specs
 
@@ -234,13 +269,14 @@ _compile_cache: dict = {}
 
 
 def _formula_signature(tokens: list):
-    return tuple((tok.get("type"), tok.get("value"), tok.get("col_arg"))
+    return tuple((tok.get("type"), tok.get("value"), tok.get("col_arg"), tok.get("of"))
                  for tok in tokens)
 
 
 def _build_compiled(tokens: list):
     parts = []
     col_vars: dict = {}
+    col_of_vars: list = []
     uses_self = False
     agg_specs = []
 
@@ -249,11 +285,17 @@ def _build_compiled(tokens: list):
         v = tok.get("value", "")
 
         if t == "col":
-            var = col_vars.get(v)
-            if var is None:
-                var = f"_c{len(col_vars)}"
-                col_vars[v] = var
-            parts.append(var)
+            of_sym = tok.get("of")
+            if of_sym:
+                var = f"_o{len(col_of_vars)}"
+                col_of_vars.append((var, v, of_sym))
+                parts.append(var)
+            else:
+                var = col_vars.get(v)
+                if var is None:
+                    var = f"_c{len(col_vars)}"
+                    col_vars[v] = var
+                parts.append(var)
 
         elif t == "self":
             uses_self = True
@@ -280,7 +322,7 @@ def _build_compiled(tokens: list):
         code = compile(expr, "<formula>", "eval")  # noqa: S307
     except SyntaxError:
         return None
-    return _Compiled(code, col_vars, uses_self, agg_specs)
+    return _Compiled(code, col_vars, col_of_vars, uses_self, agg_specs)
 
 
 def _get_compiled(tokens: list):
@@ -291,13 +333,19 @@ def _get_compiled(tokens: list):
 
 
 def evaluate(tokens: list, row_data: dict, all_data: list,
-             self_value=None, agg_cache: dict | None = None):
+             self_value=None, agg_cache: dict | None = None,
+             sym_index: dict | None = None):
     """Return numeric or string result, or None on error.
 
     ``agg_cache``, when provided, memoizes _ALL aggregate results by
     (base_op, col_name) for the caller's own scope (e.g. one dict per
     apply_strategies()/render pass) so an aggregate is computed once
     instead of once per row.
+
+    ``sym_index``, when provided, is a build_symbol_index(all_data) result
+    reused across every row in the caller's scope, so "[Col of Symbol]"
+    tokens don't rebuild the index once per row. If omitted it's built
+    on demand from all_data (only when the formula actually uses one).
     """
     if not tokens:
         return None
@@ -307,6 +355,11 @@ def evaluate(tokens: list, row_data: dict, all_data: list,
     ns = _EVAL_BUILTINS.copy()
     for col_name, var in compiled.col_vars.items():
         ns[var] = _col_value(row_data.get(col_name))
+    if compiled.col_of_vars:
+        idx = sym_index if sym_index is not None else build_symbol_index(all_data)
+        for var, col_name, symbol in compiled.col_of_vars:
+            target = idx.get(str(symbol).strip().upper())
+            ns[var] = _col_value(target.get(col_name)) if target else None
     if compiled.uses_self:
         ns["_self"] = _col_value(self_value)
     for var, base, col_name in compiled.agg_specs:
@@ -362,9 +415,10 @@ def _referenced_columns(tokens: list) -> list:
 
 
 def evaluate_condition(tokens: list, row_data: dict, all_data: list,
-                       self_value=None, agg_cache: dict | None = None) -> bool:
+                       self_value=None, agg_cache: dict | None = None,
+                       sym_index: dict | None = None) -> bool:
     """Return True if condition is met."""
-    result = evaluate(tokens, row_data, all_data, self_value, agg_cache)
+    result = evaluate(tokens, row_data, all_data, self_value, agg_cache, sym_index)
     if result is None:
         return False
     return bool(result)
@@ -386,6 +440,9 @@ def apply_strategies(strategies: list, headers: list,
     # Memoizes SUM_ALL/AVG_ALL/etc. by (base_op, col_name) for this call, so an
     # aggregate over all rows is computed once instead of once per row.
     agg_cache: dict = {}
+    # Symbol -> row-dict lookup for "[Col of Symbol]" tokens, built once per
+    # call instead of once per row.
+    sym_index = build_symbol_index(all_dicts)
 
     extra_headers = []
     for strat in active:
@@ -411,12 +468,12 @@ def apply_strategies(strategies: list, headers: list,
             values = []
             for col in strat.get("columns", []):
                 val = evaluate(col["formula"], row_dict, all_dicts,
-                               agg_cache=agg_cache)
+                               agg_cache=agg_cache, sym_index=sym_index)
                 enriched[col["name"]] = val
                 values.append(val)
             row_filter = strat.get("row_filter", [])
             passed = (not row_filter) or evaluate_condition(
-                row_filter, enriched, all_dicts, agg_cache=agg_cache)
+                row_filter, enriched, all_dicts, agg_cache=agg_cache, sym_index=sym_index)
             per_strat.append((passed, values))
 
         # Drop rows excluded by every active filter (union of filters).
@@ -437,28 +494,32 @@ def apply_strategies(strategies: list, headers: list,
 
 
 def _match_fmt_rule(col_def: dict, value, row_dict: dict,
-                    all_dicts: list, agg_cache: dict | None = None) -> dict | None:
+                    all_dicts: list, agg_cache: dict | None = None,
+                    sym_index: dict | None = None) -> dict | None:
     """Return the first fmt rule whose condition matches (THIS = value,
     this column's own computed value), else None. First match wins."""
     for rule in col_def.get("fmt_rules", []):
         if not rule.get("condition"):
             continue
         if evaluate_condition(rule["condition"], row_dict, all_dicts,
-                              self_value=value, agg_cache=agg_cache):
+                              self_value=value, agg_cache=agg_cache,
+                              sym_index=sym_index):
             return rule
     return None
 
 
 def get_cell_color(col_def: dict, value, row_dict: dict,
-                   all_dicts: list, agg_cache: dict | None = None) -> str | None:
+                   all_dicts: list, agg_cache: dict | None = None,
+                   sym_index: dict | None = None) -> str | None:
     """Return hex color if any fmt rule matches, else None."""
-    rule = _match_fmt_rule(col_def, value, row_dict, all_dicts, agg_cache)
+    rule = _match_fmt_rule(col_def, value, row_dict, all_dicts, agg_cache, sym_index)
     return rule.get("color") if rule else None
 
 
 def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
                        row_dict: dict, all_dicts: list,
-                       agg_cache: dict | None = None) -> dict:
+                       agg_cache: dict | None = None,
+                       sym_index: dict | None = None) -> dict:
     """One row's resolved {target_column_name: color} map, combining every
     active strategy column's conditional formatting.
 
@@ -476,7 +537,7 @@ def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
         idx = base_col_count + strat_idx
         if idx >= len(row):
             continue
-        rule = _match_fmt_rule(col_def, row[idx], row_dict, all_dicts, agg_cache)
+        rule = _match_fmt_rule(col_def, row[idx], row_dict, all_dicts, agg_cache, sym_index)
         if rule is None:
             continue
         target = rule.get("target_column") or col_def.get("name")

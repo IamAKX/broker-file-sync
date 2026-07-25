@@ -90,14 +90,14 @@ def test_expression_editor_dialog_creates(qapp):
     assert dlg is not None
 
 
-def test_expression_editor_has_four_nav_items(qapp):
+def test_expression_editor_has_five_nav_items(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     from PySide6.QtWidgets import QListWidget
     dlg = ExpressionEditorDialog([], ["LTP"], [], {})
     # The nav list is the leftmost QListWidget
     nav = dlg._nav_list
     texts = [nav.item(i).text() for i in range(nav.count())]
-    assert texts == ["Functions", "Operators", "Fields", "Constants"]
+    assert texts == ["Functions", "Operators", "Fields", "Rows", "Constants"]
 
 
 def test_expression_editor_get_tokens_empty(qapp):
@@ -173,7 +173,7 @@ def test_editor_field_catalogue_includes_lmv_headers(qapp):
 def test_editor_constants_include_true_false(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     dlg = ExpressionEditorDialog([], [], [], {})
-    dlg._nav_list.setCurrentRow(3)  # Constants
+    dlg._nav_list.setCurrentRow(4)  # Constants
     items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
     assert "True" in items
     assert "False" in items
@@ -196,3 +196,67 @@ def test_tokens_round_trip_through_dialog(qapp):
     dlg = ExpressionEditorDialog(original, ["LTP"], [], {"LTP": 100.0})
     result = dlg.get_tokens()
     assert result == original
+
+
+# ── "[Col of Symbol]" cross-row reference ────────────────────────────────────
+
+def test_parse_field_with_of_splits_into_col_and_symbol():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("[Open of Nifty]")
+    assert tokens == [{"type": "col", "value": "Open", "of": "Nifty"}]
+
+
+def test_parse_plain_field_has_no_of_key():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("[Open]")
+    assert tokens == [{"type": "col", "value": "Open"}]
+
+
+def test_parse_field_of_prefers_exact_header_match():
+    from screens.formula_editor import parse_expression_text
+    # A header that itself contains " of " must not be split apart.
+    tokens = parse_expression_text("[% of Day Range]", known_headers=["% of Day Range"])
+    assert tokens == [{"type": "col", "value": "% of Day Range"}]
+
+
+def test_token_insert_text_renders_of_syntax():
+    from screens.formula_editor import _token_insert_text
+    assert _token_insert_text({"type": "col", "value": "Open", "of": "Nifty"}) == "[Open of Nifty]"
+    assert _token_insert_text({"type": "col", "value": "Open"}) == "[Open]"
+
+
+def test_col_of_tokens_round_trip_through_dialog(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    original = [{"type": "col", "value": "Open", "of": "Nifty"}]
+    dlg = ExpressionEditorDialog(original, ["Open"], [], {"Open": 100.0})
+    assert dlg.get_tokens() == original
+
+
+def test_row_catalogue_lists_distinct_scrip_names(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    all_data = [{"Scrip Name": "NIFTY", "Open": 100}, {"Scrip Name": "NIFTY", "Open": 100},
+                {"Scrip Name": "BANKNIFTY", "Open": 200}]
+    dlg = ExpressionEditorDialog([], ["Open"], [], {}, all_lmv_data=all_data)
+    dlg._nav_list.setCurrentRow(3)  # Rows
+    items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
+    assert sorted(items) == ["BANKNIFTY", "NIFTY"]
+
+
+def test_add_row_symbol_after_field_extends_bracket(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    dlg = ExpressionEditorDialog([{"type": "col", "value": "Open"}], ["Open"], [], {})
+    # Cursor is left at the end after loading tokens, i.e. right after "[Open]".
+    dlg._add_row_symbol("Nifty")
+    assert dlg._preview_edit.toPlainText() == "[Open of Nifty]"
+
+
+def test_add_row_symbol_without_field_shows_hint(qapp, monkeypatch):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QMessageBox
+    called = {}
+    monkeypatch.setattr(QMessageBox, "information",
+                        lambda *a, **k: called.setdefault("shown", True))
+    dlg = ExpressionEditorDialog([], ["Open"], [], {})
+    dlg._add_row_symbol("Nifty")
+    assert called.get("shown") is True
+    assert dlg._preview_edit.toPlainText() == ""
