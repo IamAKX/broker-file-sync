@@ -887,7 +887,7 @@ class LiveViewerWindow(QWidget):
         (toggling a strategy, changing category) omit it and compute inline
         here instead, since those are one-off and already fast.
         """
-        from services.strategy_engine import apply_strategies, get_cell_color
+        from services.strategy_engine import apply_strategies, get_row_fmt_colors
 
         highlight = changed_keys is None
         self._last_change_count = 0
@@ -948,8 +948,8 @@ class LiveViewerWindow(QWidget):
         )
         if fast:
             self._update_cells_in_place(
-                disp_data, all_dicts, strat_col_defs,
-                base_col_count, norm_bg, norm_txt, strat_hdr, get_cell_color,
+                disp_data, disp_headers, all_dicts, strat_col_defs,
+                base_col_count, norm_bg, norm_txt, strat_hdr,
                 highlight, agg_cache,
             )
             self._update_strat_btn_label()
@@ -974,15 +974,16 @@ class LiveViewerWindow(QWidget):
         scrip_col   = disp_headers.index("Scrip Name") if "Scrip Name" in disp_headers else -1
         for r, row in enumerate(disp_data):
             row_dict = all_dicts[r]
+            row_colors = get_row_fmt_colors(
+                strat_col_defs, row, base_col_count, row_dict, all_dicts, agg_cache)
             for c, val in enumerate(row):
                 item = QTableWidgetItem(self._fmt_cell(val))
                 item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
                 if c == scrip_col:
                     item.setFont(bold_font)
                 self._apply_cell_style(
-                    item, c, val, row_dict, all_dicts, strat_col_defs,
-                    base_col_count, norm_bg, norm_txt, strat_hdr, get_cell_color,
-                    agg_cache,
+                    item, c, disp_headers, row_colors, strat_col_defs,
+                    base_col_count, norm_bg, norm_txt, strat_hdr,
                 )
                 self._table.setItem(r, c, item)
 
@@ -1041,29 +1042,33 @@ class LiveViewerWindow(QWidget):
                 hdr.moveSection(current_visual, target_visual)
             target_visual += 1
 
-    def _apply_cell_style(self, item, c, val, row_dict, all_dicts,
+    def _apply_cell_style(self, item, c, disp_headers, row_colors,
                           strat_col_defs, base_col_count,
-                          norm_bg, norm_txt, strat_hdr, get_cell_color,
-                          agg_cache=None):
-        """Set foreground/background for one cell, incl. strategy formatting."""
+                          norm_bg, norm_txt, strat_hdr):
+        """Set foreground/background for one cell, incl. strategy formatting.
+
+        row_colors ({target_column_name: color}, from
+        services.strategy_engine.get_row_fmt_colors) is looked up by this
+        cell's own column name — a conditional-format rule can paint ANY
+        column, not just the strategy column that owns it (see
+        services.strategy_store's fmt_rule "target_column")."""
         item.setForeground(QBrush(norm_txt))
         item.setBackground(QBrush(norm_bg))
-        strat_idx = c - base_col_count
-        if 0 <= strat_idx < len(strat_col_defs):
-            col_def = strat_col_defs[strat_idx]
-            cell_color = get_cell_color(col_def, val, row_dict, all_dicts,
-                                        agg_cache)
-            if cell_color:
-                item.setBackground(QBrush(QColor(cell_color)))
-                qc = QColor(cell_color)
-                lum = 0.299 * qc.red() + 0.587 * qc.green() + 0.114 * qc.blue()
-                item.setForeground(QBrush(QColor("#000000" if lum > 128 else "#ffffff")))
-            else:
+        header = disp_headers[c] if c < len(disp_headers) else None
+        cell_color = row_colors.get(header) if header is not None else None
+        if cell_color:
+            item.setBackground(QBrush(QColor(cell_color)))
+            qc = QColor(cell_color)
+            lum = 0.299 * qc.red() + 0.587 * qc.green() + 0.114 * qc.blue()
+            item.setForeground(QBrush(QColor("#000000" if lum > 128 else "#ffffff")))
+        else:
+            strat_idx = c - base_col_count
+            if 0 <= strat_idx < len(strat_col_defs):
                 item.setBackground(QBrush(QColor(strat_hdr)))
 
-    def _update_cells_in_place(self, disp_data, all_dicts,
+    def _update_cells_in_place(self, disp_data, disp_headers, all_dicts,
                                strat_col_defs, base_col_count,
-                               norm_bg, norm_txt, strat_hdr, get_cell_color,
+                               norm_bg, norm_txt, strat_hdr,
                                highlight, agg_cache=None):
         """
         Update existing QTableWidgetItems in place (no recreation).
@@ -1072,11 +1077,14 @@ class LiveViewerWindow(QWidget):
         flashed amber; the steady-state brushes are stashed so the sweep timer
         can restore them after the highlight window.
         """
+        from services.strategy_engine import get_row_fmt_colors
         import time as _time
         now = _time.monotonic()
         changed = 0
         for r, row in enumerate(disp_data):
             row_dict = all_dicts[r]
+            row_colors = get_row_fmt_colors(
+                strat_col_defs, row, base_col_count, row_dict, all_dicts, agg_cache)
             for c, val in enumerate(row):
                 item = self._table.item(r, c)
                 if item is None:
@@ -1092,9 +1100,8 @@ class LiveViewerWindow(QWidget):
                 # Recompute the steady-state ("base") style every tick so the
                 # restored colour reflects current strategy formatting.
                 self._apply_cell_style(
-                    item, c, val, row_dict, all_dicts, strat_col_defs,
-                    base_col_count, norm_bg, norm_txt, strat_hdr, get_cell_color,
-                    agg_cache,
+                    item, c, disp_headers, row_colors, strat_col_defs,
+                    base_col_count, norm_bg, norm_txt, strat_hdr,
                 )
 
                 if not highlight:

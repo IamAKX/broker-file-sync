@@ -19,7 +19,7 @@ from PySide6.QtGui import QColor, QBrush
 from components.column_filter_popup import ColumnFilterPopup
 from screens.live_viewer import FilterPanelPopup, StrategyPickerPopup
 from services import strategy_store
-from services.strategy_engine import apply_strategies, get_cell_color
+from services.strategy_engine import apply_strategies, get_row_fmt_colors
 
 
 class LmvSnapshotViewer(QWidget):
@@ -218,6 +218,10 @@ class LmvSnapshotViewer(QWidget):
         scrip_col = disp_headers.index("Scrip Name") if "Scrip Name" in disp_headers else -1
         for r, row in enumerate(disp_data):
             row_dict = all_dicts[r]
+            # A fmt rule can paint any column, not just the strategy column
+            # that owns it — see services.strategy_engine.get_row_fmt_colors
+            # and services.strategy_store's fmt_rule "target_column".
+            row_colors = get_row_fmt_colors(strat_col_defs, row, base_col_count, row_dict, all_dicts)
             for c, val in enumerate(row):
                 item = QTableWidgetItem(self._fmt_cell(val))
                 item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -225,16 +229,15 @@ class LmvSnapshotViewer(QWidget):
                     item.setFont(bold_font)
                 item.setForeground(QBrush(norm_txt))
                 item.setBackground(QBrush(norm_bg))
-                strat_idx = c - base_col_count
-                if 0 <= strat_idx < len(strat_col_defs):
-                    col_def = strat_col_defs[strat_idx]
-                    cell_color = get_cell_color(col_def, val, row_dict, all_dicts)
-                    if cell_color:
-                        item.setBackground(QBrush(QColor(cell_color)))
-                        qc = QColor(cell_color)
-                        lum = 0.299 * qc.red() + 0.587 * qc.green() + 0.114 * qc.blue()
-                        item.setForeground(QBrush(QColor("#000000" if lum > 128 else "#ffffff")))
-                    else:
+                cell_color = row_colors.get(disp_headers[c]) if c < len(disp_headers) else None
+                if cell_color:
+                    item.setBackground(QBrush(QColor(cell_color)))
+                    qc = QColor(cell_color)
+                    lum = 0.299 * qc.red() + 0.587 * qc.green() + 0.114 * qc.blue()
+                    item.setForeground(QBrush(QColor("#000000" if lum > 128 else "#ffffff")))
+                else:
+                    strat_idx = c - base_col_count
+                    if 0 <= strat_idx < len(strat_col_defs):
                         item.setBackground(QBrush(QColor(strat_hdr)))
                 self._table.setItem(r, c, item)
 

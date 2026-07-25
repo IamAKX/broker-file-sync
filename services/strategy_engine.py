@@ -436,16 +436,52 @@ def apply_strategies(strategies: list, headers: list,
     return new_headers, new_data
 
 
-def get_cell_color(col_def: dict, value, row_dict: dict,
-                   all_dicts: list, agg_cache: dict | None = None) -> str | None:
-    """Return hex color if any fmt rule matches, else None."""
+def _match_fmt_rule(col_def: dict, value, row_dict: dict,
+                    all_dicts: list, agg_cache: dict | None = None) -> dict | None:
+    """Return the first fmt rule whose condition matches (THIS = value,
+    this column's own computed value), else None. First match wins."""
     for rule in col_def.get("fmt_rules", []):
         if not rule.get("condition"):
             continue
         if evaluate_condition(rule["condition"], row_dict, all_dicts,
                               self_value=value, agg_cache=agg_cache):
-            return rule.get("color")
+            return rule
     return None
+
+
+def get_cell_color(col_def: dict, value, row_dict: dict,
+                   all_dicts: list, agg_cache: dict | None = None) -> str | None:
+    """Return hex color if any fmt rule matches, else None."""
+    rule = _match_fmt_rule(col_def, value, row_dict, all_dicts, agg_cache)
+    return rule.get("color") if rule else None
+
+
+def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
+                       row_dict: dict, all_dicts: list,
+                       agg_cache: dict | None = None) -> dict:
+    """One row's resolved {target_column_name: color} map, combining every
+    active strategy column's conditional formatting.
+
+    A fmt rule's condition is always evaluated against its OWNING strategy
+    column's own computed value (THIS) — only WHERE the resulting color
+    paints changes: a rule's "target_column" (see services.strategy_store)
+    is the LMV column the user picked in Strategy Builder, defaulting to the
+    owning strategy column's own cell when none was picked. When two
+    matching rules (from different strategy columns) target the same column
+    for this row, the earlier one in strat_col_defs order wins — same
+    "first match wins" spirit get_cell_color already uses per-column.
+    """
+    colors: dict = {}
+    for strat_idx, col_def in enumerate(strat_col_defs):
+        idx = base_col_count + strat_idx
+        if idx >= len(row):
+            continue
+        rule = _match_fmt_rule(col_def, row[idx], row_dict, all_dicts, agg_cache)
+        if rule is None:
+            continue
+        target = rule.get("target_column") or col_def.get("name")
+        colors.setdefault(target, rule.get("color"))
+    return colors
 
 
 def compile_check(tokens: list, row_data: dict, all_data: list,

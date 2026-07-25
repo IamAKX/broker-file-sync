@@ -461,3 +461,79 @@ def test_row_filter_editor_disables_this_and_passes_column_values(qapp, monkeypa
     assert "Out" in captured.get("lmv_headers", [])
     # …and its computed value is supplied for the compile test.
     assert captured.get("extra_row_values", {}).get("Out") == 42.0
+
+
+# ── Conditional-format rule: "Apply color to" target column picker ──────────
+
+def test_fmt_rule_has_target_column_combo_with_this_column_default(qapp):
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+    from PySide6.QtWidgets import QComboBox
+
+    col = new_column("Signal")
+    col["fmt_rules"].append(new_fmt_rule())
+    dlg = ColumnEditorDialog(col, ["LTP", "Current"], None)
+
+    combos = dlg.findChildren(QComboBox)
+    target_combo = next(
+        c for c in combos if [c.itemText(i) for i in range(c.count())][0] == "(This column)"
+    )
+    items = [target_combo.itemText(i) for i in range(target_combo.count())]
+    assert items == ["(This column)", "LTP", "Current"]
+    assert target_combo.currentText() == "(This column)"
+
+
+def test_selecting_target_column_updates_rule(qapp):
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+
+    col = new_column("Signal")
+    col["fmt_rules"].append(new_fmt_rule())
+    dlg = ColumnEditorDialog(col, ["LTP", "Current"], None)
+
+    dlg._set_fmt_target(0, "Current")
+    assert dlg._col["fmt_rules"][0]["target_column"] == "Current"
+
+    dlg._set_fmt_target(0, "(This column)")
+    assert dlg._col["fmt_rules"][0]["target_column"] is None
+
+
+def test_existing_target_column_preselected_on_reopen(qapp):
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+    from PySide6.QtWidgets import QComboBox
+
+    col = new_column("Signal")
+    rule = new_fmt_rule()
+    rule["target_column"] = "Current"
+    col["fmt_rules"].append(rule)
+    dlg = ColumnEditorDialog(col, ["LTP", "Current"], None)
+
+    combos = dlg.findChildren(QComboBox)
+    target_combo = next(
+        c for c in combos if "(This column)" in [c.itemText(i) for i in range(c.count())]
+    )
+    assert target_combo.currentText() == "Current"
+
+
+def test_stale_target_column_not_in_lmv_headers_still_shown(qapp):
+    """A rule saved when the LMV had a column that's since been removed/renamed
+    must not silently lose its target on reopen — it stays selected/visible in
+    the dropdown rather than being dropped without the user noticing."""
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+    from PySide6.QtWidgets import QComboBox
+
+    col = new_column("Signal")
+    rule = new_fmt_rule()
+    rule["target_column"] = "OldColumnName"
+    col["fmt_rules"].append(rule)
+    dlg = ColumnEditorDialog(col, ["LTP", "Current"], None)
+
+    combos = dlg.findChildren(QComboBox)
+    target_combo = next(
+        c for c in combos if "(This column)" in [c.itemText(i) for i in range(c.count())]
+    )
+    items = [target_combo.itemText(i) for i in range(target_combo.count())]
+    assert "OldColumnName" in items
+    assert target_combo.currentText() == "OldColumnName"

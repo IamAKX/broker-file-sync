@@ -596,7 +596,10 @@ class ColumnEditorDialog(QDialog):
         fmt_hdr.addWidget(add_rule)
         root.addLayout(fmt_hdr)
 
-        hint = QLabel("First matching rule wins. Use THIS to reference this column's own value.")
+        hint = QLabel(
+            "First matching rule wins. Use THIS to reference this column's own value. "
+            "\"Apply color to\" picks which LMV column gets painted — defaults to this column."
+        )
         hint.setFont(font_scale.font(font_scale.SMALL, False))
         hint.setStyleSheet(f"color:{txts};background:transparent;")
         root.addWidget(hint)
@@ -700,11 +703,36 @@ class ColumnEditorDialog(QDialog):
             hdr.addWidget(del_btn)
             rlay.addLayout(hdr)
 
+            # Which column this rule's color paints onto when it matches —
+            # defaults to this strategy column's own cell (None), but any
+            # LMV column can be picked instead (see services.strategy_store's
+            # fmt_rule "target_column"). The condition itself is unaffected —
+            # THIS in "Edit Condition…" still means this column's own value.
+            target_row = QHBoxLayout()
+            target_lbl = QLabel("Apply color to:")
+            target_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+            target_lbl.setStyleSheet("background:transparent;")
+            target_lbl.setMinimumWidth(110)
+
+            target_combo = QComboBox()
+            current_target = rule.get("target_column")
+            target_options = ["(This column)"] + list(self._lmv)
+            if current_target and current_target not in target_options:
+                target_options.append(current_target)
+            target_combo.addItems(target_options)
+            target_combo.setCurrentText(current_target or "(This column)")
+            target_combo.currentTextChanged.connect(
+                lambda text, i=idx: self._set_fmt_target(i, text)
+            )
+            target_row.addWidget(target_lbl)
+            target_row.addWidget(target_combo, 1)
+            rlay.addLayout(target_row)
+
             cond_row = QHBoxLayout()
             cond_lbl = QLabel("Condition:")
             cond_lbl.setFont(font_scale.font(font_scale.SMALL, False))
             cond_lbl.setStyleSheet("background:transparent;")
-            cond_lbl.setFixedWidth(80)
+            cond_lbl.setMinimumWidth(110)
 
             cond_preview = QLabel(
                 _tokens_to_display(rule.get("condition", [])) or "—"
@@ -751,6 +779,9 @@ class ColumnEditorDialog(QDialog):
             preview_label.setText(
                 _tokens_to_display(self._col["fmt_rules"][idx]["condition"]) or "—"
             )
+
+    def _set_fmt_target(self, idx: int, text: str):
+        self._col["fmt_rules"][idx]["target_column"] = None if text == "(This column)" else text
 
     def _pick_color(self, idx: int, btn: QPushButton):
         current = QColor(self._col["fmt_rules"][idx]["color"])

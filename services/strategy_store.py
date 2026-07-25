@@ -10,7 +10,7 @@ Each strategy is a dict:
         "name": str,
         "formula": [...tokens...],
         "fmt_rules": [
-          {"condition": [...tokens...], "color": "#rrggbb"}
+          {"condition": [...tokens...], "color": "#rrggbb", "target_column": str | None}
         ]
       }
     ]
@@ -23,6 +23,13 @@ Tokens are plain dicts so JSON roundtrips cleanly:
   {"type": "func", "value": "MAX("}
   {"type": "paren","value": ")"}
   {"type": "self"} — refers to the column's own computed value in fmt rules
+
+A fmt rule's "target_column" is the LMV column its color paints onto when
+the condition matches — None (the default) means the strategy column's own
+cell, same as before this field existed; any other value is the exact
+header text of an LMV column the user picked in Strategy Builder. The
+condition itself is unaffected by target_column — THIS still refers to the
+owning strategy column's own computed value either way.
 """
 
 import json
@@ -86,4 +93,4 @@ def new_column(name: str) -> dict:
 
 
 def new_fmt_rule(color: str = "#39d353") -> dict:
-    return {"condition": [], "color": color}
+    return {"condition": [], "color": color, "target_column": None}
