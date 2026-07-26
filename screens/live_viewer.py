@@ -1604,6 +1604,20 @@ class LiveViewerWindow(QWidget):
             if current_visual != target_visual:
                 self._move_section_programmatically(hdr, current_visual, target_visual)
 
+        # The loop above puts "Scrip Name" at its natural *logical* position
+        # (e.g. index 1, right after "Sector") — but the frozen overlay
+        # always assumes visual index 0 is Scrip Name, and the render below
+        # can take the fast-update path (no active strategies means headers/
+        # row count are unchanged), which skips the pin logic that normally
+        # fixes this. Re-pin explicitly so the overlay isn't left covering
+        # the wrong column while the real Scrip Name column sits one to the
+        # right of it, uncovered — the exact "overlapping, not fully
+        # visible" symptom this was causing after every reset.
+        if self._frozen_logical_col is not None:
+            visual = hdr.visualIndex(self._frozen_logical_col)
+            if visual != 0:
+                self._move_section_programmatically(hdr, visual, 0)
+
         # Row sort.
         self._sort_col_name = None
         self._sort_descending = False
