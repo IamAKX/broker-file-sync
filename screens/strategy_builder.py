@@ -5,6 +5,7 @@ Strategy Builder screen.
 
 import copy
 import os
+import re
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
@@ -13,10 +14,36 @@ from PySide6.QtWidgets import (
     QFrame, QScrollArea, QLineEdit, QSizePolicy, QDialog,
     QColorDialog, QMessageBox, QApplication, QComboBox
 )
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QColor
+from PySide6.QtCore import Qt, Signal, QByteArray, QSize
+from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QPainter
+from PySide6.QtSvg import QSvgRenderer
 
 from services import strategy_store as store
+
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
+
+
+def _svg_icon(filename: str, color: str) -> QIcon:
+    """Load an assets/icons/*.svg file, recolored to match the current theme
+    (the on-disk files are all fill="#000000" placeholders — see the same
+    pattern in components/sidebar.py and components/topbar.py). Text glyphs
+    like "▲"/"▼"/"ⓘ" render as missing-glyph boxes on some platforms/fonts,
+    so buttons that need an icon use this instead of a Unicode character."""
+    path = os.path.join(ASSETS_DIR, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            svg = f.read()
+    except FileNotFoundError:
+        return QIcon()
+    svg = re.sub(r'(<(?:path|circle|ellipse|polygon|polyline|line|rect)[^>]*)\bfill="(?!none)[^"]*"', rf'\1fill="{color}"', svg)
+    svg = re.sub(r'(<(?:path|circle|ellipse|polygon|polyline|line|rect)[^>]*)\bstroke="(?!none)[^"]*"', rf'\1stroke="{color}"', svg)
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
 
 
 # ── theme helpers — always read at call-time so toggling works ─────────────
@@ -589,19 +616,36 @@ class ColumnEditorDialog(QDialog):
         fmt_hdr = QHBoxLayout()
         fmt_lbl = QLabel("Conditional Formatting:")
         fmt_lbl.setFont(font_scale.font(font_scale.SMALL, True))
+        help_btn = QPushButton()
+        help_btn.setIcon(_svg_icon("info.svg", _t(t, "accent")))
+        help_btn.setIconSize(QSize(14, 14))
+        help_btn.setFixedSize(22, 22)
+        help_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        help_btn.setToolTip("How rule priority works")
+        help_btn.setStyleSheet(
+            f"QPushButton{{background:transparent;"
+            f"border:1px solid {_t(t,'accent')};border-radius:11px;}}"
+            f"QPushButton:hover{{background:{_t(t,'accent')}22;}}"
+        )
+        help_btn.clicked.connect(self._show_fmt_rules_help)
         add_rule = _btn("+ Add Rule", theme=t, small=True)
         add_rule.clicked.connect(self._add_fmt_rule)
         fmt_hdr.addWidget(fmt_lbl)
+        fmt_hdr.addWidget(help_btn)
         fmt_hdr.addStretch()
         fmt_hdr.addWidget(add_rule)
         root.addLayout(fmt_hdr)
 
         hint = QLabel(
-            "First matching rule wins. Use THIS to reference this column's own value. "
-            "\"Apply color to\" picks which LMV column gets painted — defaults to this column."
+            "Rules are checked top to bottom — the first one whose condition is true "
+            "wins, and the rest are skipped for that row. Use the ▲ / ▼ buttons to "
+            "reorder them (click ⓘ above for an example). Use THIS to reference this "
+            "column's own value. \"Apply color to\" picks which LMV column gets "
+            "painted — defaults to this column."
         )
         hint.setFont(font_scale.font(font_scale.SMALL, False))
         hint.setStyleSheet(f"color:{txts};background:transparent;")
+        hint.setWordWrap(True)
         root.addWidget(hint)
 
         self._fmt_scroll = QScrollArea()
@@ -656,6 +700,31 @@ class ColumnEditorDialog(QDialog):
         del self._col["fmt_rules"][idx]
         self._refresh_fmt_rules()
 
+    def _move_fmt_rule(self, idx: int, delta: int):
+        rules = self._col["fmt_rules"]
+        new_idx = idx + delta
+        if not (0 <= new_idx < len(rules)):
+            return
+        rules[idx], rules[new_idx] = rules[new_idx], rules[idx]
+        self._refresh_fmt_rules()
+
+    def _show_fmt_rules_help(self):
+        QMessageBox.information(
+            self, "How rule priority works",
+            "<p>Rules are checked <b>top to bottom</b>. The first rule whose "
+            "condition is true is the one that colors the cell — every rule "
+            "below it is skipped for that row, even if their conditions are "
+            "also true.</p>"
+            "<p><b>Example:</b><br>"
+            "Rule 1: THIS &gt; 100 &rarr; Green<br>"
+            "Rule 2: THIS &gt; 50 &rarr; Red</p>"
+            "<p>For a value of 150, both conditions are true — but the cell "
+            "turns <b>Green</b>, because Rule 1 is checked first and Red is "
+            "never reached.</p>"
+            "<p>Use the <b>▲ / ▼</b> buttons on each rule to reorder them — "
+            "move a rule up to give it higher priority.</p>",
+        )
+
     def _refresh_fmt_rules(self):
         t  = self._theme
         bg = _t(t, "button_bg")
@@ -666,7 +735,8 @@ class ColumnEditorDialog(QDialog):
             if item.widget():
                 item.widget().deleteLater()
 
-        for idx, rule in enumerate(self._col.get("fmt_rules", [])):
+        rules = self._col.get("fmt_rules", [])
+        for idx, rule in enumerate(rules):
             rule_frame = QFrame()
             rule_frame.setStyleSheet(
                 f"QFrame{{background:{bg};border:1px solid {bd};border-radius:6px;}}"
@@ -691,6 +761,22 @@ class ColumnEditorDialog(QDialog):
             color_btn.setToolTip("Pick color")
             color_btn.clicked.connect(lambda _, i=idx, cb=color_btn: self._pick_color(i, cb))
 
+            up_btn = _btn("", theme=t, small=True)
+            up_btn.setIcon(_svg_icon("up.svg", _t(t, "text_primary")))
+            up_btn.setIconSize(QSize(12, 12))
+            up_btn.setFixedWidth(28)
+            up_btn.setToolTip("Move up (higher priority)")
+            up_btn.setEnabled(idx > 0)
+            up_btn.clicked.connect(lambda _, i=idx: self._move_fmt_rule(i, -1))
+
+            down_btn = _btn("", theme=t, small=True)
+            down_btn.setIcon(_svg_icon("down.svg", _t(t, "text_primary")))
+            down_btn.setIconSize(QSize(12, 12))
+            down_btn.setFixedWidth(28)
+            down_btn.setToolTip("Move down (lower priority)")
+            down_btn.setEnabled(idx < len(rules) - 1)
+            down_btn.clicked.connect(lambda _, i=idx: self._move_fmt_rule(i, 1))
+
             del_btn = _btn("✕", theme=t, small=True, danger=True)
             del_btn.setFixedWidth(30)
             del_btn.clicked.connect(lambda _, i=idx: self._remove_fmt_rule(i))
@@ -699,6 +785,9 @@ class ColumnEditorDialog(QDialog):
             color_lbl.setStyleSheet("background:transparent;")
             hdr.addWidget(color_lbl)
             hdr.addWidget(color_btn)
+            hdr.addSpacing(8)
+            hdr.addWidget(up_btn)
+            hdr.addWidget(down_btn)
             hdr.addSpacing(8)
             hdr.addWidget(del_btn)
             rlay.addLayout(hdr)

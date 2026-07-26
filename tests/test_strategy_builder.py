@@ -537,3 +537,83 @@ def test_stale_target_column_not_in_lmv_headers_still_shown(qapp):
     items = [target_combo.itemText(i) for i in range(target_combo.count())]
     assert "OldColumnName" in items
     assert target_combo.currentText() == "OldColumnName"
+
+
+# ── Conditional formatting rule reordering ──────────────────────────────────
+
+def test_move_fmt_rule_up_swaps_with_previous(qapp):
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+
+    col = new_column("TestCol")
+    rule_a = new_fmt_rule("#111111")
+    rule_b = new_fmt_rule("#222222")
+    col["fmt_rules"] = [rule_a, rule_b]
+    dlg = ColumnEditorDialog(col, ["LTP"], None)
+
+    dlg._move_fmt_rule(1, -1)
+    assert dlg._col["fmt_rules"] == [rule_b, rule_a]
+
+
+def test_move_fmt_rule_down_swaps_with_next(qapp):
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+
+    col = new_column("TestCol")
+    rule_a = new_fmt_rule("#111111")
+    rule_b = new_fmt_rule("#222222")
+    col["fmt_rules"] = [rule_a, rule_b]
+    dlg = ColumnEditorDialog(col, ["LTP"], None)
+
+    dlg._move_fmt_rule(0, 1)
+    assert dlg._col["fmt_rules"] == [rule_b, rule_a]
+
+
+def test_move_fmt_rule_out_of_bounds_is_a_no_op(qapp):
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+
+    col = new_column("TestCol")
+    rule_a = new_fmt_rule("#111111")
+    col["fmt_rules"] = [rule_a]
+    dlg = ColumnEditorDialog(col, ["LTP"], None)
+
+    dlg._move_fmt_rule(0, -1)  # already first
+    dlg._move_fmt_rule(0, 1)   # already last
+    assert dlg._col["fmt_rules"] == [rule_a]
+
+
+def test_fmt_rule_reorder_buttons_present_and_edge_disabled(qapp):
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+
+    col = new_column("TestCol")
+    col["fmt_rules"] = [new_fmt_rule(), new_fmt_rule(), new_fmt_rule()]
+    dlg = ColumnEditorDialog(col, ["LTP"], None)
+
+    from PySide6.QtWidgets import QPushButton
+    ups = [b for b in dlg.findChildren(QPushButton) if b.toolTip().startswith("Move up")]
+    downs = [b for b in dlg.findChildren(QPushButton) if b.toolTip().startswith("Move down")]
+    assert len(ups) == 3
+    assert len(downs) == 3
+    assert all(not b.icon().isNull() for b in ups + downs)
+    assert ups[0].isEnabled() is False   # first rule can't move up
+    assert downs[-1].isEnabled() is False  # last rule can't move down
+    assert ups[1].isEnabled() is True
+    assert downs[0].isEnabled() is True
+
+
+def test_fmt_rules_help_button_shows_popup(qapp, monkeypatch):
+    from services.strategy_store import new_column
+    from screens.strategy_builder import ColumnEditorDialog
+    from PySide6.QtWidgets import QMessageBox
+
+    called = {}
+    monkeypatch.setattr(
+        QMessageBox, "information",
+        lambda *a, **k: called.setdefault("shown", True),
+    )
+    col = new_column("TestCol")
+    dlg = ColumnEditorDialog(col, ["LTP"], None)
+    dlg._show_fmt_rules_help()
+    assert called.get("shown") is True
