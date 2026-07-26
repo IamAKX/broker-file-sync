@@ -1,6 +1,7 @@
 import font_scale
 import html
 import os
+import re
 import sys
 import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -9,13 +10,14 @@ from components.column_filter_popup import ColumnFilterPopup
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QFrame,
+    QTableWidget, QTableWidgetItem, QTableView, QHeaderView, QAbstractItemView, QFrame,
     QCheckBox, QSizePolicy, QComboBox, QScrollArea, QLineEdit
 )
 from PySide6.QtCore import (
-    Qt, QTimer, QFileSystemWatcher, Signal, QObject, QThread
+    Qt, QTimer, QFileSystemWatcher, Signal, QObject, QThread, QEvent, QByteArray, QSize
 )
-from PySide6.QtGui import QColor, QBrush
+from PySide6.QtGui import QColor, QBrush, QIcon, QPixmap, QPainter
+from PySide6.QtSvg import QSvgRenderer
 
 
 _DEBOUNCE_MS   = 300    # ms to wait after file event before re-reading
@@ -25,6 +27,29 @@ _IDLE_TICKS    = 15     # consecutive no-change ticks before backing off (~3s)
 _HIGHLIGHT_MS  = 4000   # how long a changed cell stays amber
 _SWEEP_MS      = 500    # how often expired highlights are cleared
 _FILE_SETTLE_S = 0.2    # brief wait so disk writes finish before re-reading
+
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
+
+
+def _svg_icon(filename: str, color: str) -> QIcon:
+    """Load an assets/icons/*.svg file, recolored to match the current theme
+    (the on-disk files are all fill="#000000" placeholders — same pattern as
+    components/sidebar.py, components/topbar.py, screens/strategy_builder.py)."""
+    path = os.path.join(ASSETS_DIR, filename)
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            svg = f.read()
+    except FileNotFoundError:
+        return QIcon()
+    svg = re.sub(r'(<(?:path|circle|ellipse|polygon|polyline|line|rect)[^>]*)\bfill="(?!none)[^"]*"', rf'\1fill="{color}"', svg)
+    svg = re.sub(r'(<(?:path|circle|ellipse|polygon|polyline|line|rect)[^>]*)\bstroke="(?!none)[^"]*"', rf'\1stroke="{color}"', svg)
+    renderer = QSvgRenderer(QByteArray(svg.encode("utf-8")))
+    pixmap = QPixmap(64, 64)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    renderer.render(painter)
+    painter.end()
+    return QIcon(pixmap)
 
 
 # ── Off-thread reader worker ────────────────────────────────────────────────
@@ -488,6 +513,17 @@ class LiveViewerWindow(QWidget):
         self._strategies: list   = []      # injected by DataImportScreen
         self._selected_category: str = "All"
 
+        # Column sort — a snapshot of row order (by "Scrip Name") captured
+        # at the moment the user clicks a header, not a live re-sort every
+        # tick. Keeping row *position* stable between ticks this way lets
+        # the existing position-based live-update fast path (see
+        # _update_cells_in_place) keep working correctly while sorted —
+        # values still update in place, they just don't jump rows around
+        # on every poll. See _resort_now / _on_header_clicked.
+        self._sort_col_name: str | None = None
+        self._sort_descending: bool = False
+        self._row_order: list | None = None    # captured Scrip Name order, or None
+
         # Build sector lookup from config defaults once at init
         from config_defaults import SECTOR_STOCK_DATA
         self._sector_map: dict = {stock: sector for sector, stock in SECTOR_STOCK_DATA}
@@ -587,6 +623,23 @@ class LiveViewerWindow(QWidget):
         )
         self._export_btn.clicked.connect(self._export)
 
+        self._reset_btn = QPushButton()
+        self._reset_btn.setIcon(_svg_icon("reset.svg", text_s))
+        self._reset_btn.setIconSize(QSize(15, 15))
+        self._reset_btn.setFixedSize(30, 30)
+        self._reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._reset_btn.setToolTip(
+            "Reset view — turns off all strategies, clears the category/sector "
+            "filters, column visibility and sort, and puts columns back in "
+            "their original order."
+        )
+        self._reset_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent;"
+            f"border: 1px solid {divclr}; border-radius: 4px; }}"
+            f"QPushButton:hover {{ border-color: {accent}; }}"
+        )
+        self._reset_btn.clicked.connect(self._reset_view)
+
         stop_btn = QPushButton("Stop")
         stop_btn.setFixedHeight(30)
         stop_btn.setFont(font_scale.font(font_scale.SMALL, False))
@@ -607,6 +660,8 @@ class LiveViewerWindow(QWidget):
         top.addWidget(self._strat_btn)
         top.addSpacing(8)
         top.addWidget(self._export_btn)
+        top.addSpacing(8)
+        top.addWidget(self._reset_btn)
         top.addSpacing(8)
         top.addWidget(stop_btn)
         root.addLayout(top)
@@ -629,8 +684,14 @@ class LiveViewerWindow(QWidget):
         hdr.setStretchLastSection(True)
         hdr.setSectionsMovable(True)
         hdr.sectionMoved.connect(self._on_section_moved)
+        hdr.sectionResized.connect(self._on_section_resized)
+        hdr.setSectionsClickable(True)
+        hdr.setSortIndicatorShown(True)
+        hdr.sectionClicked.connect(self._on_header_clicked)
         self._table.setShowGrid(True)
         root.addWidget(self._table, 1)
+
+        self._setup_frozen_column()
 
         # ── Bottom bar ────────────────────────────────────────────────────────
         bottom = QHBoxLayout()
@@ -903,6 +964,8 @@ class LiveViewerWindow(QWidget):
         else:
             disp_headers, disp_data = self._headers, data
 
+        disp_data = self._apply_row_order(disp_headers, disp_data)
+
         base_col_count = len(self._headers)
 
         # Read theme at render time so light/dark toggle is always current
@@ -964,10 +1027,11 @@ class LiveViewerWindow(QWidget):
         self._highlights.clear()
 
         self.setStyleSheet(f"background: {win_bg};")
-        self._table.setStyleSheet(
+        table_style = (
             f"QTableWidget {{ background: {norm_bg.name()}; color: {norm_txt.name()}; }}"
             f"QTableWidget QHeaderView::section {{ background: {hdr_bg}; color: {norm_txt.name()}; }}"
         )
+        self._table.setStyleSheet(table_style)
 
         self._table.setColumnCount(len(disp_headers))
         self._table.setHorizontalHeaderLabels(disp_headers)
@@ -1008,11 +1072,33 @@ class LiveViewerWindow(QWidget):
 
         self._render_sig = sig
         self._restore_column_order()
+        frozen_style = (
+            f"QTableView {{ background: {norm_bg.name()}; color: {norm_txt.name()}; "
+            f"border-right: 2px solid palette(mid); }}"
+            f"QTableView QHeaderView::section {{ background: {hdr_bg}; color: {norm_txt.name()}; }}"
+        )
+        self._configure_frozen_column(scrip_col, frozen_style)
         self._update_strat_btn_label()
 
     def _on_section_moved(self, logical: int, old_visual: int, new_visual: int):
         """Persist the new column order whenever the user drags a header."""
         hdr = self._table.horizontalHeader()
+        # Moves this class makes itself (freeze pinning, restoring the saved
+        # order) must not be re-persisted as if the user had dragged a
+        # column — that would bake a snap-back into the saved order instead
+        # of just reverting it for this one render.
+        if getattr(self, "_programmatic_reorder", False):
+            return
+        # "Scrip Name" is frozen at the left edge (see _setup_frozen_column) —
+        # any drag that would bump it off visual index 0 (either dragging it
+        # away, or dragging another column in front of it) is undone here,
+        # without persisting the reverted position.
+        col = getattr(self, "_frozen_logical_col", None)
+        if col is not None:
+            visual = hdr.visualIndex(col)
+            if visual != 0:
+                self._move_section_programmatically(hdr, visual, 0)
+                return
         ordered = [
             self._table.horizontalHeaderItem(hdr.logicalIndex(v)).text()
             for v in range(hdr.count())
@@ -1020,6 +1106,201 @@ class LiveViewerWindow(QWidget):
         ]
         from services.config_store import save_column_order
         save_column_order(ordered)
+
+    def _move_section_programmatically(self, hdr, frm: int, to: int):
+        """moveSection() re-enters _on_section_moved via its signal — set
+        while the move is in flight so that handler knows not to persist it
+        as a user-initiated reorder."""
+        self._programmatic_reorder = True
+        try:
+            hdr.moveSection(frm, to)
+        finally:
+            self._programmatic_reorder = False
+
+    # ── Column sort ───────────────────────────────────────────────────────────
+
+    def _on_header_clicked(self, logical_index: int):
+        if logical_index is None or logical_index < 0:
+            return
+        item = self._table.horizontalHeaderItem(logical_index)
+        if item is None:
+            return
+        name = item.text()
+        if self._sort_col_name == name:
+            self._sort_descending = not self._sort_descending
+        else:
+            self._sort_col_name = name
+            self._sort_descending = False
+        self._resort_now()
+
+        order = (Qt.SortOrder.DescendingOrder if self._sort_descending
+                 else Qt.SortOrder.AscendingOrder)
+        self._table.horizontalHeader().setSortIndicator(logical_index, order)
+        self._frozen_table.horizontalHeader().setSortIndicator(logical_index, order)
+
+        self._populate_table(self._data, set())
+
+    def _resort_now(self):
+        """Capture the current on-screen order for self._sort_col_name as a
+        list of "Scrip Name" values — a one-time snapshot, not a continuous
+        live re-sort (see the state comment in __init__ for why)."""
+        col_idx = scrip_idx = None
+        for c in range(self._table.columnCount()):
+            hdr_item = self._table.horizontalHeaderItem(c)
+            if hdr_item is None:
+                continue
+            if hdr_item.text() == self._sort_col_name:
+                col_idx = c
+            if hdr_item.text() == "Scrip Name":
+                scrip_idx = c
+        if col_idx is None or scrip_idx is None:
+            self._row_order = None
+            return
+        rows = []
+        for r in range(self._table.rowCount()):
+            scrip_item = self._table.item(r, scrip_idx)
+            if scrip_item is None:
+                continue
+            val_item = self._table.item(r, col_idx)
+            rows.append((scrip_item.text(), val_item.text() if val_item else ""))
+
+        # Split off blanks first — they always sort last regardless of
+        # direction (spreadsheet convention), so they must never take part
+        # in the reverse= toggle below.
+        blanks    = [pair for pair in rows if not pair[1]]
+        non_blank = [pair for pair in rows if pair[1]]
+
+        # A negation trick (like -num) works for numeric descending order
+        # but has no string equivalent, so reverse= is what actually needs
+        # to flip for text columns — figure out once whether this column is
+        # numeric or text and sort accordingly, instead of relying on a
+        # single key function to encode both cases (the previous version
+        # only handled numeric columns, so descending never took effect
+        # for text columns like "Scrip Name"/"Sector").
+        numeric = True
+        for _, text in non_blank:
+            try:
+                float(text)
+            except (TypeError, ValueError):
+                numeric = False
+                break
+        if numeric:
+            non_blank.sort(key=lambda pair: float(pair[1]), reverse=self._sort_descending)
+        else:
+            non_blank.sort(key=lambda pair: pair[1].lower(), reverse=self._sort_descending)
+
+        self._row_order = [scrip for scrip, _ in non_blank] + [scrip for scrip, _ in blanks]
+
+    def _apply_row_order(self, disp_headers: list, disp_data: list) -> list:
+        """Reorder disp_data to match the captured sort snapshot (by "Scrip
+        Name"), keeping row position stable tick-to-tick so the live-update
+        fast path stays valid while sorted. Stocks not in the snapshot (new
+        since the sort was taken) are appended at the end, in their natural
+        order; stocks that disappeared are simply absent — no error."""
+        if not self._row_order or "Scrip Name" not in disp_headers:
+            return disp_data
+        scrip_idx = disp_headers.index("Scrip Name")
+        by_scrip = {}
+        for row in disp_data:
+            key = row[scrip_idx]
+            by_scrip.setdefault(key, row)
+        known = set(self._row_order)
+        ordered = [by_scrip[s] for s in self._row_order if s in by_scrip]
+        remaining = [row for row in disp_data if row[scrip_idx] not in known]
+        return ordered + remaining
+
+    # ── Frozen "Scrip Name" column ───────────────────────────────────────────
+    # A second, non-scrolling QTableView overlaid on top of the main table's
+    # left edge, sharing its model — so cell content/colors/selection stay in
+    # sync automatically and only scroll position + geometry need manual
+    # syncing. Standard Qt "frozen column" pattern (see Qt's own Frozen Column
+    # example), adapted to QTableWidget's built-in model.
+
+    def _setup_frozen_column(self):
+        self._frozen_logical_col = None
+        self._frozen_table = QTableView(self._table)
+        self._frozen_table.setModel(self._table.model())
+        self._frozen_table.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self._frozen_table.setFont(font_scale.font(font_scale.SMALL, False))
+        self._frozen_table.verticalHeader().setVisible(False)
+        self._frozen_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._frozen_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._frozen_table.setAlternatingRowColors(False)
+        self._frozen_table.setShowGrid(True)
+        self._frozen_table.setFrameShape(QFrame.Shape.NoFrame)
+        self._frozen_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._frozen_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        fhdr = self._frozen_table.horizontalHeader()
+        fhdr.setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        fhdr.setSectionsMovable(False)
+        fhdr.setSectionsClickable(True)
+        fhdr.setSortIndicatorShown(True)
+        # The overlay has its own header instance, so a click on it needs
+        # its own connection — it always represents _frozen_logical_col.
+        fhdr.sectionClicked.connect(
+            lambda: self._on_header_clicked(self._frozen_logical_col))
+        self._frozen_table.hide()
+
+        # The two views are otherwise fully independent even though they
+        # share a model — keep vertical scrolling in lock-step by hand.
+        self._table.verticalScrollBar().valueChanged.connect(
+            self._frozen_table.verticalScrollBar().setValue)
+        self._frozen_table.verticalScrollBar().valueChanged.connect(
+            self._table.verticalScrollBar().setValue)
+
+        self._table.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is self._table and event.type() in (
+            QEvent.Type.Resize, QEvent.Type.Show
+        ):
+            self._update_frozen_geometry()
+        return super().eventFilter(obj, event)
+
+    def _on_section_resized(self, logical: int, old_size: int, new_size: int):
+        if logical == getattr(self, "_frozen_logical_col", None):
+            self._update_frozen_geometry()
+
+    def _configure_frozen_column(self, scrip_col: int, style_sheet: str):
+        """Called after every full rebuild: point the overlay at the "Scrip
+        Name" logical column (its logical index is stable across renders —
+        only its *visual* position can move) and pin that column to visual
+        index 0 so the overlay always lines up with the real leftmost column.
+        """
+        self._frozen_logical_col = scrip_col if scrip_col >= 0 else None
+        if self._frozen_logical_col is None:
+            self._frozen_table.hide()
+            return
+        for c in range(self._table.model().columnCount()):
+            self._frozen_table.setColumnHidden(c, c != self._frozen_logical_col)
+        self._frozen_table.setStyleSheet(style_sheet)
+        hdr = self._table.horizontalHeader()
+        visual = hdr.visualIndex(self._frozen_logical_col)
+        if visual != 0:
+            self._move_section_programmatically(hdr, visual, 0)
+        self._update_frozen_geometry()
+        # Re-assert one event-loop turn later too, in case anything here
+        # (setStyleSheet's repolish, column auto-sizing) settles its final
+        # layout asynchronously rather than within this call.
+        QTimer.singleShot(0, self._update_frozen_geometry)
+
+    def _update_frozen_geometry(self):
+        col = getattr(self, "_frozen_logical_col", None)
+        if col is None or self._table.isColumnHidden(col):
+            self._frozen_table.hide()
+            return
+        hdr = self._table.horizontalHeader()
+        vh = self._table.verticalHeader()
+        vh_width = vh.width() if vh.isVisible() else 0
+        x = vh_width + self._table.frameWidth()
+        y = self._table.frameWidth()
+        width = self._table.columnWidth(col)
+        self._frozen_table.setColumnWidth(col, width)
+        height = self._table.viewport().height() + hdr.height()
+        self._frozen_table.setGeometry(x, y, width, height)
+        self._frozen_table.verticalScrollBar().setValue(self._table.verticalScrollBar().value())
+        self._frozen_table.show()
+        self._frozen_table.raise_()
 
     def _restore_column_order(self):
         """Reorder columns to match the saved order (by column name)."""
@@ -1043,7 +1324,7 @@ class LiveViewerWindow(QWidget):
                 continue
             current_visual = hdr.visualIndex(logical)
             if current_visual != target_visual:
-                hdr.moveSection(current_visual, target_visual)
+                self._move_section_programmatically(hdr, current_visual, target_visual)
             target_visual += 1
 
     def _apply_cell_style(self, item, c, disp_headers, row_colors,
@@ -1134,6 +1415,14 @@ class LiveViewerWindow(QWidget):
 
     def _sweep_highlights(self):
         """Revert amber cells whose highlight window has expired."""
+        # Re-assert the frozen-column overlay's geometry on this existing
+        # periodic tick — cheap, and a safety net against it drifting out
+        # of sync with the real column's width/position from something
+        # other than the events _update_frozen_geometry is already wired
+        # to (window resize, column drag-resize, a full re-render).
+        if getattr(self, "_frozen_logical_col", None) is not None:
+            self._update_frozen_geometry()
+
         if not self._highlights:
             return
         import time as _time
@@ -1289,6 +1578,47 @@ class LiveViewerWindow(QWidget):
             for c in range(col_count):
                 self._table.setColumnHidden(c, False)
         self._update_filter_btn_label()
+        self._update_frozen_geometry()
+
+    def _reset_view(self):
+        """Reset the LMV to its default view: every strategy off, category/
+        sector filters and column visibility cleared, columns back in their
+        original (un-reordered) positions, and any column sort cleared.
+        Doesn't touch the underlying data — this only undoes on-screen
+        customization."""
+        from services import strategy_store as store
+        from services.config_store import save_column_order
+
+        for s in self._strategies:
+            if s.get("active"):
+                s["active"] = False
+                store.save_strategy(s)
+
+        # Column order — drop the saved drag order and put every column
+        # back at its natural (logical) position. _clear_all_filters()
+        # doesn't touch this; only column *visibility* and the two combos.
+        save_column_order([])
+        hdr = self._table.horizontalHeader()
+        for target_visual in range(hdr.count()):
+            current_visual = hdr.visualIndex(target_visual)
+            if current_visual != target_visual:
+                self._move_section_programmatically(hdr, current_visual, target_visual)
+
+        # Row sort.
+        self._sort_col_name = None
+        self._sort_descending = False
+        self._row_order = None
+        hdr.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        self._frozen_table.horizontalHeader().setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+
+        # setCurrentText("All") is a no-op (no signal fires, no re-render)
+        # when a combo is already showing "All" — so the strategy/column
+        # changes above wouldn't otherwise be reflected on screen. Force a
+        # render regardless of what _clear_all_filters happens to trigger.
+        self._clear_all_filters()
+        self._populate_table(self._data, set())
+        self._apply_sector_filter()
+        self._update_strat_btn_label()
 
     def _show_col_filter(self):
         headers = self._current_column_labels()
@@ -1309,6 +1639,7 @@ class LiveViewerWindow(QWidget):
         for c in range(self._table.columnCount()):
             self._table.setColumnHidden(c, c not in self._visible_cols)
         self._update_filter_btn_label()
+        self._update_frozen_geometry()
 
     def _update_col_btn_label(self):
         self._update_filter_btn_label()
@@ -1421,10 +1752,14 @@ class LiveViewerWindow(QWidget):
         selected = self._sector_combo.currentText()
         for r in range(self._table.rowCount()):
             if selected == "All":
-                self._table.setRowHidden(r, False)
+                hidden = False
             else:
                 item = self._table.item(r, 0)   # Sector is always col 0
-                self._table.setRowHidden(r, item is None or item.text() != selected)
+                hidden = item is None or item.text() != selected
+            self._table.setRowHidden(r, hidden)
+            # The frozen "Scrip Name" overlay shares the model but not view
+            # state — row visibility has to be mirrored by hand.
+            self._frozen_table.setRowHidden(r, hidden)
         self._update_filter_btn_label()
         self._update_stock_count_label()
 
