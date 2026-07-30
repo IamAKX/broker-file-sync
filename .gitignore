@@ -68,6 +68,10 @@ temp/
 strategies.json
 config_data.json
 historic_data.json
+formula_variables.json
+
+# Skill installer lockfile (local install state, not source)
+skills-lock.json
 
 # Superpowers internal docs
 docs/superpowers/
