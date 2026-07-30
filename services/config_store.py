@@ -22,6 +22,7 @@ MAIN_COLUMN_NAME  = "main_column_name"
 MAIN_COLUMN_ORDER = "main_column_order"
 THEME             = "theme"
 LMV_HIGHLIGHT_COLOR = "lmv_highlight_color"
+LMV_COLUMN_HIGHLIGHT_COLORS = "lmv_column_highlight_colors"
 
 
 def _load_raw() -> dict:
@@ -115,6 +116,23 @@ def load_lmv_highlight_color() -> str | None:
     data = _load_raw()
     color = data.get(LMV_HIGHLIGHT_COLOR)
     return color if isinstance(color, str) else None
+
+
+def save_lmv_column_highlight_colors(colors: dict):
+    """Persist the per-column value-changed highlight overrides
+    ({column_name: "#rrggbb"}) — a column absent from this dict falls back
+    to the LMV-wide default (see save_lmv_highlight_color)."""
+    data = _load_raw()
+    data[LMV_COLUMN_HIGHLIGHT_COLORS] = dict(colors)
+    _save_raw(data)
+
+
+def load_lmv_column_highlight_colors() -> dict:
+    """Return the saved {column_name: "#rrggbb"} overrides, or {} if none
+    saved."""
+    data = _load_raw()
+    colors = data.get(LMV_COLUMN_HIGHLIGHT_COLORS)
+    return dict(colors) if isinstance(colors, dict) else {}
 
 
 def get_rename_map() -> dict:
