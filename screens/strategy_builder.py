@@ -1286,6 +1286,10 @@ class StrategyBuilderScreen(QWidget):
         self._lmv_warn.setFont(font_scale.font(font_scale.SMALL, False))
         self._update_lmv_warn()
 
+        vars_btn = _btn("Variables", theme=t)
+        vars_btn.clicked.connect(self._open_variables_manager)
+        self._vars_btn = vars_btn
+
         new_btn = _btn("+ New Strategy", accent=True, theme=t)
         new_btn.clicked.connect(self._new_strategy)
         self._new_btn = new_btn
@@ -1294,6 +1298,8 @@ class StrategyBuilderScreen(QWidget):
         top_lay.addSpacing(16)
         top_lay.addWidget(self._lmv_warn)
         top_lay.addStretch()
+        top_lay.addWidget(vars_btn)
+        top_lay.addSpacing(8)
         top_lay.addWidget(new_btn)
         root.addWidget(self._topbar)
 
@@ -1399,6 +1405,14 @@ class StrategyBuilderScreen(QWidget):
         self._strategies.append(strat)
         self._refresh_list()
         self._open_editor(strat)
+
+    def _open_variables_manager(self):
+        from screens.formula_editor import VariablesManagerDialog
+        dlg = VariablesManagerDialog(
+            self._lmv_headers, self._lmv_first_row, self._all_lmv_data,
+            theme=self._theme, parent=self,
+        )
+        dlg.exec()
 
     def _clone_strategy(self, original: dict):
         import uuid
@@ -1508,6 +1522,7 @@ class StrategyBuilderScreen(QWidget):
         self._right_frame.setStyleSheet(f"QFrame{{background:{bg};}}")
         self._placeholder.setStyleSheet(f"color:{txts};")
         _restyle_btn(self._new_btn, t, accent=True)
+        _restyle_btn(self._vars_btn, t)
         self._update_lmv_warn()
         self._refresh_list()
         # Re-open editor with fresh theme if visible

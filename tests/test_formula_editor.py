@@ -90,14 +90,14 @@ def test_expression_editor_dialog_creates(qapp):
     assert dlg is not None
 
 
-def test_expression_editor_has_five_nav_items(qapp):
+def test_expression_editor_has_six_nav_items(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     from PySide6.QtWidgets import QListWidget
     dlg = ExpressionEditorDialog([], ["LTP"], [], {})
     # The nav list is the leftmost QListWidget
     nav = dlg._nav_list
     texts = [nav.item(i).text() for i in range(nav.count())]
-    assert texts == ["Functions", "Operators", "Fields", "Rows", "Constants"]
+    assert texts == ["Functions", "Operators", "Fields", "Rows", "Constants", "Variables"]
 
 
 def test_expression_editor_get_tokens_empty(qapp):
@@ -260,3 +260,153 @@ def test_add_row_symbol_without_field_shows_hint(qapp, monkeypatch):
     dlg._add_row_symbol("Nifty")
     assert called.get("shown") is True
     assert dlg._preview_edit.toPlainText() == ""
+
+
+# ── Formula variables ("{Name}" tokens) ──────────────────────────────────────
+
+@pytest.fixture
+def var_store(tmp_path, monkeypatch):
+    from services import formula_variable_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "vars.json"))
+    return store
+
+
+def test_token_insert_text_renders_var_braces():
+    from screens.formula_editor import _token_insert_text
+    assert _token_insert_text({"type": "var", "value": "Threshold"}) == "{Threshold}"
+
+
+def test_parse_expression_text_reads_var_braces():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("{Threshold}")
+    assert tokens == [{"type": "var", "value": "Threshold"}]
+
+
+def test_var_token_round_trips_alongside_field(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    original = [
+        {"type": "col", "value": "Open"},
+        {"type": "op",  "value": ">="},
+        {"type": "var", "value": "Threshold"},
+    ]
+    dlg = ExpressionEditorDialog(original, ["Open"], [], {"Open": 100.0})
+    assert dlg.get_tokens() == original
+
+
+def test_structural_error_flags_unclosed_brace():
+    from screens.formula_editor import _find_structural_error
+    err = _find_structural_error("{Threshold")
+    assert err is not None
+    msg, start, end = err
+    assert "closing '}'" in msg
+
+
+def test_variable_catalogue_reflects_store(var_store):
+    from screens.formula_editor import VARIABLE_CATALOGUE_FROM_STORE
+    assert VARIABLE_CATALOGUE_FROM_STORE() == []
+    v = var_store.new_variable("Threshold")
+    var_store.save_variable(v)
+    entries = VARIABLE_CATALOGUE_FROM_STORE()
+    assert entries[0]["name"] == "{Threshold}"
+    assert entries[0]["token"] == {"type": "var", "value": "Threshold"}
+
+
+def test_variables_nav_tab_lists_saved_variable(qapp, var_store):
+    from screens.formula_editor import ExpressionEditorDialog
+    v = var_store.new_variable("Threshold")
+    var_store.save_variable(v)
+    dlg = ExpressionEditorDialog([], ["Open"], [], {})
+    dlg._nav_list.setCurrentRow(5)  # Variables
+    items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
+    assert "{Threshold}" in items
+
+
+def test_clicking_variable_item_inserts_braces(qapp, var_store):
+    from screens.formula_editor import ExpressionEditorDialog
+    v = var_store.new_variable("Threshold")
+    var_store.save_variable(v)
+    dlg = ExpressionEditorDialog([], ["Open"], [], {})
+    dlg._add_token({"type": "var", "value": "Threshold"})
+    assert dlg._preview_edit.toPlainText() == "{Threshold}"
+
+
+def test_save_as_variable_button_disabled_before_compile(qapp, var_store):
+    from screens.formula_editor import ExpressionEditorDialog
+    dlg = ExpressionEditorDialog([], ["Open"], [], {})
+    assert not dlg._save_var_btn.isEnabled()
+
+
+def test_save_as_variable_persists_current_formula(qapp, var_store, monkeypatch):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QInputDialog, QMessageBox
+    tokens = [{"type": "num", "value": "0.998"}]
+    dlg = ExpressionEditorDialog(tokens, [], [], {})
+    dlg._compiled_ok = True
+    dlg._compiled_tokens = tokens
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Threshold", True))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    dlg._save_as_variable()
+    saved = var_store.get_by_name("Threshold")
+    assert saved is not None
+    assert saved["formula"] == tokens
+
+
+def test_save_as_variable_rejects_invalid_characters(qapp, var_store, monkeypatch):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QInputDialog, QMessageBox
+    tokens = [{"type": "num", "value": "1"}]
+    dlg = ExpressionEditorDialog(tokens, [], [], {})
+    dlg._compiled_ok = True
+    dlg._compiled_tokens = tokens
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("Bad[Name]", True))
+    warned = {}
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *a, **k: warned.setdefault("shown", True))
+    dlg._save_as_variable()
+    assert warned.get("shown") is True
+    assert var_store.get_by_name("Bad[Name]") is None
+
+
+# ── Variables manager dialog ─────────────────────────────────────────────────
+
+def test_variables_manager_lists_existing(qapp, var_store):
+    from screens.formula_editor import VariablesManagerDialog
+    v = var_store.new_variable("Threshold")
+    var_store.save_variable(v)
+    dlg = VariablesManagerDialog([], {})
+    items = [dlg._list.item(i).text() for i in range(dlg._list.count())]
+    assert items == ["{Threshold}"]
+
+
+def test_variables_manager_delete_removes_variable(qapp, var_store, monkeypatch):
+    from screens.formula_editor import VariablesManagerDialog
+    from PySide6.QtWidgets import QMessageBox
+    v = var_store.new_variable("Threshold")
+    var_store.save_variable(v)
+    dlg = VariablesManagerDialog([], {})
+    dlg._list.setCurrentRow(0)
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.StandardButton.Yes)
+    dlg._delete_selected()
+    assert var_store.load_all() == []
+    assert dlg._list.count() == 0
+
+
+def test_variables_manager_rename_rejects_duplicate(qapp, var_store, monkeypatch):
+    from screens.formula_editor import VariablesManagerDialog
+    from PySide6.QtWidgets import QInputDialog, QMessageBox
+    var_store.save_variable(var_store.new_variable("A"))
+    var_store.save_variable(var_store.new_variable("B"))
+    dlg = VariablesManagerDialog([], {})
+    # Select "A" and try to rename it to "B" (already taken).
+    for i in range(dlg._list.count()):
+        if dlg._list.item(i).text() == "{A}":
+            dlg._list.setCurrentRow(i)
+            break
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("B", True))
+    warned = {}
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *a, **k: warned.setdefault("shown", True))
+    dlg._rename_selected()
+    assert warned.get("shown") is True
+    assert var_store.get_by_name("A") is not None

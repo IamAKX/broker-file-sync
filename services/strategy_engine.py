@@ -23,6 +23,12 @@ DIGITS(value) returns how many digits are in the integer part of value (e.g.
 DIGITS(12123.77) = 5, DIGITS(2435.22) = 4) — combine with IIF to tier a
 threshold by price magnitude:
   IIF(DIGITS([Open]) >= 5, 0.998, IIF(DIGITS([Open]) >= 4, 0.919, ...))
+
+A {"type": "var", "value": name} token ("{Name}" in the Expression Editor)
+inlines a reusable formula saved via services.formula_variable_store — see
+_expand_var_tokens. Handy for exactly the DIGITS/IIF tier above: build it
+once, save it as a variable, then reference {ThresholdName} from every
+formula that needs it instead of retyping the nested IIF each time.
 """
 
 import math
@@ -168,10 +174,53 @@ def build_symbol_index(all_data: list, symbol_col: str = SYMBOL_COLUMN) -> dict:
     return idx
 
 
+# ── formula variables ("{Name}" tokens) ──────────────────────────────────────
+#
+# services.formula_variable_store lets a user name a reusable formula (e.g. a
+# price-tiered threshold built once with DIGITS+IIF) and reference it from any
+# other formula as {"type": "var", "value": name}. Expansion is pure token
+# inlining — done once wherever a raw token list is about to become an
+# expression (see the two callers below) — rather than a runtime lookup, so
+# the rest of this module never needs to know "var" tokens exist.
+
+def _expand_var_tokens(tokens: list, _seen: frozenset = frozenset()) -> list:
+    """Inline every {"type": "var", "value": name} token with that variable's
+    own formula tokens, wrapped in parens to preserve operator precedence —
+    recursively, so a variable can itself reference other variables.
+
+    A cyclic reference is dropped (not raised) so a mistake in one variable's
+    formula degrades that one spot rather than crashing every formula that
+    happens to reference it. An unknown/deleted variable name is dropped the
+    same way, consistent with how a missing column silently reads as None
+    elsewhere in this module.
+    """
+    if not any(tok.get("type") == "var" for tok in tokens):
+        return tokens  # common case — skip the store import/lookup entirely
+    from services import formula_variable_store as var_store
+    out = []
+    for tok in tokens:
+        if tok.get("type") != "var":
+            out.append(tok)
+            continue
+        name = tok.get("value")
+        if name in _seen:
+            continue
+        var = var_store.get_by_name(name)
+        if var is None:
+            continue
+        inner = _expand_var_tokens(var.get("formula", []), _seen | {name})
+        if inner:
+            out.append({"type": "paren", "value": "("})
+            out.extend(inner)
+            out.append({"type": "paren", "value": ")"})
+    return out
+
+
 # ── token → expression string ──────────────────────────────────────────────
 
 def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
                     self_value=None) -> str:
+    tokens = _expand_var_tokens(tokens)
     parts = []
     sym_index = None
     for tok in tokens:
@@ -280,12 +329,25 @@ class _Compiled:
 _compile_cache: dict = {}
 
 
+def clear_compile_cache():
+    """Drop every cached compiled formula. _get_compiled's cache key is the
+    signature of the *raw* (un-expanded) tokens — cheap, and unaffected by a
+    "var" token's own referenced variable being edited — so an edit to a
+    formula variable (see services.formula_variable_store) can't invalidate
+    just the entries that used it; it has to drop them all. Called from
+    formula_variable_store.save_variable/delete_variable, not from
+    per-row/per-tick code, so this being a full clear (cheap: recompiling is
+    only ever the O(rows) evaluate() work's one-time setup) is fine."""
+    _compile_cache.clear()
+
+
 def _formula_signature(tokens: list):
     return tuple((tok.get("type"), tok.get("value"), tok.get("col_arg"), tok.get("of"))
                  for tok in tokens)
 
 
 def _build_compiled(tokens: list):
+    tokens = _expand_var_tokens(tokens)
     parts = []
     col_vars: dict = {}
     col_of_vars: list = []
@@ -595,6 +657,13 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     """
     if not tokens:
         return False, "Formula is empty."
+
+    # Expand {"type": "var"} references up front so every check below (the
+    # unknown-column scan included) sees the referenced variable's own
+    # tokens, not an opaque placeholder.
+    tokens = _expand_var_tokens(tokens)
+    if not tokens:
+        return False, "The variable(s) this formula refers to are empty or missing."
 
     row_data = row_data or {}
     all_data = all_data or []

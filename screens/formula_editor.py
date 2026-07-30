@@ -160,6 +160,24 @@ CONSTANTS_CATALOGUE = [
 ]
 
 
+def VARIABLE_CATALOGUE_FROM_STORE() -> list:
+    """One entry per saved formula variable (see services.formula_variable_store)
+    — click one to insert "{Name}", which inlines that variable's own formula
+    wherever it's used (services.strategy_engine._expand_var_tokens). Use
+    VariablesManagerDialog (below) to create/edit/delete them."""
+    from services import formula_variable_store as var_store
+    return [
+        {
+            "name": f"{{{v['name']}}}",
+            "signature": f"{{{v['name']}}}",
+            "description": "Reusable formula, defined in Manage Variables. "
+                           "Inlined wherever it's referenced.",
+            "token": {"type": "var", "value": v["name"]},
+        }
+        for v in var_store.load_all()
+    ]
+
+
 # ── Theme helper ──────────────────────────────────────────────────────────────
 
 def _t(theme, key: str) -> str:
@@ -186,6 +204,8 @@ def _token_insert_text(tok: dict) -> str:
         return f"[{val} of {of_sym}]" if of_sym else f"[{val}]"
     if kind == "self":
         return "THIS"
+    if kind == "var":
+        return f"{{{val}}}"
     if kind == "func":
         fname = val.rstrip("(")
         col_arg = tok.get("col_arg", "")
@@ -216,6 +236,7 @@ _WORD_CONSTS = {"true": "True", "false": "False", "none": "None"}
 _TOKEN_RE = re.compile(r"""
       (?P<ws>\s+)
     | (?P<field>\[[^\]]*\])
+    | (?P<var>\{[^{}]*\})
     | (?P<dstring>"[^"]*")
     | (?P<sstring>'[^']*')
     | (?P<number>\d+\.\d+|\.\d+|\d+\.|\d+)
@@ -279,16 +300,25 @@ class FormulaParseError(ValueError):
         self.end = end if end is not None else start + 1
 
 
+# open char -> (matching close char, what it starts, example to show when unclosed)
+_BRACKET_KINDS = {
+    "[": ("]", "field", " Add a ']' right after the column name, e.g. [Open]."),
+    "{": ("}", "variable reference", " Add a '}' right after the variable name, e.g. {ThresholdName}."),
+    "(": (")", "group", " Add a ')' to close it."),
+}
+_CLOSE_TO_OPEN = {close: open_ch for open_ch, (close, _, _) in _BRACKET_KINDS.items()}
+
+
 def _find_structural_error(text: str):
-    """Scan the raw formula text for an unclosed/unmatched '[', ']', '(' or
-    ')' — the single most common mistake non-technical users make — and
-    report exactly where it is, in plain language.
+    """Scan the raw formula text for an unclosed/unmatched '[', ']', '{', '}',
+    '(' or ')' — the single most common mistake non-technical users make —
+    and report exactly where it is, in plain language.
 
     Returns (message, start, end) for the first problem found, or None if
-    brackets and parentheses all balance out (the rest of parsing may still
+    every bracket/brace/paren balances out (the rest of parsing may still
     fail for other reasons — this is just the first, cheapest check).
     """
-    stack = []  # [(char, position), ...]
+    stack = []  # [(open_char, position), ...]
     i, n = 0, len(text)
     while i < n:
         ch = text[i]
@@ -301,41 +331,31 @@ def _find_structural_error(text: str):
                         i, n)
             i = close + 1
             continue
-        if ch in "[(":
+        if ch in _BRACKET_KINDS:
             stack.append((ch, i))
-        elif ch == "]":
-            if stack and stack[-1][0] == "[":
+        elif ch in _CLOSE_TO_OPEN:
+            expected_open = _CLOSE_TO_OPEN[ch]
+            if stack and stack[-1][0] == expected_open:
                 stack.pop()
-            elif stack and stack[-1][0] == "(":
+            elif stack:
                 open_ch, open_pos = stack[-1]
-                return (f"The '(' at position {open_pos + 1} is closed with ']' "
-                        f"instead of ')'. Use ')' to close it.", open_pos, i + 1)
+                expected_close, _, _ = _BRACKET_KINDS[open_ch]
+                return (f"The '{open_ch}' at position {open_pos + 1} is closed "
+                        f"with '{ch}' instead of '{expected_close}'. Use "
+                        f"'{expected_close}' to close it.", open_pos, i + 1)
             else:
-                return (f"There's a closing bracket ']' at position {i + 1} "
-                        f"with no '[' before it to match. Remove it, or add a "
-                        f"'[' where the field should start.", i, i + 1)
-        elif ch == ")":
-            if stack and stack[-1][0] == "(":
-                stack.pop()
-            elif stack and stack[-1][0] == "[":
-                open_ch, open_pos = stack[-1]
-                return (f"The '[' at position {open_pos + 1} is closed with ')' "
-                        f"instead of ']'. Use ']' to close a field name.",
-                        open_pos, i + 1)
-            else:
-                return (f"There's a closing parenthesis ')' at position {i + 1} "
-                        f"with no '(' before it to match. Remove it, or add a "
-                        f"'(' where the group should start.", i, i + 1)
+                _, label, _ = _BRACKET_KINDS[expected_open]
+                return (f"There's a closing '{ch}' at position {i + 1} with no "
+                        f"'{expected_open}' before it to match. Remove it, or "
+                        f"add a '{expected_open}' where the {label} should start.",
+                        i, i + 1)
         i += 1
 
     if stack:
         ch, pos = stack[-1]
-        if ch == "[":
-            return (f"The field starting with '[' at position {pos + 1} is "
-                     f"missing its closing ']'. Add a ']' right after the "
-                     f"column name, e.g. [Open].", pos, n)
-        return (f"The '(' at position {pos + 1} is missing its closing ')'. "
-                f"Add a ')' to close it.", pos, n)
+        close, label, hint = _BRACKET_KINDS[ch]
+        return (f"The {label} starting with '{ch}' at position {pos + 1} is "
+                f"missing its closing '{close}'.{hint}", pos, n)
     return None
 
 
@@ -369,6 +389,8 @@ def parse_expression_text(text: str, known_headers=None) -> list:
             if of_sym:
                 tok["of"] = of_sym
             tokens.append(tok)
+        elif kind == "var":
+            tokens.append({"type": "var", "value": val[1:-1]})
         elif kind in ("dstring", "sstring", "number"):
             tokens.append({"type": "num", "value": val})
         elif kind == "word":
@@ -523,7 +545,7 @@ class ExpressionEditorDialog(QDialog):
             f"QListWidget::item:selected{{background:{bd};color:{txt};"
             f"border-left:3px solid {acc};}}"
         )
-        for section in ["Functions", "Operators", "Fields", "Rows", "Constants"]:
+        for section in ["Functions", "Operators", "Fields", "Rows", "Constants", "Variables"]:
             self._nav_list.addItem(section)
         self._nav_list.currentRowChanged.connect(self._on_nav_changed)
         body_lay.addWidget(self._nav_list)
@@ -690,6 +712,22 @@ class ExpressionEditorDialog(QDialog):
         )
         self._compile_btn.clicked.connect(self._compile_and_test)
 
+        # Saves the whole current (compiled) formula as a reusable named
+        # variable — see services.formula_variable_store — so it can be
+        # inserted into other formulas from the Variables tab instead of
+        # retyped. Gated on a successful compile the same as Save, since an
+        # unresolved formula shouldn't be reusable elsewhere either.
+        self._save_var_btn = QPushButton("Save as Variable…")
+        self._save_var_btn.setFixedHeight(30)
+        self._save_var_btn.setEnabled(False)
+        self._save_var_btn.setStyleSheet(
+            f"QPushButton{{background:transparent;color:{acc};"
+            f"border:1px solid {acc};border-radius:4px;padding:0 14px;}}"
+            f"QPushButton:hover{{background:{acc}22;}}"
+            f"QPushButton:disabled{{background:transparent;color:#666;border:1px solid #333;}}"
+        )
+        self._save_var_btn.clicked.connect(self._save_as_variable)
+
         self._save_btn = QPushButton("Save")
         self._save_btn.setFixedHeight(30)
         self._save_btn.setEnabled(False)
@@ -709,6 +747,7 @@ class ExpressionEditorDialog(QDialog):
         btn_row_lay.addWidget(back_btn)
         btn_row_lay.addStretch()
         btn_row_lay.addWidget(self._compile_btn)
+        btn_row_lay.addWidget(self._save_var_btn)
         btn_row_lay.addWidget(cancel_btn)
         btn_row_lay.addWidget(self._save_btn)
         root.addWidget(btn_row_w)
@@ -728,6 +767,7 @@ class ExpressionEditorDialog(QDialog):
             FIELD_CATALOGUE_FROM_HEADERS(all_headers),
             ROW_CATALOGUE_FROM_DATA(self._all_lmv_data),
             CONSTANTS_CATALOGUE,
+            VARIABLE_CATALOGUE_FROM_STORE(),
         ]
         self._current_catalogue = catalogues[row] if 0 <= row < len(catalogues) else []
         self._populate_item_list(self._current_catalogue)
@@ -867,6 +907,7 @@ class ExpressionEditorDialog(QDialog):
     def _on_text_changed(self):
         self._compiled_ok = False
         self._save_btn.setEnabled(False)
+        self._save_var_btn.setEnabled(False)
         self._set_preview_style(compiled=False)
         self._clear_error_highlight()
 
@@ -924,6 +965,7 @@ class ExpressionEditorDialog(QDialog):
             msg, start, end = struct_err
             self._compiled_ok = False
             self._save_btn.setEnabled(False)
+            self._save_var_btn.setEnabled(False)
             self._highlight_error_span(start, end)
             QMessageBox.warning(self, "Formula needs a fix", msg)
             return
@@ -933,12 +975,14 @@ class ExpressionEditorDialog(QDialog):
         except FormulaParseError as exc:
             self._compiled_ok = False
             self._save_btn.setEnabled(False)
+            self._save_var_btn.setEnabled(False)
             self._highlight_error_span(exc.start, exc.end)
             QMessageBox.warning(self, "Formula needs a fix", str(exc))
             return
         except ValueError as exc:
             self._compiled_ok = False
             self._save_btn.setEnabled(False)
+            self._save_var_btn.setEnabled(False)
             QMessageBox.warning(self, "Formula needs a fix", str(exc))
             return
 
@@ -955,6 +999,7 @@ class ExpressionEditorDialog(QDialog):
             self._compiled_tokens = tokens
             self._compiled_ok = True
             self._save_btn.setEnabled(True)
+            self._save_var_btn.setEnabled(True)
             self._set_preview_style(compiled=True)
             QMessageBox.information(self, "Formula looks good",
                                     f"This formula works. For the first row in "
@@ -962,8 +1007,46 @@ class ExpressionEditorDialog(QDialog):
         else:
             self._compiled_ok = False
             self._save_btn.setEnabled(False)
+            self._save_var_btn.setEnabled(False)
             self._highlight_named_column(msg, text)
             QMessageBox.warning(self, "Formula needs a fix", msg)
+
+    # ── Save as Variable ─────────────────────────────────────────────────────
+
+    def _save_as_variable(self):
+        if not (self._compiled_ok and self._compiled_tokens):
+            return
+        from PySide6.QtWidgets import QInputDialog
+        from services import formula_variable_store as var_store
+
+        name, ok = QInputDialog.getText(self, "Save as Variable", "Variable name:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if any(c in name for c in "{}[]"):
+            QMessageBox.warning(self, "Invalid name",
+                                "Variable names can't contain { } [ ] characters.")
+            return
+
+        existing = var_store.get_by_name(name)
+        if existing is not None:
+            reply = QMessageBox.question(
+                self, "Variable exists",
+                f"A variable named '{name}' already exists. Overwrite it with "
+                f"the current formula?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            variable = dict(existing, formula=list(self._compiled_tokens))
+        else:
+            variable = var_store.new_variable(name)
+            variable["formula"] = list(self._compiled_tokens)
+
+        var_store.save_variable(variable)
+        QMessageBox.information(
+            self, "Variable saved",
+            f"Saved as {{{name}}}. Insert it into any formula from the "
+            f"Variables tab instead of retyping it.")
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -975,3 +1058,195 @@ class ExpressionEditorDialog(QDialog):
             return parse_expression_text(self._preview_edit.toPlainText(), known_headers)
         except ValueError:
             return []
+
+
+# ── Variables manager ───────────────────────────────────────────────────────
+
+class VariablesManagerDialog(QDialog):
+    """List / create / rename / delete reusable formula variables (see
+    services.formula_variable_store). Each variable's own formula is edited
+    with the same ExpressionEditorDialog used for strategy columns, so it
+    gets the full catalogue — including referencing other variables."""
+
+    def __init__(self, lmv_headers: list, lmv_first_row: dict,
+                 all_lmv_data: list = None, theme=None, parent=None):
+        super().__init__(parent)
+        self._lmv_headers   = list(lmv_headers)
+        self._lmv_first_row = lmv_first_row or {}
+        self._all_lmv_data  = all_lmv_data or []
+        self._theme = theme
+        self.setWindowTitle("Manage Variables")
+        self.setFixedSize(520, 440)
+        self._build()
+        self._refresh_list()
+
+    def _build(self):
+        t    = self._theme
+        bg   = _t(t, "background")
+        cbd  = _t(t, "card_bg")
+        bd   = _t(t, "border")
+        txt  = _t(t, "text_primary")
+        txts = _t(t, "text_secondary")
+        acc  = _t(t, "accent")
+        dst  = _t(t, "destructive")
+
+        self.setStyleSheet(
+            f"QDialog{{background:{bg};color:{txt};}}"
+            f"QWidget{{background:{bg};color:{txt};}}"
+            f"QLabel{{background:transparent;}}"
+            f"QPushButton{{background:{_t(t,'button_bg')};color:{txt};"
+            f"border:1px solid {bd};border-radius:4px;padding:4px 12px;}}"
+            f"QPushButton:hover{{border-color:{acc};color:{acc};}}"
+            f"QListWidget{{background:{cbd};color:{txt};border:1px solid {bd};outline:none;}}"
+            f"QListWidget::item{{padding:6px 10px;}}"
+            f"QListWidget::item:selected{{background:{acc};color:{bg};}}"
+        )
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(10)
+
+        title = QLabel("Formula Variables")
+        title.setFont(font_scale.font(font_scale.MEDIUM, True))
+        root.addWidget(title)
+
+        hint = QLabel("Reusable named formulas — build one in the Expression "
+                      "Editor and click “Save as Variable…”, or "
+                      "create one directly here. Reference it from any formula "
+                      "via the Variables tab.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet(f"color:{txts};")
+        root.addWidget(hint)
+
+        self._list = QListWidget()
+        self._list.itemDoubleClicked.connect(lambda _: self._edit_selected())
+        root.addWidget(self._list, 1)
+
+        btn_row = QHBoxLayout()
+        new_btn = QPushButton("+ New")
+        new_btn.clicked.connect(self._new_variable)
+        edit_btn = QPushButton("Edit Formula")
+        edit_btn.clicked.connect(self._edit_selected)
+        rename_btn = QPushButton("Rename")
+        rename_btn.clicked.connect(self._rename_selected)
+        del_btn = QPushButton("Delete")
+        del_btn.setStyleSheet(
+            f"QPushButton{{background:transparent;color:{dst};"
+            f"border:1px solid {dst};border-radius:4px;padding:4px 12px;}}"
+            f"QPushButton:hover{{background:{dst};color:#fff;}}"
+        )
+        del_btn.clicked.connect(self._delete_selected)
+        btn_row.addWidget(new_btn)
+        btn_row.addWidget(edit_btn)
+        btn_row.addWidget(rename_btn)
+        btn_row.addWidget(del_btn)
+        btn_row.addStretch()
+        root.addLayout(btn_row)
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setStyleSheet(
+            f"QPushButton{{background:{acc};color:{bg};"
+            f"border:none;border-radius:4px;padding:4px 20px;}}"
+        )
+        close_btn.clicked.connect(self.accept)
+        close_row.addWidget(close_btn)
+        root.addLayout(close_row)
+
+    def _refresh_list(self):
+        from services import formula_variable_store as var_store
+        selected_id = None
+        current = self._list.currentItem()
+        if current is not None:
+            selected_id = current.data(Qt.ItemDataRole.UserRole)["id"]
+        self._list.clear()
+        for v in var_store.load_all():
+            item = QListWidgetItem(f"{{{v['name']}}}")
+            item.setData(Qt.ItemDataRole.UserRole, v)
+            self._list.addItem(item)
+            if v["id"] == selected_id:
+                self._list.setCurrentItem(item)
+
+    def _selected_variable(self):
+        item = self._list.currentItem()
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _valid_name(self, name: str, exclude_id: str = None) -> bool:
+        from services import formula_variable_store as var_store
+        if not name:
+            QMessageBox.warning(self, "Invalid name", "Variable name can't be empty.")
+            return False
+        if any(c in name for c in "{}[]"):
+            QMessageBox.warning(self, "Invalid name",
+                                "Variable names can't contain { } [ ] characters.")
+            return False
+        existing = var_store.get_by_name(name)
+        if existing is not None and existing.get("id") != exclude_id:
+            QMessageBox.warning(self, "Name in use",
+                                f"A variable named '{name}' already exists.")
+            return False
+        return True
+
+    def _new_variable(self):
+        from PySide6.QtWidgets import QInputDialog
+        from services import formula_variable_store as var_store
+        name, ok = QInputDialog.getText(self, "New Variable", "Variable name:")
+        name = name.strip()
+        if not ok or not self._valid_name(name):
+            return
+        variable = var_store.new_variable(name)
+        dlg = ExpressionEditorDialog(
+            [], self._lmv_headers, [], self._lmv_first_row,
+            all_lmv_data=self._all_lmv_data, theme=self._theme,
+            mode="value", allow_self=False, parent=self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            variable["formula"] = dlg.get_tokens()
+            var_store.save_variable(variable)
+            self._refresh_list()
+
+    def _edit_selected(self):
+        from services import formula_variable_store as var_store
+        variable = self._selected_variable()
+        if variable is None:
+            return
+        dlg = ExpressionEditorDialog(
+            variable.get("formula", []), self._lmv_headers, [], self._lmv_first_row,
+            all_lmv_data=self._all_lmv_data, theme=self._theme,
+            mode="value", allow_self=False, parent=self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            variable["formula"] = dlg.get_tokens()
+            var_store.save_variable(variable)
+            self._refresh_list()
+
+    def _rename_selected(self):
+        from PySide6.QtWidgets import QInputDialog
+        from services import formula_variable_store as var_store
+        variable = self._selected_variable()
+        if variable is None:
+            return
+        name, ok = QInputDialog.getText(self, "Rename Variable", "Variable name:",
+                                        text=variable["name"])
+        name = name.strip()
+        if not ok or not self._valid_name(name, exclude_id=variable["id"]):
+            return
+        variable["name"] = name
+        var_store.save_variable(variable)
+        self._refresh_list()
+
+    def _delete_selected(self):
+        from services import formula_variable_store as var_store
+        variable = self._selected_variable()
+        if variable is None:
+            return
+        reply = QMessageBox.question(
+            self, "Delete Variable",
+            f"Delete '{{{variable['name']}}}'? Any formula still referencing "
+            f"it will silently drop that reference instead of failing outright "
+            f"— you'll want to fix those formulas afterward.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        if reply == QMessageBox.StandardButton.Yes:
+            var_store.delete_variable(variable["id"])
+            self._refresh_list()

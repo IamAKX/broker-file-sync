@@ -26,6 +26,10 @@ Tokens are plain dicts so JSON roundtrips cleanly:
   {"type": "func", "value": "MAX("}
   {"type": "paren","value": ")"}
   {"type": "self"} — refers to the column's own computed value in fmt rules
+  {"type": "var",  "value": "ThresholdName"} — inlines a reusable formula
+      saved via services.formula_variable_store (a separate store, not part
+      of this strategy), entered as "{ThresholdName}" in the Expression
+      Editor — see services.strategy_engine._expand_var_tokens
 
 A fmt rule's "target_column" is the LMV column its color paints onto when
 the condition matches — None (the default) means the strategy column's own
