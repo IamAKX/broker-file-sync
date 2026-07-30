@@ -11,7 +11,7 @@ from components.column_filter_popup import ColumnFilterPopup
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QTableView, QHeaderView, QAbstractItemView, QFrame,
-    QCheckBox, QSizePolicy, QComboBox, QScrollArea, QLineEdit
+    QCheckBox, QSizePolicy, QComboBox, QScrollArea, QLineEdit, QColorDialog
 )
 from PySide6.QtCore import (
     Qt, QTimer, QFileSystemWatcher, Signal, QObject, QThread, QEvent, QByteArray, QSize
@@ -50,6 +50,27 @@ def _svg_icon(filename: str, color: str) -> QIcon:
     renderer.render(painter)
     painter.end()
     return QIcon(pixmap)
+
+
+def _contrasting_text(hex_color: str) -> str:
+    """Black or white — whichever reads better on *hex_color* — so a
+    user-picked highlight background (see HighlightColorPopup) never lands
+    on illegible text the way a fixed black would for a dark pick."""
+    c = QColor(hex_color)
+    luminance = 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+    return "#000000" if luminance > 140 else "#ffffff"
+
+
+_HIGHLIGHT_PRESETS = [
+    ("Amber (default)", None),   # None = no override, tracks theme's status_amber
+    ("Yellow",  "#e8c400"),
+    ("Orange",  "#e3691a"),
+    ("Red",     "#f85149"),
+    ("Green",   "#39d353"),
+    ("Blue",    "#58a6ff"),
+    ("Purple",  "#a371f7"),
+    ("Pink",    "#f778ba"),
+]
 
 
 # ── Off-thread reader worker ────────────────────────────────────────────────
@@ -489,6 +510,104 @@ class FilterPanelPopup(QWidget):
         self.close()
 
 
+# ── Value-change highlight color popup ──────────────────────────────────────
+
+class HighlightColorPopup(QWidget):
+    """Pick the background color a cell flashes to when its live value
+    changes — a preset swatch grid plus a custom color picker. Applies (and
+    closes) on the first click; there's no separate Apply step since a color
+    pick has nothing to review first the way a multi-field filter does."""
+
+    color_picked = Signal(object)   # str "#rrggbb", or None for "theme default"
+
+    def __init__(self, current_color: str | None, theme=None, parent=None):
+        super().__init__(parent, Qt.WindowType.Popup | Qt.WindowType.FramelessWindowHint)
+        self._current_color = current_color
+        self._theme = theme
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._build()
+
+    def _build(self):
+        t      = self._theme
+        bg     = t.get("card_bg")        if t else "#1c2128"
+        border = t.get("border")         if t else "#30363d"
+        txt    = t.get("text_primary")   if t else "#e6edf3"
+        txt_s  = t.get("text_secondary") if t else "#8b949e"
+        accent = t.get("accent")         if t else "#39d353"
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+
+        card = QFrame()
+        card.setFixedWidth(260)
+        card.setStyleSheet(
+            f"QFrame {{ background: {bg}; border: 1px solid {border}; border-radius: 10px; }}"
+        )
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(14, 14, 14, 14)
+        lay.setSpacing(10)
+
+        title = QLabel("Value-Change Highlight")
+        title.setFont(font_scale.font(font_scale.MEDIUM, True))
+        title.setStyleSheet(f"color: {txt}; border: none;")
+        lay.addWidget(title)
+
+        hint = QLabel("Color a cell flashes to for a few seconds after its "
+                      "live value changes.")
+        hint.setFont(font_scale.font(font_scale.SMALL, False))
+        hint.setStyleSheet(f"color: {txt_s}; border: none;")
+        hint.setWordWrap(True)
+        lay.addWidget(hint)
+
+        # ── Swatch grid ──────────────────────────────────────────────────────
+        grid = QHBoxLayout()
+        grid.setSpacing(8)
+        for label, color in _HIGHLIGHT_PRESETS:
+            swatch = QPushButton()
+            swatch.setFixedSize(28, 28)
+            swatch.setCursor(Qt.CursorShape.PointingHandCursor)
+            swatch.setToolTip(label)
+            fill = color if color else (t.get("status_amber") if t else "#d29922")
+            selected = (color == self._current_color)
+            ring = accent if selected else border
+            swatch.setStyleSheet(
+                f"QPushButton {{ background: {fill}; border: 2px solid {ring};"
+                f"border-radius: 6px; }}"
+                f"QPushButton:hover {{ border-color: {accent}; }}"
+            )
+            swatch.clicked.connect(lambda _, c=color: self._pick(c))
+            grid.addWidget(swatch)
+        grid.addStretch()
+        lay.addLayout(grid)
+
+        # ── Custom picker ────────────────────────────────────────────────────
+        custom_btn = QPushButton("Custom color…")
+        custom_btn.setFixedHeight(30)
+        custom_btn.setFont(font_scale.font(font_scale.SMALL, False))
+        custom_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        custom_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {txt};"
+            f"border: 1px solid {border}; border-radius: 6px; padding: 0 10px; }}"
+            f"QPushButton:hover {{ border-color: {accent}; color: {accent}; }}"
+        )
+        custom_btn.clicked.connect(self._pick_custom)
+        lay.addWidget(custom_btn)
+
+        outer.addWidget(card)
+
+    def _pick(self, color: str | None):
+        self.color_picked.emit(color)
+        self.close()
+
+    def _pick_custom(self):
+        initial = QColor(self._current_color) if self._current_color else QColor("#d29922")
+        color = QColorDialog.getColor(initial, self, "Pick Highlight Color")
+        if color.isValid():
+            self._pick(color.name())
+        else:
+            self.close()
+
+
 class LiveViewerWindow(QWidget):
     """
     Standalone window showing the merged master table in real-time.
@@ -566,6 +685,11 @@ class LiveViewerWindow(QWidget):
         self._initial_render_done = False  # set once _render_initial_table has run
         self._recomputing        = False   # a strategy-toggle recompute is in flight
         self._recompute_pending  = False   # another one was requested while it was
+
+        # Value-change highlight color — a persisted override, or None to
+        # keep tracking the theme's own status_amber (today's behavior).
+        from services import config_store
+        self._highlight_color: str | None = config_store.load_lmv_highlight_color()
 
         self.setWindowTitle("Live Master View")
         self.resize(1300, 700)
@@ -651,6 +775,13 @@ class LiveViewerWindow(QWidget):
         )
         self._export_btn.clicked.connect(self._export)
 
+        self._highlight_btn = QPushButton()
+        self._highlight_btn.setFixedSize(30, 30)
+        self._highlight_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._highlight_btn.setToolTip("Value-change highlight color")
+        self._highlight_btn.clicked.connect(self._show_highlight_color_popup)
+        self._refresh_highlight_btn_style()
+
         self._reset_btn = QPushButton()
         self._reset_btn.setIcon(_svg_icon("reset.svg", text_s))
         self._reset_btn.setIconSize(QSize(15, 15))
@@ -688,6 +819,8 @@ class LiveViewerWindow(QWidget):
         top.addWidget(self._strat_btn)
         top.addSpacing(8)
         top.addWidget(self._export_btn)
+        top.addSpacing(8)
+        top.addWidget(self._highlight_btn)
         top.addSpacing(8)
         top.addWidget(self._reset_btn)
         top.addSpacing(8)
@@ -1063,14 +1196,9 @@ class LiveViewerWindow(QWidget):
         win_bg   = t.get("background")           if t else "#0d1117"
         hdr_bg   = t.get("button_bg")            if t else "#21262d"
         strat_hdr = t.get("accent") + "22"       if t else "#39d35322"
-        # theme.get() raises KeyError on a missing token, so fall back rather
-        # than assume the key exists (covers older/partial palettes).
-        try:
-            amber = t.get("status_amber") if t else "#d29922"
-        except KeyError:
-            amber = "#d29922"
+        amber = self._effective_highlight_color()
         self._amber_bg  = QBrush(QColor(amber))
-        self._amber_txt = QBrush(QColor("#000000"))
+        self._amber_txt = QBrush(QColor(_contrasting_text(amber)))
 
         # Build per-column info for strategy columns (for conditional formatting)
         strat_col_defs = []   # list of col_def dicts for strategy cols in order
@@ -1664,6 +1792,46 @@ class LiveViewerWindow(QWidget):
         self._update_filter_btn_label()
         self._update_frozen_geometry()
 
+    # ── Value-change highlight color ────────────────────────────────────────
+
+    def _effective_highlight_color(self) -> str:
+        """The color actually used for the amber flash right now — the
+        user's persisted override, or the theme's own status_amber when
+        none is set. Single source of truth for both _populate_table (the
+        table repaint) and the toolbar swatch button (its own preview)."""
+        if self._highlight_color:
+            return self._highlight_color
+        t = self._theme
+        try:
+            return t.get("status_amber") if t else "#d29922"
+        except KeyError:
+            return "#d29922"
+
+    def _refresh_highlight_btn_style(self):
+        t      = self._theme
+        divclr = t.get("divider") if t else "#30363d"
+        accent = t.get("accent")  if t else "#39d353"
+        fill   = self._effective_highlight_color()
+        self._highlight_btn.setStyleSheet(
+            f"QPushButton {{ background: {fill};"
+            f"border: 1px solid {divclr}; border-radius: 4px; }}"
+            f"QPushButton:hover {{ border-color: {accent}; }}"
+        )
+
+    def _show_highlight_color_popup(self):
+        popup = HighlightColorPopup(self._highlight_color, theme=self._theme, parent=self)
+        popup.color_picked.connect(self._set_highlight_color)
+        btn_pos = self._highlight_btn.mapToGlobal(self._highlight_btn.rect().bottomLeft())
+        popup.adjustSize()
+        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.show()
+
+    def _set_highlight_color(self, color):
+        self._highlight_color = color
+        from services import config_store
+        config_store.save_lmv_highlight_color(color)
+        self._refresh_highlight_btn_style()
+
     def _reset_view(self):
         """Reset the LMV to its default view: every strategy off, category/
         sector filters and column visibility cleared, columns back in their
@@ -1910,6 +2078,7 @@ class LiveViewerWindow(QWidget):
         """Re-render table and window chrome with the current theme."""
         self._populate_table(self._data, set())
         self._apply_sector_filter()
+        self._refresh_highlight_btn_style()
 
     def closeEvent(self, event):
         self._stop()

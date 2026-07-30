@@ -12,6 +12,7 @@ def _isolate_disk_stores(tmp_path, monkeypatch):
     a full-suite run). Applying it globally means no individual test can
     forget it.
     """
-    from services import config_store, strategy_store
+    from services import config_store, strategy_store, formula_variable_store
     monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
     monkeypatch.setattr(strategy_store, "_STORE_FILE", str(tmp_path / "strategies.json"))
+    monkeypatch.setattr(formula_variable_store, "_STORE_FILE", str(tmp_path / "formula_variables.json"))

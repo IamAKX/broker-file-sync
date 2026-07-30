@@ -21,6 +21,7 @@ _STORE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config_d
 MAIN_COLUMN_NAME  = "main_column_name"
 MAIN_COLUMN_ORDER = "main_column_order"
 THEME             = "theme"
+LMV_HIGHLIGHT_COLOR = "lmv_highlight_color"
 
 
 def _load_raw() -> dict:
@@ -95,6 +96,25 @@ def load_theme(default: str = "light") -> str:
     data = _load_raw()
     mode = data.get(THEME)
     return mode if mode in ("dark", "light") else default
+
+
+def save_lmv_highlight_color(hex_color: str | None):
+    """Persist the LMV's value-changed highlight color ("#rrggbb"), or None
+    to clear the override and fall back to the theme's own amber."""
+    data = _load_raw()
+    if hex_color is None:
+        data.pop(LMV_HIGHLIGHT_COLOR, None)
+    else:
+        data[LMV_HIGHLIGHT_COLOR] = hex_color
+    _save_raw(data)
+
+
+def load_lmv_highlight_color() -> str | None:
+    """Return the saved override color, or None if the user hasn't picked
+    one (callers fall back to the theme's status_amber in that case)."""
+    data = _load_raw()
+    color = data.get(LMV_HIGHLIGHT_COLOR)
+    return color if isinstance(color, str) else None
 
 
 def get_rename_map() -> dict:
