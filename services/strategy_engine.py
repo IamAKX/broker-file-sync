@@ -15,9 +15,14 @@ Supported:
              ENDSWITH  SUBSTRING  REVERSE  CHARINDEX  INSERT  REMOVE  PADLEFT
              PADRIGHT  CHAR  ASCII  EXP  LOG  LOG10  POWER  SIGN  SQR  BIGMUL
              ACOS  ASIN  ATN  ATN2  COS  COSH  SIN  SINH  TAN  TANH
-             ISNULL  ISNULLOREMPTY  INRANGE
+             ISNULL  ISNULLOREMPTY  INRANGE  DIGITS
              TODECIMAL  TODOUBLE  TOFLOAT  TOINT  TOLONG  TOSTR
   Aggregate: SUM_ALL  MIN_ALL  MAX_ALL  AVG_ALL  COUNT_ALL
+
+DIGITS(value) returns how many digits are in the integer part of value (e.g.
+DIGITS(12123.77) = 5, DIGITS(2435.22) = 4) — combine with IIF to tier a
+threshold by price magnitude:
+  IIF(DIGITS([Open]) >= 5, 0.998, IIF(DIGITS([Open]) >= 4, 0.919, ...))
 """
 
 import math
@@ -47,6 +52,11 @@ def _sin(x):                return math.sin(x)
 def _sinh(x):               return math.sinh(x)
 def _tan(x):                return math.tan(x)
 def _tanh(x):               return math.tanh(x)
+def _digits(x):
+    # Digit count of the integer part, e.g. 12123.77 -> 5, 2435.22 -> 4.
+    # String-based (not log10) so it's exact at power-of-10 boundaries —
+    # log10(1000) can land a hair under 3.0 in floating point and undercount.
+    return len(str(int(abs(float(x)))))
 def _isnull(v):             return v is None
 def _isnullorempty(v):      return v is None or str(v).strip() == ""
 def _inrange(v, lo, hi):    return lo <= v <= hi
@@ -89,6 +99,7 @@ _FUNC_MAP = {
     "TAN": "_tan", "TANH": "_tanh",
     # Conditional / null
     "ISNULL": "_isnull", "ISNULLOREMPTY": "_isnullorempty", "INRANGE": "_inrange",
+    "DIGITS": "_digits",
     # String
     "ASCII": "_ascii", "CHAR": "_char", "CHARINDEX": "_charindex",
     "CONCAT": "_concat", "CONTAINS": "_contains", "ENDSWITH": "_endswith",
@@ -111,6 +122,7 @@ _EVAL_BUILTINS = {
     "_cos": _cos, "_cosh": _cosh, "_sin": _sin, "_sinh": _sinh,
     "_tan": _tan, "_tanh": _tanh,
     "_isnull": _isnull, "_isnullorempty": _isnullorempty, "_inrange": _inrange,
+    "_digits": _digits,
     "_concat": _concat, "_ascii": _ascii, "_char": _char,
     "_charindex": _charindex, "_contains": _contains, "_endswith": _endswith,
     "_insert": _insert, "_len": _len, "_lower": _lower, "_upper": _upper,

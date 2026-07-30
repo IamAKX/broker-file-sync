@@ -42,6 +42,14 @@ def test_sign_negative():   assert ev(call1("Sign", tok_num(-3)))  == -1
 def test_sign_zero():       assert ev(call1("Sign", tok_num(0)))   == 0
 def test_sqr():             assert abs(ev(call1("Sqr", tok_num(9))) - 3.0) < 1e-9
 def test_bigmul():          assert ev(call2("BigMul", tok_num(12345), tok_num(67890))) == 12345 * 67890
+def test_digits_5_digit():  assert ev(call1("Digits", tok_num(12123.77))) == 5
+def test_digits_4_digit():  assert ev(call1("Digits", tok_num(2435.22)))  == 4
+def test_digits_negative(): assert ev(call1("Digits", tok_num(-87.5)))    == 2
+def test_digits_zero():     assert ev(call1("Digits", tok_num(0)))        == 1
+def test_digits_power_of_ten_boundary():
+    # Regression guard: log10(1000) can land at 2.9999999999996 in floating
+    # point, which would undercount a clean 4-digit boundary as 3.
+    assert ev(call1("Digits", tok_num(1000.0))) == 4
 
 
 # ── Trig ──────────────────────────────────────────────────────────────────────
@@ -68,6 +76,38 @@ def test_isnullorempty_empty():  assert ev(call1("IsNullOrEmpty", tok_col("empty
 def test_isnullorempty_filled(): assert ev(call1("IsNullOrEmpty", tok_num(1))) == False
 def test_inrange_inside():  assert ev(call3("InRange", tok_num(5), tok_num(1), tok_num(10))) == True
 def test_inrange_outside(): assert ev(call3("InRange", tok_num(15), tok_num(1), tok_num(10))) == False
+
+
+def _digit_tiered_threshold(open_value):
+    """IIf(Digits([Open]) >= 5, 0.998, IIf(Digits([Open]) >= 4, 0.919, 0.85))
+    — the "percent that depends on how many digits [Open] has" pattern."""
+    row = {"Open": str(open_value)}
+    tokens = (
+        [tok_fn("IIf"),
+            tok_fn("Digits"), tok_col("Open"), tok_p_close(),
+            tok_op(">="), tok_num(5), tok_op(","),
+            tok_num(0.998), tok_op(","),
+            tok_fn("IIf"),
+                tok_fn("Digits"), tok_col("Open"), tok_p_close(),
+                tok_op(">="), tok_num(4), tok_op(","),
+                tok_num(0.919), tok_op(","),
+                tok_num(0.85),
+            tok_p_close(),
+        tok_p_close()]
+    )
+    return evaluate(tokens, row, [row])
+
+
+def test_digit_tiered_threshold_five_digit_open():
+    assert _digit_tiered_threshold(12123.77) == 0.998
+
+
+def test_digit_tiered_threshold_four_digit_open():
+    assert _digit_tiered_threshold(2435.22) == 0.919
+
+
+def test_digit_tiered_threshold_three_digit_open():
+    assert _digit_tiered_threshold(435.5) == 0.85
 
 
 # ── String ────────────────────────────────────────────────────────────────────

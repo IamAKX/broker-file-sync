@@ -51,6 +51,7 @@ FUNCTION_CATALOGUE = [
     {"name": "IsNull", "signature": "IsNull(value)",       "description": "True if value is null/None.", "token": {"type": "func", "value": "IsNull("}},
     {"name": "IsNullOrEmpty","signature":"IsNullOrEmpty(value)","description":"True if null or empty string.", "token": {"type": "func", "value": "IsNullOrEmpty("}},
     {"name": "InRange","signature": "InRange(value, low, high)", "description": "True if low <= value <= high.", "token": {"type": "func", "value": "InRange("}},
+    {"name": "Digits", "signature": "Digits(value)", "description": "Digit count of value's integer part, e.g. Digits(12123.77) = 5, Digits(2435.22) = 4. Combine with IIf to tier a threshold by price magnitude.", "token": {"type": "func", "value": "Digits("}},
     # String
     {"name": "Ascii",     "signature": "Ascii(char)",          "description": "ASCII code of first character.", "token": {"type": "func", "value": "Ascii("}},
     {"name": "Char",      "signature": "Char(code)",           "description": "Character from ASCII code.", "token": {"type": "func", "value": "Char("}},
