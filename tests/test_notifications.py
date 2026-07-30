@@ -59,8 +59,8 @@ def test_system_row_has_no_configure_button(screen):
     assert screen._system_card.findChildren(QToolButton) == []
 
 
-def test_trigger_table_has_three_rows(screen):
-    assert screen._table.rowCount() == 3
+def test_trigger_table_has_four_rows(screen):
+    assert screen._table.rowCount() == 4
 
 
 def test_system_default_checked_telegram_sms_default_unchecked(screen):

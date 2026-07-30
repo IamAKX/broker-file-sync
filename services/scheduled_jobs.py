@@ -1,15 +1,15 @@
 """
-The 3 background-scheduler jobs. Each takes (controller, notifier) so they
+The background-scheduler jobs. Each takes (controller, notifier) so they
 stay easy to unit test / call directly — no dependency on the Scheduler class
 itself.
 """
 
-from datetime import date
+from datetime import date, datetime, time as dtime
 
-from api import historic_api, lmv_snapshot_api
+from api import historic_api, lmv_snapshot_api, opening_range_api
 from api.exceptions import ApiError, NetworkError
 from config_defaults import SCRIPT_NAME_DATA
-from services import config_store, trading_calendar
+from services import config_store, trading_calendar, trigger_config
 from services.master_generator import _build_script_name_lookup, _strip_rolling_suffix
 
 # Raw historic-upload metric name -> Sharekhan-shaped LMV column name.
@@ -42,6 +42,14 @@ RAW_TO_SHAREKHAN_COLUMN = {
 # appended to the *display* copy of headers/data only, inside
 # live_viewer.py::_populate_table, never written back into self._headers/self._data.
 _LMV_SNAPSHOT_EXCLUDED_HEADERS = {"Sector", "Scrip Name"}
+
+# NSE standard market open. The opening-range capture window is always
+# "market open to the configured trigger time" — see
+# _opening_range_window_minutes — so this is the one fixed end of that
+# window; the other end (the trigger time itself) is what the Jobs screen
+# lets the user configure.
+OPENING_RANGE_TRIGGER_ID = "opening_range_capture"
+_MARKET_OPEN_TIME = dtime(9, 15)
 
 
 def _is_session_expired(exc: ApiError) -> bool:
@@ -171,6 +179,119 @@ def _upload_with_notify(upload, controller, notifier, failure_title: str) -> Non
             "Couldn't reach the server — data was not saved today.",
             action=lambda: controller.show_and_navigate("historic_upload"),
         )
+
+
+# ── Opening-range High/Low capture ───────────────────────────────────────────
+#
+# Saves each stock's highest High and lowest Low, as shown in the Live Master
+# View, for the opening window of the trading day. Unlike a running total this
+# job has to compute itself, "High"/"Low" in the LMV are already the day's
+# cumulative high/low so far (fed live from the broker, distinct from the
+# "P.High"/"P.Low" *previous*-day columns) — so capturing "the high/low of the
+# first N minutes" only takes one snapshot, taken N minutes after market open,
+# not continuous polling across the window. See screens/jobs.py for where the
+# capture time (which implies N) is configured.
+
+def _opening_range_window_minutes() -> int:
+    """Minutes between market open and the configured capture trigger time —
+    e.g. the default 09:30 capture time is a 15-minute window. Floored at 1
+    so a misconfigured time at/before market open still produces a valid
+    (if degenerate) window instead of a rejected upload."""
+    configs = trigger_config.load_trigger_configs()
+    capture_time = next(
+        (c.time for c in configs if c.id == OPENING_RANGE_TRIGGER_ID), dtime(9, 30)
+    )
+    today = date.today()
+    delta = datetime.combine(today, capture_time) - datetime.combine(today, _MARKET_OPEN_TIME)
+    return max(1, int(delta.total_seconds() // 60))
+
+
+def _build_opening_range_payload(headers: list, data: list, script_name_data: list) -> list:
+    """One row per stock with a usable High/Low — symbol resolution matches
+    _build_rows_payload (same script-name lookup / rolling-suffix strip) so
+    the "symbol" identifier lines up with every other upload for the same
+    stock.
+
+    A row with a missing/non-numeric High or Low, or High < Low (a stale or
+    bad tick), is silently dropped rather than failing the whole batch — the
+    backend also rejects an upload containing any High < Low row, so this
+    client-side filter is what keeps one bad stock from blocking every other
+    stock's save.
+    """
+    if "Scrip Name" not in headers or "High" not in headers or "Low" not in headers:
+        return []
+    name_to_symbol = _build_script_name_lookup(script_name_data)
+    scrip_idx = headers.index("Scrip Name")
+    high_idx = headers.index("High")
+    low_idx = headers.index("Low")
+
+    rows = []
+    for row in data:
+        raw_name = str(row[scrip_idx]) if scrip_idx < len(row) else ""
+        display_name = _strip_rolling_suffix(raw_name) or raw_name
+        symbol = name_to_symbol.get(display_name.lower()) or display_name
+
+        try:
+            high = float(row[high_idx])
+            low = float(row[low_idx])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if high < low:
+            continue
+
+        rows.append({"symbol": symbol, "display_name": display_name or None, "high": high, "low": low})
+    return rows
+
+
+def run_opening_range_capture(controller, notifier) -> None:
+    try:
+        if not _is_today_trading_day():
+            return
+    except (ApiError, NetworkError):
+        return   # transient — re-checked on the next 30s poll
+
+    snapshot = controller.get_lmv_snapshot()
+    if snapshot is None:
+        notifier.notify(
+            "Opening Range Capture Skipped",
+            "Live Master View isn't loaded — High/Low was not saved today.",
+            action=lambda: controller.show_and_navigate("data_import"),
+        )
+        return
+
+    headers, data = snapshot
+    script_name_data = config_store.load_tab("script_name", SCRIPT_NAME_DATA)
+    rows_payload = _build_opening_range_payload(headers, data, script_name_data)
+
+    if not rows_payload:
+        notifier.notify(
+            "Opening Range Capture Skipped",
+            "No usable High/Low values were found in the Live Master View — "
+            "High/Low was not saved today.",
+            action=lambda: controller.show_and_navigate("data_import"),
+        )
+        return
+
+    window_minutes = _opening_range_window_minutes()
+    try:
+        opening_range_api.upload_daily(date.today(), window_minutes, rows_payload)
+    except ApiError as exc:
+        if not _is_session_expired(exc):
+            notifier.notify(
+                "Opening Range Save Failed",
+                "Couldn't save today's High/Low — data was not saved today.",
+                action=lambda: controller.show_and_navigate("data_import"),
+            )
+        return
+    except NetworkError:
+        notifier.notify(
+            "Opening Range Save Failed",
+            "Couldn't reach the server — High/Low was not saved today.",
+            action=lambda: controller.show_and_navigate("data_import"),
+        )
+        return
+
+    notifier.notify("Opening Range Saved", f"High and Low saved for {len(rows_payload)} stocks.")
 
 
 def run_availability_check(controller, notifier) -> None:

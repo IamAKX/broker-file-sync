@@ -67,6 +67,8 @@ class AppController:
             "lmv_check":          lambda: scheduled_jobs.run_lmv_check(self, self._notifier),
             "historic_save":      lambda: scheduled_jobs.run_historic_save(self, self._notifier),
             "availability_check": lambda: scheduled_jobs.run_availability_check(self, self._notifier),
+            scheduled_jobs.OPENING_RANGE_TRIGGER_ID:
+                lambda: scheduled_jobs.run_opening_range_capture(self, self._notifier),
         })
         self._scheduler.start()
 

@@ -3,7 +3,7 @@ from datetime import date
 
 import pytest
 
-from services import scheduled_jobs, trading_calendar
+from services import scheduled_jobs, trading_calendar, trigger_config
 
 
 class _FixedDate(date):
@@ -280,4 +280,160 @@ def test_availability_check_silent_when_present(monkeypatch):
     controller = _FakeController()
     notifier = _FakeNotifier()
     scheduled_jobs.run_availability_check(controller, notifier)
+    assert notifier.notifications == []
+
+
+# ── run_opening_range_capture ────────────────────────────────────────────────
+# tests/conftest.py's autouse _isolate_disk_stores fixture redirects
+# config_store (and so trigger_config, which is built on it) to a per-test
+# tmp path, so these don't touch the real config_data.json.
+
+def test_opening_range_window_minutes_default_is_15():
+    # No trigger config saved yet — falls back to the 09:30 default, which
+    # is 15 minutes after the 09:15 market open.
+    assert scheduled_jobs._opening_range_window_minutes() == 15
+
+
+def test_opening_range_window_minutes_reflects_configured_time():
+    from datetime import time as dtime
+    configs = trigger_config.load_trigger_configs()
+    for c in configs:
+        if c.id == scheduled_jobs.OPENING_RANGE_TRIGGER_ID:
+            c.time = dtime(10, 0)
+    trigger_config.save_trigger_configs(configs)
+    assert scheduled_jobs._opening_range_window_minutes() == 45
+
+
+def test_build_opening_range_payload_includes_valid_rows():
+    data = [_sharekhan_row(scrip="INFY", high=1810, low=1780)]
+    rows = scheduled_jobs._build_opening_range_payload(SHAREKHAN_HEADERS, data, script_name_data=[])
+    assert rows == [{"symbol": "INFY", "display_name": "INFY", "high": 1810.0, "low": 1780.0}]
+
+
+def test_build_opening_range_payload_resolves_symbol_via_script_name_map():
+    data = [_sharekhan_row(scrip="Infosys Limited")]
+    script_name_data = [("Infosys Limited", "INFY")]
+    rows = scheduled_jobs._build_opening_range_payload(SHAREKHAN_HEADERS, data, script_name_data)
+    assert rows[0]["symbol"] == "INFY"
+    assert rows[0]["display_name"] == "Infosys Limited"
+
+
+def test_build_opening_range_payload_drops_row_with_high_below_low():
+    data = [_sharekhan_row(scrip="GOOD", high=1810, low=1780),
+            _sharekhan_row(scrip="BAD",  high=100,  low=200)]
+    rows = scheduled_jobs._build_opening_range_payload(SHAREKHAN_HEADERS, data, script_name_data=[])
+    symbols = [r["symbol"] for r in rows]
+    assert symbols == ["GOOD"]
+
+
+def test_build_opening_range_payload_drops_row_with_non_numeric_high():
+    data = [_sharekhan_row(scrip="INFY")]
+    data[0][SHAREKHAN_HEADERS.index("High")] = None
+    rows = scheduled_jobs._build_opening_range_payload(SHAREKHAN_HEADERS, data, script_name_data=[])
+    assert rows == []
+
+
+def test_build_opening_range_payload_missing_columns_returns_empty():
+    headers = ["Scrip Name", "Current"]   # no High/Low
+    rows = scheduled_jobs._build_opening_range_payload(headers, [["INFY", 1800]], script_name_data=[])
+    assert rows == []
+
+
+def test_opening_range_capture_skips_on_non_trading_day(monkeypatch):
+    monkeypatch.setattr(scheduled_jobs, "_is_today_trading_day", lambda: False)
+    controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row()]))
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_opening_range_capture(controller, notifier)
+    assert notifier.notifications == []
+
+
+def test_opening_range_capture_notifies_when_lmv_not_loaded():
+    controller = _FakeController(snapshot=None)
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_opening_range_capture(controller, notifier)
+    assert len(notifier.notifications) == 1
+    title, message, action = notifier.notifications[0]
+    assert "Skipped" in title
+    action()
+    assert controller.navigated_to == ["data_import"]
+
+
+def test_opening_range_capture_notifies_when_no_usable_rows():
+    data = [_sharekhan_row()]
+    data[0][SHAREKHAN_HEADERS.index("High")] = None
+    controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, data))
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_opening_range_capture(controller, notifier)
+    assert len(notifier.notifications) == 1
+    assert "Skipped" in notifier.notifications[0][0]
+
+
+def test_opening_range_capture_uploads_and_notifies_success(monkeypatch):
+    uploaded = {}
+
+    def fake_upload_daily(trade_date, window_minutes, rows):
+        uploaded["trade_date"] = trade_date
+        uploaded["window_minutes"] = window_minutes
+        uploaded["rows"] = rows
+        return {"values_upserted": len(rows)}
+
+    monkeypatch.setattr(scheduled_jobs.opening_range_api, "upload_daily", fake_upload_daily)
+
+    controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row(scrip="INFY")]))
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_opening_range_capture(controller, notifier)
+
+    assert uploaded["trade_date"] == _FixedDate.today()
+    assert uploaded["window_minutes"] == 15
+    assert uploaded["rows"][0]["symbol"] == "INFY"
+    assert len(notifier.notifications) == 1
+    title, message, action = notifier.notifications[0]
+    assert title == "Opening Range Saved"
+    assert "High and Low saved" in message
+
+
+def test_opening_range_capture_notifies_on_api_error(monkeypatch):
+    from api.exceptions import ApiError
+
+    def fake_upload_daily(trade_date, window_minutes, rows):
+        raise ApiError("server exploded", "internal_error", 500)
+
+    monkeypatch.setattr(scheduled_jobs.opening_range_api, "upload_daily", fake_upload_daily)
+
+    controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row()]))
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_opening_range_capture(controller, notifier)
+
+    assert len(notifier.notifications) == 1
+    assert notifier.notifications[0][0] == "Opening Range Save Failed"
+
+
+def test_opening_range_capture_notifies_on_network_error(monkeypatch):
+    from api.exceptions import NetworkError
+
+    def fake_upload_daily(trade_date, window_minutes, rows):
+        raise NetworkError("no connection")
+
+    monkeypatch.setattr(scheduled_jobs.opening_range_api, "upload_daily", fake_upload_daily)
+
+    controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row()]))
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_opening_range_capture(controller, notifier)
+
+    assert len(notifier.notifications) == 1
+    assert notifier.notifications[0][0] == "Opening Range Save Failed"
+
+
+def test_opening_range_capture_silent_on_session_expired(monkeypatch):
+    from api.exceptions import ApiError
+
+    def fake_upload_daily(trade_date, window_minutes, rows):
+        raise ApiError("unauthorized", "unauthorized", 401)
+
+    monkeypatch.setattr(scheduled_jobs.opening_range_api, "upload_daily", fake_upload_daily)
+
+    controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row()]))
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_opening_range_capture(controller, notifier)
+
     assert notifier.notifications == []

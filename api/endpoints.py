@@ -17,4 +17,9 @@ LMV_SNAPSHOT_AVAILABILITY = "/lmv-snapshot/availability"
 LMV_SNAPSHOT_SNAPSHOT = "/lmv-snapshot/snapshot"
 LMV_SNAPSHOT = "/lmv-snapshot"
 
+OPENING_RANGE_DAILY_UPLOAD = "/opening-range/daily-upload"
+OPENING_RANGE_AVAILABILITY = "/opening-range/availability"
+OPENING_RANGE_SNAPSHOT = "/opening-range/snapshot"
+OPENING_RANGE = "/opening-range"
+
 HOLIDAYS = "/holidays"

@@ -510,5 +510,10 @@ SCHEDULER_TRIGGER_DEFAULTS = [
     ("historic_save", "Daily Historic Save",
      "Saves today's Live Master View data to Historic records automatically.",
      "22:45"),
+    ("opening_range_capture", "Opening Range High/Low Capture",
+     "Saves each stock's highest High and lowest Low from the Live Master "
+     "View for the trading day's opening window (market open 09:15 to this "
+     "time — 09:30 default = first 15 minutes).",
+     "09:30"),
 ]
 

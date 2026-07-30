@@ -60,6 +60,7 @@ class MainWindow(QMainWindow):
         from screens.formula_builder import FormulaBuilderScreen
         from screens.holidays import HolidaysScreen
         from screens.lmv_upload import LmvUploadScreen
+        from screens.jobs import JobsScreen
 
         dashboard        = DashboardScreen(self._controller)
         data_import      = DataImportScreen(self._controller)
@@ -108,6 +109,7 @@ class MainWindow(QMainWindow):
             ("formula_builder",  FormulaBuilderScreen(self._controller)),
             ("holidays",         HolidaysScreen(self._controller)),
             ("lmv_upload",       LmvUploadScreen(self._controller)),
+            ("jobs",             JobsScreen(self._controller)),
         ]
         for name, widget in screens:
             self._screens[name] = widget
@@ -282,3 +284,6 @@ class MainWindow(QMainWindow):
         holidays = self._screens.get("holidays")
         if holidays is not None:
             holidays.refresh_theme()
+        jobs = self._screens.get("jobs")
+        if jobs is not None:
+            jobs.refresh_theme()

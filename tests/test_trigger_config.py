@@ -13,7 +13,9 @@ def store(tmp_path, monkeypatch):
 def test_load_defaults_when_unsaved(store):
     from services import trigger_config
     configs = trigger_config.load_trigger_configs()
-    assert [c.id for c in configs] == ["availability_check", "lmv_check", "historic_save"]
+    assert [c.id for c in configs] == [
+        "availability_check", "lmv_check", "historic_save", "opening_range_capture",
+    ]
     for c in configs:
         assert c.system_enabled is True
         assert c.telegram_enabled is False
