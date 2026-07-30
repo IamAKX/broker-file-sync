@@ -82,11 +82,36 @@ class _LiveDataWorker(QObject):
     result = Signal(list, list, list, list)   # headers, data, disp_headers, disp_data
     failed = Signal(str)                      # error message, already prefixed
 
+    # Strategy-toggle / category-change recompute — same apply_strategies()
+    # work as do_read, but over data already in hand (no new read). Separate
+    # signals from result/failed so a recompute error can't be mistaken for
+    # a read error by _on_read_failed (which resets unrelated state).
+    recompute_result = Signal(list, list)     # disp_headers, disp_data
+    recompute_failed = Signal(str)            # error message, already prefixed
+
     def __init__(self, reader, sector_map: dict):
         super().__init__()
         self._reader     = reader
         self._sector_map = sector_map
         self._started    = False
+
+    def recompute(self, headers: list, data: list, strategies: list) -> None:
+        """Re-run apply_strategies() on already-fetched data (no new read) —
+        used for the interactive strategy-toggle / category-change path so
+        the O(rows x strategies x columns) formula evaluation runs off the
+        GUI thread instead of blocking it synchronously (see
+        LiveViewerWindow._recompute_display)."""
+        try:
+            active = [s for s in strategies if s.get("active")]
+            if active:
+                from services.strategy_engine import apply_strategies
+                disp_headers, disp_data = apply_strategies(active, headers, data)
+            else:
+                disp_headers, disp_data = headers, data
+        except Exception as exc:
+            self.recompute_failed.emit(f"Strategy error: {exc}"[:200])
+            return
+        self.recompute_result.emit(disp_headers, disp_data)
 
     def do_read(self, force_slow: bool, settle_s: float, strategies: list) -> None:
         if not self._started:
@@ -478,9 +503,10 @@ class LiveViewerWindow(QWidget):
     """
 
     # Emitted from the GUI thread to drive work on the worker thread.
-    _request_read     = Signal(bool, float, list)  # force_slow, settle_seconds, strategies
-    _request_shutdown = Signal()              # release COM on the worker thread
-    data_updated      = Signal(list, list)    # headers, data — for downstream consumers
+    _request_read      = Signal(bool, float, list)  # force_slow, settle_seconds, strategies
+    _request_recompute = Signal(list, list, list)   # headers, data, strategies
+    _request_shutdown  = Signal()              # release COM on the worker thread
+    data_updated       = Signal(list, list)    # headers, data — for downstream consumers
 
     def __init__(self, sharekhan_path: str, reliable_path: str,
                  nifty_paths, script_name_data: list,
@@ -538,6 +564,8 @@ class LiveViewerWindow(QWidget):
         self._worker_thread      = None
         self._initial_load_done  = False   # set on the first successful read
         self._initial_render_done = False  # set once _render_initial_table has run
+        self._recomputing        = False   # a strategy-toggle recompute is in flight
+        self._recompute_pending  = False   # another one was requested while it was
 
         self.setWindowTitle("Live Master View")
         self.resize(1300, 700)
@@ -746,9 +774,12 @@ class LiveViewerWindow(QWidget):
         self._worker        = _LiveDataWorker(self._reader, self._sector_map)
         self._worker.moveToThread(self._worker_thread)
         self._request_read.connect(self._worker.do_read)
+        self._request_recompute.connect(self._worker.recompute)
         self._request_shutdown.connect(self._worker.shutdown)
         self._worker.result.connect(self._on_data_ready)
         self._worker.failed.connect(self._on_read_failed)
+        self._worker.recompute_result.connect(self._on_recompute_ready)
+        self._worker.recompute_failed.connect(self._on_recompute_failed)
         self._worker_thread.start()
 
         # Safety net for teardown that bypasses closeEvent (e.g. the widget is
@@ -873,6 +904,62 @@ class LiveViewerWindow(QWidget):
         self._refreshing = False
         self._status_lbl.setText(msg)
 
+    def _recompute_display(self):
+        """Re-render the table after a strategy toggle or category change.
+
+        apply_strategies() — the O(rows x strategies x columns) formula
+        evaluation _populate_table's docstring warns about — runs on the
+        worker thread via _request_recompute instead of inline here, so a
+        large sheet/strategy set doesn't freeze the GUI thread for the whole
+        rebuild the way it used to. self._data/_headers aren't changing (no
+        new read), only the strategy output columns are being recomputed.
+
+        Falls back to the old synchronous path if the worker isn't up yet —
+        shouldn't happen once the window is visible, but keeps this callable
+        safely at any point.
+        """
+        if self._worker is None:
+            self._populate_table(self._data, set())
+            self._apply_sector_filter()
+            self._update_filter_btn_label()
+            return
+        if self._recomputing:
+            # A recompute is already in flight — don't queue a second worker
+            # call, just remember to run once more with the latest state
+            # when this one lands (see _on_recompute_ready/_on_recompute_failed).
+            self._recompute_pending = True
+            return
+        self._recomputing = True
+        # Snapshots, not live references — the worker thread must never touch
+        # GUI-thread-owned state concurrently (same rationale as _request_refresh).
+        self._request_recompute.emit(
+            list(self._headers), [list(r) for r in self._data],
+            [dict(s) for s in self._filtered_strategies()],
+        )
+
+    def _on_recompute_ready(self, disp_headers: list, disp_data: list):
+        try:
+            self._populate_table(self._data, changed_keys=set(),
+                                 precomputed_disp=(disp_headers, disp_data))
+            self._apply_sector_filter()
+            self._update_filter_btn_label()
+        except Exception as exc:
+            from services.error_logging import error_logger
+            error_logger.exception("LMV strategy recompute render failed")
+            self._status_lbl.setText(f"Render error: {exc}")
+        finally:
+            self._recomputing = False
+            if self._recompute_pending:
+                self._recompute_pending = False
+                self._recompute_display()
+
+    def _on_recompute_failed(self, msg: str):
+        self._recomputing = False
+        self._status_lbl.setText(msg)
+        if self._recompute_pending:
+            self._recompute_pending = False
+            self._recompute_display()
+
     def _on_data_ready(self, headers: list, new_data: list,
                       disp_headers: list, disp_data: list):
         from datetime import datetime
@@ -942,11 +1029,12 @@ class LiveViewerWindow(QWidget):
 
         ``precomputed_disp``, when given, is the ``(disp_headers, disp_data)``
         already computed by apply_strategies() on the worker thread (see
-        _LiveDataWorker.do_read / _on_data_ready) — the live-tick and initial-
-        load paths always pass this, so the O(rows x strategies x columns)
-        formula evaluation never runs on the GUI thread. Interactive paths
-        (toggling a strategy, changing category) omit it and compute inline
-        here instead, since those are one-off and already fast.
+        _LiveDataWorker.do_read/recompute and _on_data_ready/_on_recompute_ready)
+        — the live-tick, initial-load, and interactive (strategy toggle,
+        category change) paths all pass this now, so the O(rows x strategies
+        x columns) formula evaluation never runs on the GUI thread. Only a
+        direct/manual call (tests, or the _worker-not-ready fallback in
+        _recompute_display) omits it and computes inline here instead.
         """
         from services.strategy_engine import apply_strategies, get_row_fmt_colors, build_symbol_index
 
@@ -1450,14 +1538,13 @@ class LiveViewerWindow(QWidget):
         The deferred render reads self._strategies fresh when it runs, so
         setting it and returning is enough — it picks the assignment up in
         its one pass. Once that first render has happened, later calls (if
-        any) render immediately as before.
+        any) trigger an off-thread recompute — see _recompute_display.
         """
         self._strategies = [dict(s) for s in strategies]
         self._update_strat_btn_label()
         if not self._initial_render_done:
             return
-        self._populate_table(self._data, set())
-        self._apply_sector_filter()
+        self._recompute_display()
 
     def _filtered_strategies(self) -> list:
         if self._selected_category == "All":
@@ -1470,9 +1557,7 @@ class LiveViewerWindow(QWidget):
         # Don't reset _visible_cols here — that would undo any column filter
         # the user has applied. _populate_table already extends _visible_cols
         # to cover any new strategy columns while leaving the rest untouched.
-        self._populate_table(self._data, set())
-        self._apply_sector_filter()
-        self._update_filter_btn_label()
+        self._recompute_display()
 
     def _show_strategy_picker(self):
         popup = StrategyPickerPopup(self._filtered_strategies(), self._theme, self)
@@ -1493,8 +1578,7 @@ class LiveViewerWindow(QWidget):
         # Don't reset _visible_cols here — that would undo any column filter
         # the user has applied. _populate_table already extends _visible_cols
         # to cover any new strategy columns while leaving the rest untouched.
-        self._populate_table(self._data, set())
-        self._apply_sector_filter()
+        self._recompute_display()
 
     def _update_strat_btn_label(self):
         filtered = self._filtered_strategies()
