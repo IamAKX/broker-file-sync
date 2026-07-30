@@ -23,7 +23,7 @@ def test_jobs_screen_creates(screen):
     assert screen is not None
 
 
-def test_data_menu_has_jobs(qapp):
+def test_data_menu_has_high_low(qapp):
     from theme import ThemeManager
     from components.topbar import TopBar
     from PySide6.QtWidgets import QPushButton
@@ -34,7 +34,7 @@ def test_data_menu_has_jobs(qapp):
         menu = btn.menu()
         if menu is not None:
             for action in menu.actions():
-                if action.text() == "Jobs":
+                if action.text() == "High/Low":
                     found = True
     assert found
 

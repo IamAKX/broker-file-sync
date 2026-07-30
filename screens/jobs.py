@@ -1,5 +1,5 @@
 """
-Jobs screen (Data menu > Jobs): configure and browse the Opening Range
+High/Low screen (Data menu > High/Low): configure and browse the Opening Range
 High/Low capture background job (see services/scheduled_jobs.py
 run_opening_range_capture). Two tabs, same shape as screens/historic_upload.py
 and screens/lmv_upload.py:
@@ -58,7 +58,7 @@ class JobsScreen(QWidget):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)
 
-        title = QLabel("Jobs")
+        title = QLabel("High/Low")
         title.setFont(font_scale.font(font_scale.LARGE, True))
         layout.addWidget(title)
 

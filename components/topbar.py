@@ -80,7 +80,7 @@ class TopBar(QWidget):
                 ("Data Import",     lambda: self.navigate.emit("data_import")),
                 ("Historic Upload", lambda: self.navigate.emit("historic_upload")),
                 ("LMV Upload",      lambda: self.navigate.emit("lmv_upload")),
-                ("Jobs",            lambda: self.navigate.emit("jobs")),
+                ("High/Low",        lambda: self.navigate.emit("jobs")),
             ]),
             ("View", [
                 ("Full Screen",  lambda: self.fullscreen_requested.emit()),
