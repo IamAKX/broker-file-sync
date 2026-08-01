@@ -139,7 +139,8 @@ class ChannelRow(QFrame):
     """Compact single-line channel control — config fields live in a popup
     dialog instead of being shown inline, to keep the page header short."""
 
-    def __init__(self, title: str, icon_file: str, fields: list, send_label: str, theme, parent=None):
+    def __init__(self, title: str, icon_file: str, fields: list, send_label: str, theme,
+                 default_enabled: bool = False, parent=None):
         """
         fields: list of (label, placeholder) tuples
         """
@@ -150,7 +151,7 @@ class ChannelRow(QFrame):
         self._values: dict = {}
         self.setObjectName("brokerPanel")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-        self._toggle = ToggleSwitch(False)
+        self._toggle = ToggleSwitch(default_enabled)
         self._build(title, icon_file, send_label)
 
     def _build(self, title, icon_file, send_label):
@@ -309,7 +310,8 @@ class NotificationsScreen(QWidget):
         self._system_card = ChannelRow(
             "System", "notification.svg",
             [],   # nothing to configure — delivered via the local OS tray
-            "Test Notification", t
+            "Test Notification", t,
+            default_enabled=True,   # the only live channel — on by default, unlike SMS/Telegram
         )
         self._system_card.connect_toggle(self._on_toggle_changed)
         self._system_card.connect_send(self._on_test_system_notification)
@@ -377,7 +379,7 @@ class NotificationsScreen(QWidget):
 
         self._sms_status_lbl = self._make_status_dot("SMS: Disabled", t.get("text_secondary"))
         self._telegram_status_lbl = self._make_status_dot("Telegram: Disabled", t.get("text_secondary"))
-        self._system_status_lbl = self._make_status_dot("System: Disabled", t.get("text_secondary"))
+        self._system_status_lbl = self._make_status_dot("System: Enabled", t.get("accent"))
         sb_layout.addWidget(self._sms_status_lbl)
         sb_layout.addWidget(self._telegram_status_lbl)
         sb_layout.addWidget(self._system_status_lbl)

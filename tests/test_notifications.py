@@ -74,6 +74,15 @@ def test_system_default_checked_telegram_sms_default_unchecked(screen):
         assert sms_cb.isChecked() is False
 
 
+def test_system_channel_card_enabled_by_default(screen):
+    # System is the only live channel — its top-level toggle (and status
+    # dot) must default on, unlike SMS/Telegram which have no backend yet.
+    assert screen._system_card.is_enabled() is True
+    assert screen._sms_card.is_enabled() is False
+    assert screen._telegram_card.is_enabled() is False
+    assert "Enabled" in screen._system_status_lbl.text()
+
+
 def test_edited_time_persists(screen, isolated_store):
     from datetime import time as dtime
     from services import trigger_config
