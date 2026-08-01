@@ -58,7 +58,7 @@ class AppController:
         rebuild it (that would lose today's last-fired state)."""
         if self._scheduler is not None or self._tray is None:
             return
-        from services.notification_service import NotificationService
+        from services.notifications import NotificationService
         from services.scheduler import Scheduler
         from services import scheduled_jobs
 

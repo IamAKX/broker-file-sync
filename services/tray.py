@@ -1,7 +1,7 @@
 """
 System tray icon: lets the app stay resident when the main window is hidden,
 and is the surface the background scheduler's notifications are delivered
-through (see services/notification_service.py).
+through (see services/notifications/).
 """
 
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
