@@ -11,6 +11,7 @@ from api.exceptions import ApiError, NetworkError
 from config_defaults import SCRIPT_NAME_DATA
 from services import config_store, trading_calendar, trigger_config
 from services.master_generator import _build_script_name_lookup, _strip_rolling_suffix
+from services.notifications import NotificationLevel
 
 # Raw historic-upload metric name -> Sharekhan-shaped LMV column name.
 # Fixed mapping, not user-editable (see plan doc) — verified against
@@ -112,34 +113,74 @@ def _is_today_trading_day() -> bool:
     return trading_calendar.is_trading_day(today, holidays)
 
 
-def run_lmv_check(controller, notifier) -> None:
+def _trading_day_gate(notifier, job_title: str) -> bool:
+    """Whether `job_title`'s job should proceed today — used by every job that's
+    a no-op on non-trading days. Both "today isn't a trading day" and "the
+    trading-day check itself failed" get a notification instead of a silent
+    return: nothing about why a scheduled job did nothing should happen only
+    in the background.
+    """
     try:
-        if not _is_today_trading_day():
-            return
-    except (ApiError, NetworkError):
-        return   # transient — re-checked on the next 30s poll
+        is_trading_day = _is_today_trading_day()
+    except ApiError as exc:
+        if not _is_session_expired(exc):
+            notifier.notify(
+                f"{job_title} Skipped",
+                f"Couldn't check whether today is a trading day — {job_title.lower()} "
+                f"was skipped. Error: {exc.detail}",
+                level=NotificationLevel.FAILURE,
+            )
+        return False
+    except NetworkError as exc:
+        notifier.notify(
+            f"{job_title} Skipped",
+            f"Couldn't reach the server to check whether today is a trading day — "
+            f"{job_title.lower()} was skipped. Error: {exc}",
+            level=NotificationLevel.FAILURE,
+        )
+        return False
+
+    if not is_trading_day:
+        notifier.notify(
+            f"{job_title} Skipped",
+            "Today isn't a trading day — nothing to do.",
+            level=NotificationLevel.INFO,
+        )
+        return False
+    return True
+
+
+def run_lmv_check(controller, notifier) -> None:
+    if not _trading_day_gate(notifier, "LMV Check"):
+        return
 
     if controller.get_lmv_snapshot() is None:
         notifier.notify(
             "Load Live Master View",
             "LMV isn't loaded yet — load your broker files before today's historic save.",
             action=lambda: controller.show_and_navigate("data_import"),
+            level=NotificationLevel.FAILURE,
+        )
+    else:
+        notifier.notify(
+            "Live Master View Loaded",
+            "LMV is loaded and ready for today's historic save.",
+            level=NotificationLevel.SUCCESS,
         )
 
 
 def run_historic_save(controller, notifier) -> None:
-    try:
-        if not _is_today_trading_day():
-            return
-    except (ApiError, NetworkError):
-        return   # transient — re-checked on the next 30s poll
+    if not _trading_day_gate(notifier, "Historic Save"):
+        return
 
     snapshot = controller.get_lmv_snapshot()
     if snapshot is None:
         notifier.notify(
-            "Historic Save Skipped",
-            "Live Master View isn't loaded — data was not saved today.",
-            action=lambda: controller.show_and_navigate("historic_upload"),
+            "Load Live Master View",
+            "LMV isn't loaded — load your broker files so today's data can be "
+            "saved. Data was not saved today.",
+            action=lambda: controller.show_and_navigate("data_import"),
+            level=NotificationLevel.FAILURE,
         )
         return
 
@@ -147,7 +188,7 @@ def run_historic_save(controller, notifier) -> None:
     script_name_data = config_store.load_tab("script_name", SCRIPT_NAME_DATA)
 
     rows_payload = _build_rows_payload(headers, data, script_name_data)
-    _upload_with_notify(
+    raw_ok = _upload_with_notify(
         lambda: historic_api.upload_daily(date.today(), rows_payload),
         controller, notifier, "Historic Save Failed",
     )
@@ -157,28 +198,44 @@ def run_historic_save(controller, notifier) -> None:
     # or roll back the other; each is its own save with its own failure
     # notification.
     snapshot_payload = _build_lmv_snapshot_payload(headers, data, script_name_data)
-    _upload_with_notify(
+    snapshot_ok = _upload_with_notify(
         lambda: lmv_snapshot_api.upload_daily(date.today(), snapshot_payload),
         controller, notifier, "LMV Snapshot Save Failed",
     )
 
+    if raw_ok and snapshot_ok:
+        notifier.notify(
+            "Historic Save Completed",
+            f"Today's data was saved successfully for {len(rows_payload)} stocks.",
+            level=NotificationLevel.SUCCESS,
+        )
 
-def _upload_with_notify(upload, controller, notifier, failure_title: str) -> None:
+
+def _upload_with_notify(upload, controller, notifier, failure_title: str) -> bool:
+    """Returns whether `upload` succeeded — callers use this to decide
+    whether an overall "saved successfully" notification is still warranted,
+    and a session-expired (401) failure counts as not-ok without notifying
+    (see _is_session_expired)."""
     try:
         upload()
+        return True
     except ApiError as exc:
         if not _is_session_expired(exc):
             notifier.notify(
                 failure_title,
-                "Couldn't save today's data — data was not saved today.",
+                f"Couldn't save today's data — data was not saved today. Error: {exc.detail}",
                 action=lambda: controller.show_and_navigate("historic_upload"),
+                level=NotificationLevel.FAILURE,
             )
-    except NetworkError:
+        return False
+    except NetworkError as exc:
         notifier.notify(
             failure_title,
-            "Couldn't reach the server — data was not saved today.",
+            f"Couldn't reach the server — data was not saved today. Error: {exc}",
             action=lambda: controller.show_and_navigate("historic_upload"),
+            level=NotificationLevel.FAILURE,
         )
+        return False
 
 
 # ── Opening-range High/Low capture ───────────────────────────────────────────
@@ -244,18 +301,17 @@ def _build_opening_range_payload(headers: list, data: list, script_name_data: li
 
 
 def run_opening_range_capture(controller, notifier) -> None:
-    try:
-        if not _is_today_trading_day():
-            return
-    except (ApiError, NetworkError):
-        return   # transient — re-checked on the next 30s poll
+    if not _trading_day_gate(notifier, "Opening Range Capture"):
+        return
 
     snapshot = controller.get_lmv_snapshot()
     if snapshot is None:
         notifier.notify(
-            "Opening Range Capture Skipped",
-            "Live Master View isn't loaded — High/Low was not saved today.",
+            "Load Live Master View",
+            "LMV isn't loaded — load your broker files so today's High/Low "
+            "can be captured. High/Low was not saved today.",
             action=lambda: controller.show_and_navigate("data_import"),
+            level=NotificationLevel.FAILURE,
         )
         return
 
@@ -269,6 +325,7 @@ def run_opening_range_capture(controller, notifier) -> None:
             "No usable High/Low values were found in the Live Master View — "
             "High/Low was not saved today.",
             action=lambda: controller.show_and_navigate("data_import"),
+            level=NotificationLevel.FAILURE,
         )
         return
 
@@ -279,19 +336,25 @@ def run_opening_range_capture(controller, notifier) -> None:
         if not _is_session_expired(exc):
             notifier.notify(
                 "Opening Range Save Failed",
-                "Couldn't save today's High/Low — data was not saved today.",
+                f"Couldn't save today's High/Low — data was not saved today. Error: {exc.detail}",
                 action=lambda: controller.show_and_navigate("data_import"),
+                level=NotificationLevel.FAILURE,
             )
         return
-    except NetworkError:
+    except NetworkError as exc:
         notifier.notify(
             "Opening Range Save Failed",
-            "Couldn't reach the server — High/Low was not saved today.",
+            f"Couldn't reach the server — High/Low was not saved today. Error: {exc}",
             action=lambda: controller.show_and_navigate("data_import"),
+            level=NotificationLevel.FAILURE,
         )
         return
 
-    notifier.notify("Opening Range Saved", f"High and Low saved for {len(rows_payload)} stocks.")
+    notifier.notify(
+        "Opening Range Saved",
+        f"High and Low saved for {len(rows_payload)} stocks.",
+        level=NotificationLevel.SUCCESS,
+    )
 
 
 def run_availability_check(controller, notifier) -> None:
@@ -300,18 +363,44 @@ def run_availability_check(controller, notifier) -> None:
         holidays = trading_calendar.get_holiday_set(today.year - 1, today.year)
         prev_day = trading_calendar.previous_trading_day(today, holidays)
         if prev_day is None:
+            notifier.notify(
+                "Historic Availability Check Skipped",
+                "No previous trading day was found to check.",
+                level=NotificationLevel.INFO,
+            )
             return
         availability = historic_api.get_availability(prev_day, prev_day)
-    except (ApiError, NetworkError):
-        return   # transient — re-checked on the next 30s poll before day rolls over
+    except ApiError as exc:
+        if not _is_session_expired(exc):
+            notifier.notify(
+                "Historic Availability Check Failed",
+                f"Couldn't check whether yesterday's historic data was saved. Error: {exc.detail}",
+                level=NotificationLevel.FAILURE,
+            )
+        return
+    except NetworkError as exc:
+        notifier.notify(
+            "Historic Availability Check Failed",
+            f"Couldn't reach the server to check whether yesterday's historic data was "
+            f"saved. Error: {exc}",
+            level=NotificationLevel.FAILURE,
+        )
+        return
 
     has_data = any(
         d.get("has_data") for d in availability.get("dates", [])
         if d.get("trade_date") == prev_day.isoformat()
     )
-    if not has_data:
+    if has_data:
+        notifier.notify(
+            "Historic Data Available",
+            f"Historic data on file for {prev_day.strftime('%d-%b-%Y')}.",
+            level=NotificationLevel.SUCCESS,
+        )
+    else:
         notifier.notify(
             "Missing Historic Data",
             f"No historic data on file for {prev_day.strftime('%d-%b-%Y')}.",
             action=lambda: controller.show_and_navigate("historic_upload"),
+            level=NotificationLevel.FAILURE,
         )

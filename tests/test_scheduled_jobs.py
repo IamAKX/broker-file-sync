@@ -4,6 +4,7 @@ from datetime import date
 import pytest
 
 from services import scheduled_jobs, trading_calendar, trigger_config
+from services.notifications import NotificationLevel
 
 
 class _FixedDate(date):
@@ -31,8 +32,8 @@ class _FakeNotifier:
     def __init__(self):
         self.notifications = []
 
-    def notify(self, title, message, action=None, **kwargs):
-        self.notifications.append((title, message, action))
+    def notify(self, title, message, action=None, level=NotificationLevel.INFO, **kwargs):
+        self.notifications.append((title, message, action, level))
 
 
 @pytest.fixture(autouse=True)
@@ -140,6 +141,71 @@ def test_build_lmv_snapshot_payload_resolves_symbol_via_script_name_map():
     assert rows[0]["display_name"] == "Infosys Limited"
 
 
+# ── _trading_day_gate ─────────────────────────────────────────────────────────
+# Shared by run_lmv_check / run_historic_save / run_opening_range_capture —
+# nothing about why one of those did nothing today should happen silently.
+
+def test_trading_day_gate_notifies_when_not_a_trading_day(monkeypatch):
+    monkeypatch.setattr(scheduled_jobs, "_is_today_trading_day", lambda: False)
+    notifier = _FakeNotifier()
+    assert scheduled_jobs._trading_day_gate(notifier, "Some Job") is False
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Some Job Skipped"
+    assert "isn't a trading day" in message.lower()
+    assert level == NotificationLevel.INFO
+
+
+def test_trading_day_gate_proceeds_on_trading_day(monkeypatch):
+    monkeypatch.setattr(scheduled_jobs, "_is_today_trading_day", lambda: True)
+    notifier = _FakeNotifier()
+    assert scheduled_jobs._trading_day_gate(notifier, "Some Job") is True
+    assert notifier.notifications == []
+
+
+def test_trading_day_gate_notifies_on_api_error(monkeypatch):
+    from api.exceptions import ApiError
+
+    def raise_api_error():
+        raise ApiError("server exploded", "internal_error", 500)
+
+    monkeypatch.setattr(scheduled_jobs, "_is_today_trading_day", raise_api_error)
+    notifier = _FakeNotifier()
+    assert scheduled_jobs._trading_day_gate(notifier, "Some Job") is False
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Some Job Skipped"
+    assert "server exploded" in message
+    assert level == NotificationLevel.FAILURE
+
+
+def test_trading_day_gate_notifies_on_network_error(monkeypatch):
+    from api.exceptions import NetworkError
+
+    def raise_network_error():
+        raise NetworkError("no connection")
+
+    monkeypatch.setattr(scheduled_jobs, "_is_today_trading_day", raise_network_error)
+    notifier = _FakeNotifier()
+    assert scheduled_jobs._trading_day_gate(notifier, "Some Job") is False
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Some Job Skipped"
+    assert level == NotificationLevel.FAILURE
+
+
+def test_trading_day_gate_silent_on_session_expired(monkeypatch):
+    from api.exceptions import ApiError
+
+    def raise_unauthorized():
+        raise ApiError("unauthorized", "unauthorized", 401)
+
+    monkeypatch.setattr(scheduled_jobs, "_is_today_trading_day", raise_unauthorized)
+    notifier = _FakeNotifier()
+    assert scheduled_jobs._trading_day_gate(notifier, "Some Job") is False
+    assert notifier.notifications == []
+
+
 # ── run_lmv_check ────────────────────────────────────────────────────────────
 
 def test_lmv_check_notifies_when_not_loaded():
@@ -147,17 +213,32 @@ def test_lmv_check_notifies_when_not_loaded():
     notifier = _FakeNotifier()
     scheduled_jobs.run_lmv_check(controller, notifier)
     assert len(notifier.notifications) == 1
-    title, message, action = notifier.notifications[0]
+    title, message, action, level = notifier.notifications[0]
     assert "Load" in title
+    assert level == NotificationLevel.FAILURE
     action()
     assert controller.navigated_to == ["data_import"]
 
 
-def test_lmv_check_silent_when_loaded():
+def test_lmv_check_notifies_on_non_trading_day(monkeypatch):
+    monkeypatch.setattr(scheduled_jobs, "_is_today_trading_day", lambda: False)
     controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row()]))
     notifier = _FakeNotifier()
     scheduled_jobs.run_lmv_check(controller, notifier)
-    assert notifier.notifications == []
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "LMV Check Skipped"
+    assert level == NotificationLevel.INFO
+
+
+def test_lmv_check_notifies_success_when_loaded():
+    controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row()]))
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_lmv_check(controller, notifier)
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert "Loaded" in title
+    assert level == NotificationLevel.SUCCESS
 
 
 # ── run_historic_save ────────────────────────────────────────────────────────
@@ -167,10 +248,23 @@ def test_historic_save_notifies_when_lmv_not_loaded():
     notifier = _FakeNotifier()
     scheduled_jobs.run_historic_save(controller, notifier)
     assert len(notifier.notifications) == 1
-    title, message, action = notifier.notifications[0]
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Load Live Master View"
     assert "not saved" in message.lower()
+    assert level == NotificationLevel.FAILURE
     action()
-    assert controller.navigated_to == ["historic_upload"]
+    assert controller.navigated_to == ["data_import"]
+
+
+def test_historic_save_notifies_on_non_trading_day(monkeypatch):
+    monkeypatch.setattr(scheduled_jobs, "_is_today_trading_day", lambda: False)
+    controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row()]))
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_historic_save(controller, notifier)
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Historic Save Skipped"
+    assert level == NotificationLevel.INFO
 
 
 def test_historic_save_uploads_when_lmv_loaded(monkeypatch):
@@ -194,7 +288,10 @@ def test_historic_save_uploads_when_lmv_loaded(monkeypatch):
     notifier = _FakeNotifier()
     scheduled_jobs.run_historic_save(controller, notifier)
 
-    assert notifier.notifications == []
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Historic Save Completed"
+    assert level == NotificationLevel.SUCCESS
     assert uploaded["trade_date"] == _FixedDate.today()
     assert uploaded["rows"][0]["symbol"] == "INFY"
     assert snapshot_uploaded["trade_date"] == _FixedDate.today()
@@ -219,6 +316,10 @@ def test_historic_save_notifies_on_api_error(monkeypatch):
     scheduled_jobs.run_historic_save(controller, notifier)
 
     assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Historic Save Failed"
+    assert "server exploded" in message
+    assert level == NotificationLevel.FAILURE
 
 
 def test_historic_save_notifies_on_snapshot_api_error_independently(monkeypatch):
@@ -267,12 +368,13 @@ def test_availability_check_notifies_when_missing(monkeypatch):
     notifier = _FakeNotifier()
     scheduled_jobs.run_availability_check(controller, notifier)
     assert len(notifier.notifications) == 1
-    _, _, action = notifier.notifications[0]
+    _, _, action, level = notifier.notifications[0]
+    assert level == NotificationLevel.FAILURE
     action()
     assert controller.navigated_to == ["historic_upload"]
 
 
-def test_availability_check_silent_when_present(monkeypatch):
+def test_availability_check_notifies_success_when_present(monkeypatch):
     monkeypatch.setattr(
         scheduled_jobs.historic_api, "get_availability",
         lambda date_from, date_to: {"dates": [{"trade_date": date_from.isoformat(), "has_data": True}]},
@@ -280,7 +382,67 @@ def test_availability_check_silent_when_present(monkeypatch):
     controller = _FakeController()
     notifier = _FakeNotifier()
     scheduled_jobs.run_availability_check(controller, notifier)
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Historic Data Available"
+    assert level == NotificationLevel.SUCCESS
+
+
+def test_availability_check_notifies_on_api_error(monkeypatch):
+    from api.exceptions import ApiError
+
+    def raise_api_error(date_from, date_to):
+        raise ApiError("server exploded", "internal_error", 500)
+
+    monkeypatch.setattr(scheduled_jobs.historic_api, "get_availability", raise_api_error)
+    controller = _FakeController()
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_availability_check(controller, notifier)
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Historic Availability Check Failed"
+    assert "server exploded" in message
+    assert level == NotificationLevel.FAILURE
+
+
+def test_availability_check_notifies_on_network_error(monkeypatch):
+    from api.exceptions import NetworkError
+
+    def raise_network_error(date_from, date_to):
+        raise NetworkError("no connection")
+
+    monkeypatch.setattr(scheduled_jobs.historic_api, "get_availability", raise_network_error)
+    controller = _FakeController()
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_availability_check(controller, notifier)
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Historic Availability Check Failed"
+    assert level == NotificationLevel.FAILURE
+
+
+def test_availability_check_silent_on_session_expired(monkeypatch):
+    from api.exceptions import ApiError
+
+    def raise_unauthorized(date_from, date_to):
+        raise ApiError("unauthorized", "unauthorized", 401)
+
+    monkeypatch.setattr(scheduled_jobs.historic_api, "get_availability", raise_unauthorized)
+    controller = _FakeController()
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_availability_check(controller, notifier)
     assert notifier.notifications == []
+
+
+def test_availability_check_notifies_when_no_previous_trading_day(monkeypatch):
+    monkeypatch.setattr(scheduled_jobs.trading_calendar, "previous_trading_day", lambda today, holidays: None)
+    controller = _FakeController()
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_availability_check(controller, notifier)
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Historic Availability Check Skipped"
+    assert level == NotificationLevel.INFO
 
 
 # ── run_opening_range_capture ────────────────────────────────────────────────
@@ -339,12 +501,16 @@ def test_build_opening_range_payload_missing_columns_returns_empty():
     assert rows == []
 
 
-def test_opening_range_capture_skips_on_non_trading_day(monkeypatch):
+def test_opening_range_capture_notifies_on_non_trading_day(monkeypatch):
     monkeypatch.setattr(scheduled_jobs, "_is_today_trading_day", lambda: False)
     controller = _FakeController(snapshot=(SHAREKHAN_HEADERS, [_sharekhan_row()]))
     notifier = _FakeNotifier()
     scheduled_jobs.run_opening_range_capture(controller, notifier)
-    assert notifier.notifications == []
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Opening Range Capture Skipped"
+    assert "isn't a trading day" in message.lower()
+    assert level == NotificationLevel.INFO
 
 
 def test_opening_range_capture_notifies_when_lmv_not_loaded():
@@ -352,8 +518,9 @@ def test_opening_range_capture_notifies_when_lmv_not_loaded():
     notifier = _FakeNotifier()
     scheduled_jobs.run_opening_range_capture(controller, notifier)
     assert len(notifier.notifications) == 1
-    title, message, action = notifier.notifications[0]
-    assert "Skipped" in title
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Load Live Master View"
+    assert level == NotificationLevel.FAILURE
     action()
     assert controller.navigated_to == ["data_import"]
 
@@ -387,9 +554,10 @@ def test_opening_range_capture_uploads_and_notifies_success(monkeypatch):
     assert uploaded["window_minutes"] == 15
     assert uploaded["rows"][0]["symbol"] == "INFY"
     assert len(notifier.notifications) == 1
-    title, message, action = notifier.notifications[0]
+    title, message, action, level = notifier.notifications[0]
     assert title == "Opening Range Saved"
     assert "High and Low saved" in message
+    assert level == NotificationLevel.SUCCESS
 
 
 def test_opening_range_capture_notifies_on_api_error(monkeypatch):
@@ -405,7 +573,10 @@ def test_opening_range_capture_notifies_on_api_error(monkeypatch):
     scheduled_jobs.run_opening_range_capture(controller, notifier)
 
     assert len(notifier.notifications) == 1
-    assert notifier.notifications[0][0] == "Opening Range Save Failed"
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Opening Range Save Failed"
+    assert "server exploded" in message
+    assert level == NotificationLevel.FAILURE
 
 
 def test_opening_range_capture_notifies_on_network_error(monkeypatch):
@@ -421,7 +592,9 @@ def test_opening_range_capture_notifies_on_network_error(monkeypatch):
     scheduled_jobs.run_opening_range_capture(controller, notifier)
 
     assert len(notifier.notifications) == 1
-    assert notifier.notifications[0][0] == "Opening Range Save Failed"
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Opening Range Save Failed"
+    assert level == NotificationLevel.FAILURE
 
 
 def test_opening_range_capture_silent_on_session_expired(monkeypatch):
