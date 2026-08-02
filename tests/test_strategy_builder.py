@@ -103,15 +103,317 @@ def test_strategy_editor_save_writes_category(qapp):
     assert saved["category"] == "Monthly"
 
 
-def test_strategy_card_shows_category_badge(qapp):
+def test_strategy_card_has_no_category_badge(qapp):
+    # The card no longer repeats its own category — it already lives inside
+    # that category's collapsible section in the sidebar (_CategorySection),
+    # so a per-card "Weekly" badge would just be redundant.
     from services.strategy_store import new_strategy
-    from screens.strategy_builder import StrategyCard
-    from PySide6.QtWidgets import QLabel
+    from screens.strategy_builder import StrategyCard, _CardText
     s = new_strategy("T")
     s["category"] = "Weekly"
     card = StrategyCard(s, None)
-    labels = [lbl.text() for lbl in card.findChildren(QLabel)]
-    assert "Weekly" in labels
+    texts = [w._text for w in card.findChildren(_CardText)]
+    assert "Weekly" not in texts
+
+
+def test_strategy_card_shows_name_and_column_count(qapp):
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyCard, _CardText
+    s = new_strategy("My Strategy")
+    s["columns"] = [{"name": "c1"}, {"name": "c2"}]
+    card = StrategyCard(s, None)
+    texts = [w._text for w in card.findChildren(_CardText)]
+    assert "My Strategy" in texts
+    assert "2 columns" in texts
+
+
+def test_all_categories_defaults_to_builtins_only(tmp_path, monkeypatch):
+    from services import config_store, strategy_store as store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common"]
+
+
+def test_add_custom_category_appends_after_builtins(tmp_path, monkeypatch):
+    from services import config_store, strategy_store as store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
+    canonical = store.add_custom_category("Intraday")
+    assert canonical == "Intraday"
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common", "Intraday"]
+
+
+def test_add_custom_category_persists_across_loads(tmp_path, monkeypatch):
+    from services import config_store, strategy_store as store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
+    store.add_custom_category("Intraday")
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common", "Intraday"]
+
+
+def test_add_custom_category_rejects_case_insensitive_duplicate(tmp_path, monkeypatch):
+    from services import config_store, strategy_store as store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
+    assert store.add_custom_category("daily") == "Daily"
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common"]
+
+    store.add_custom_category("Intraday")
+    assert store.add_custom_category("INTRADAY") == "Intraday"
+    assert store.all_categories().count("Intraday") == 1
+
+
+def test_add_custom_category_ignores_blank_name(tmp_path, monkeypatch):
+    from services import config_store, strategy_store as store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
+    assert store.add_custom_category("   ") == ""
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common"]
+
+
+def test_category_combo_has_add_category_entry(qapp, tmp_path, monkeypatch):
+    from services import config_store, strategy_store as store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
+    from screens.strategy_builder import StrategyEditor, _ADD_CATEGORY_SENTINEL
+    s = store.new_strategy("T")
+    editor = StrategyEditor(s, [], None)
+    items = [editor._category_combo.itemText(i) for i in range(editor._category_combo.count())]
+    assert items == ["Daily", "Weekly", "Monthly", "Common", _ADD_CATEGORY_SENTINEL]
+
+
+def test_selecting_add_category_prompts_dialog_and_adds_it(qapp, tmp_path, monkeypatch):
+    from services import config_store, strategy_store as store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
+    from screens.strategy_builder import StrategyEditor, _ADD_CATEGORY_SENTINEL
+    import screens.strategy_builder as sb_module
+
+    class FakeDialog:
+        def __init__(self, theme, parent=None):
+            pass
+        def exec(self):
+            return sb_module.QDialog.DialogCode.Accepted
+        def category_name(self):
+            return "Intraday"
+
+    monkeypatch.setattr(sb_module, "_AddCategoryDialog", FakeDialog)
+
+    s = store.new_strategy("T")
+    editor = StrategyEditor(s, [], None)
+    sentinel_index = editor._category_combo.count() - 1
+    assert editor._category_combo.itemText(sentinel_index) == _ADD_CATEGORY_SENTINEL
+
+    editor._category_combo.setCurrentIndex(sentinel_index)
+    editor._on_category_activated(sentinel_index)
+
+    assert editor._category_combo.currentText() == "Intraday"
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common", "Intraday"]
+
+
+def test_cancelling_add_category_reverts_to_previous_selection(qapp, tmp_path, monkeypatch):
+    from services import config_store, strategy_store as store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
+    from screens.strategy_builder import StrategyEditor
+    import screens.strategy_builder as sb_module
+
+    class FakeDialog:
+        def __init__(self, theme, parent=None):
+            pass
+        def exec(self):
+            return sb_module.QDialog.DialogCode.Rejected
+        def category_name(self):
+            return ""
+
+    monkeypatch.setattr(sb_module, "_AddCategoryDialog", FakeDialog)
+
+    s = store.new_strategy("T")
+    s["category"] = "Weekly"
+    editor = StrategyEditor(s, [], None)
+    sentinel_index = editor._category_combo.count() - 1
+
+    editor._category_combo.setCurrentIndex(sentinel_index)
+    editor._on_category_activated(sentinel_index)
+
+    assert editor._category_combo.currentText() == "Weekly"
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common"]
+
+
+# ── Rename / delete custom categories ───────────────────────────────────────
+
+def _isolate_stores(tmp_path, monkeypatch):
+    from services import config_store, strategy_store as store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "strategies.json"))
+    return store
+
+
+def test_rename_custom_category_updates_list_and_strategies(tmp_path, monkeypatch):
+    store = _isolate_stores(tmp_path, monkeypatch)
+    store.add_custom_category("Intraday")
+    s = store.new_strategy("A")
+    s["category"] = "Intraday"
+    store.save_strategy(s)
+
+    canonical = store.rename_custom_category("Intraday", "Scalping")
+
+    assert canonical == "Scalping"
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common", "Scalping"]
+    assert store.load_all()[0]["category"] == "Scalping"
+
+
+def test_rename_custom_category_is_noop_for_builtin(tmp_path, monkeypatch):
+    store = _isolate_stores(tmp_path, monkeypatch)
+    assert store.rename_custom_category("Daily", "Everyday") == "Daily"
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common"]
+
+
+def test_rename_custom_category_resolves_case_insensitive_collision(tmp_path, monkeypatch):
+    store = _isolate_stores(tmp_path, monkeypatch)
+    store.add_custom_category("Intraday")
+    assert store.rename_custom_category("Intraday", "weekly") == "Weekly"
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common"]
+
+
+def test_delete_custom_category_reassigns_strategies_to_undefined(tmp_path, monkeypatch):
+    store = _isolate_stores(tmp_path, monkeypatch)
+    store.add_custom_category("Intraday")
+    s = store.new_strategy("A")
+    s["category"] = "Intraday"
+    store.save_strategy(s)
+
+    store.delete_custom_category("Intraday")
+
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common"]
+    reloaded = store.load_all()[0]
+    assert reloaded["category"] == store.UNDEFINED_CATEGORY
+    assert reloaded["id"] == s["id"]   # the strategy itself was NOT deleted
+
+
+def test_delete_custom_category_is_noop_for_builtin(tmp_path, monkeypatch):
+    store = _isolate_stores(tmp_path, monkeypatch)
+    s = store.new_strategy("A")
+    s["category"] = "Daily"
+    store.save_strategy(s)
+
+    store.delete_custom_category("Daily")
+
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common"]
+    assert store.load_all()[0]["category"] == "Daily"
+
+
+def test_undefined_strategy_gets_its_own_sidebar_section(qapp, tmp_path, monkeypatch):
+    store = _isolate_stores(tmp_path, monkeypatch)
+    store.add_custom_category("Intraday")
+    s = store.new_strategy("Orphaned")
+    s["category"] = "Intraday"
+    store.save_strategy(s)
+    store.delete_custom_category("Intraday")
+
+    from app import AppController
+    from screens.strategy_builder import StrategyBuilderScreen, _CategorySection
+    screen = StrategyBuilderScreen(AppController(qapp))
+    sections = [w for w in screen.findChildren(_CategorySection)]
+    assert any(sec._category == store.UNDEFINED_CATEGORY for sec in sections)
+
+
+# ── Manage Categories dialog ────────────────────────────────────────────────
+
+def test_manage_categories_dialog_lists_only_custom_categories(qapp, tmp_path, monkeypatch):
+    store = _isolate_stores(tmp_path, monkeypatch)
+    store.add_custom_category("Intraday")
+    from screens.strategy_builder import ManageCategoriesDialog
+    from PySide6.QtWidgets import QLabel
+    dlg = ManageCategoriesDialog(None)
+    labels = [lbl.text() for lbl in dlg.findChildren(QLabel)]
+    assert "Intraday" in labels
+    assert "Daily" not in labels
+
+
+def test_manage_categories_dialog_shows_empty_state(qapp, tmp_path, monkeypatch):
+    _isolate_stores(tmp_path, monkeypatch)
+    from screens.strategy_builder import ManageCategoriesDialog
+    dlg = ManageCategoriesDialog(None)
+    assert dlg._list_layout.count() == 2   # empty-state label + trailing stretch
+
+
+def test_manage_categories_dialog_rename_flow(qapp, tmp_path, monkeypatch):
+    store = _isolate_stores(tmp_path, monkeypatch)
+    store.add_custom_category("Intraday")
+    import screens.strategy_builder as sb_module
+    from screens.strategy_builder import ManageCategoriesDialog
+
+    class FakeDialog:
+        def __init__(self, theme, parent=None, **kwargs):
+            pass
+        def exec(self):
+            return sb_module.QDialog.DialogCode.Accepted
+        def category_name(self):
+            return "Scalping"
+
+    monkeypatch.setattr(sb_module, "_AddCategoryDialog", FakeDialog)
+    dlg = ManageCategoriesDialog(None)
+    dlg._rename("Intraday")
+
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common", "Scalping"]
+
+
+def test_manage_categories_dialog_delete_flow(qapp, tmp_path, monkeypatch):
+    store = _isolate_stores(tmp_path, monkeypatch)
+    store.add_custom_category("Intraday")
+    from PySide6.QtWidgets import QMessageBox
+    from screens.strategy_builder import ManageCategoriesDialog
+
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Yes)
+    dlg = ManageCategoriesDialog(None)
+    dlg._delete("Intraday")
+
+    assert store.all_categories() == ["Daily", "Weekly", "Monthly", "Common"]
+
+
+# ── TopBar wiring ────────────────────────────────────────────────────────────
+
+def test_topbar_has_manage_categories_signal(qapp):
+    from theme import ThemeManager
+    from components.topbar import TopBar
+    topbar = TopBar(ThemeManager(qapp))
+    fired = []
+    topbar.manage_categories_requested.connect(lambda: fired.append(1))
+    topbar.manage_categories_requested.emit()
+    assert fired == [1]
+
+
+# ── Sidebar sections default to collapsed ───────────────────────────────────
+
+def test_category_sections_default_collapsed(qapp, tmp_path, monkeypatch):
+    store = _isolate_stores(tmp_path, monkeypatch)
+    s = store.new_strategy("A")
+    store.save_strategy(s)
+
+    from app import AppController
+    from screens.strategy_builder import StrategyBuilderScreen, _CategorySection
+    screen = StrategyBuilderScreen(AppController(qapp))
+    section = screen.findChild(_CategorySection)
+    assert section._expanded is False
+    # isVisible() is unreliable here (the screen is never actually shown, so
+    # it's always False regardless of setVisible() calls) — isHidden()
+    # reflects the widget's own setVisible() call directly.
+    assert section._body.isHidden() is True
+
+
+def test_search_force_expands_collapsed_categories(qapp, tmp_path, monkeypatch):
+    store = _isolate_stores(tmp_path, monkeypatch)
+    s = store.new_strategy("Findme")
+    store.save_strategy(s)
+
+    from app import AppController
+    from screens.strategy_builder import StrategyBuilderScreen
+    screen = StrategyBuilderScreen(AppController(qapp))
+    # Read straight off the layout rather than findChild() — _refresh_list()
+    # only .hide()s+deleteLater()s the old section, it doesn't necessarily
+    # stop being a child before deleteLater() actually runs, so findChild()
+    # could still return the stale one.
+    section = screen._list_layout.itemAt(0).widget()
+    assert section._expanded is False
+    assert section._body.isHidden() is True
+
+    screen._search_box.setText("Findme")
+    section = screen._list_layout.itemAt(0).widget()
+    assert section._expanded is True
+    assert section._body.isHidden() is False
 
 
 def test_live_viewer_has_category_combo(qapp, tmp_path, monkeypatch):

@@ -31,6 +31,7 @@ class MainWindow(QMainWindow):
         self._topbar.check_for_update_requested.connect(self._open_update_dialog)
         self._topbar.export_strategies_requested.connect(self._export_all_strategies)
         self._topbar.import_strategies_requested.connect(self._import_all_strategies)
+        self._topbar.manage_categories_requested.connect(self._open_manage_categories)
         root.addWidget(self._topbar)
 
         body = QHBoxLayout()
@@ -258,6 +259,19 @@ class MainWindow(QMainWindow):
         if strategy_builder is not None:
             strategy_builder.reload_strategies()
         QMessageBox.information(self, "Import All Strategies", f"Imported {len(data)} strategies.")
+
+    def _open_manage_categories(self):
+        from screens.strategy_builder import ManageCategoriesDialog
+
+        dlg = ManageCategoriesDialog(self._controller.theme, parent=self)
+        dlg.exec()
+        # Renaming/deleting a category writes strategies.json directly (see
+        # services.strategy_store), bypassing the Strategy Builder screen's
+        # own in-memory list — reload it the same way Import All Strategies
+        # does, so its sidebar regroups under any renamed/deleted category.
+        strategy_builder = self._screens.get("strategy_builder")
+        if strategy_builder is not None:
+            strategy_builder.reload_strategies()
 
     def _on_theme_toggled(self):
         self._controller.theme.apply()

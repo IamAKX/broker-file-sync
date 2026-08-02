@@ -47,6 +47,7 @@ class TopBar(QWidget):
     check_for_update_requested = Signal()
     export_strategies_requested = Signal()
     import_strategies_requested = Signal()
+    manage_categories_requested = Signal()
 
     def __init__(self, theme: ThemeManager, parent=None):
         super().__init__(parent)
@@ -75,6 +76,8 @@ class TopBar(QWidget):
                 ("Configs",         lambda: self.navigate.emit("config_editor")),
                 ("Formula Builder", lambda: self.navigate.emit("formula_builder")),
                 ("Market Holidays", lambda: self.navigate.emit("holidays")),
+                ("---",             None),
+                ("Manage Categories…", lambda: self.manage_categories_requested.emit()),
             ]),
             ("Data", [
                 ("Data Import",     lambda: self.navigate.emit("data_import")),

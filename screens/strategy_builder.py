@@ -12,13 +12,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QLineEdit, QSizePolicy, QDialog,
-    QColorDialog, QMessageBox, QApplication, QComboBox
+    QColorDialog, QMessageBox, QApplication, QComboBox,
+    QToolButton, QMenu
 )
-from PySide6.QtCore import Qt, Signal, QByteArray, QSize
-from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QPainter
+from PySide6.QtCore import Qt, Signal, QByteArray, QSize, QPointF
+from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QPainter, QFontMetrics, QAction
 from PySide6.QtSvg import QSvgRenderer
 
 from services import strategy_store as store
+from screens.notifications import ToggleSwitch
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
 
@@ -56,7 +58,8 @@ def _t(theme, key: str) -> str:
         "text_primary": "#e6edf3", "text_secondary": "#8b949e",
         "button_bg": "#21262d", "input_bg": "#0d1117",
         "divider": "#2a2f36", "destructive": "#da3633",
-        "status_orange": "#e3b341",
+        "status_orange": "#e3b341", "status_blue": "#58a6ff",
+        "status_purple": "#a371f7", "status_pink": "#f778ba",
     }
     if theme:
         try:
@@ -138,6 +141,21 @@ def _sep(theme) -> QFrame:
     f.setFixedHeight(1)
     f.setStyleSheet(f"background:{_t(theme,'divider')};border:none;")
     return f
+
+
+# A distinct accent per built-in category so the sidebar reads as organized
+# at a glance rather than a flat list — reuses the theme's existing
+# qualitative status colors instead of inventing new ones. Custom
+# user-added categories (services.strategy_store.add_custom_category) fall
+# back to a neutral color via _category_color's .get() default below.
+_CATEGORY_COLOR_TOKENS = {
+    "Daily": "status_blue", "Weekly": "status_purple",
+    "Monthly": "status_orange", "Common": "status_pink",
+}
+
+
+def _category_color(theme, category: str) -> str:
+    return _t(theme, _CATEGORY_COLOR_TOKENS.get(category, "text_secondary"))
 
 
 # ── formula → display string ───────────────────────────────────────────────
@@ -890,6 +908,101 @@ class ColumnEditorDialog(QDialog):
 
 # ── Strategy card ──────────────────────────────────────────────────────────
 
+class _KebabButton(QToolButton):
+    """A "⋯" overflow-menu trigger, painted as three dots rather than set as
+    button text — a Unicode ellipsis/dot glyph is exactly the kind of thing
+    that renders at a different width (or as a missing-glyph box) depending
+    on the platform's default font, which is what made the old text-based
+    Active/Inactive toggle button silently push itself off the edge of the
+    fixed-width sidebar on Windows while still fitting on macOS. A
+    fixed-size, self-painted control sidesteps that whole class of bug."""
+
+    def __init__(self, color: str, parent=None):
+        super().__init__(parent)
+        self._dot_color = color
+        self._menu = None
+        self.setFixedSize(26, 26)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setToolTip("More actions")
+        # Without this, native styles (e.g. macOS) still paint a raised-button
+        # bevel/frame around a QToolButton regardless of a border:none QSS
+        # rule — autoRaise is what actually makes it a flat icon button.
+        self.setAutoRaise(True)
+        self._apply_style(hovered=False)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        # setMenu()+ToolButtonPopupMode renders as a native split/dropdown
+        # button on some platforms (macOS draws a divider next to the arrow
+        # area that QSS can't fully suppress) — showing the menu manually on
+        # click keeps this a plain icon button everywhere instead.
+        self.clicked.connect(self._show_menu)
+
+    def set_menu(self, menu: QMenu):
+        self._menu = menu
+
+    def _show_menu(self):
+        if self._menu is not None:
+            self._menu.exec(self.mapToGlobal(self.rect().bottomRight()))
+
+    def _apply_style(self, hovered: bool):
+        bg = "rgba(128,128,128,0.18)" if hovered else "transparent"
+        self.setStyleSheet(
+            f"QToolButton{{background:{bg};border:none;border-radius:5px;}}"
+            "QToolButton::menu-indicator{width:0px;image:none;}"
+        )
+
+    def enterEvent(self, event):
+        self._apply_style(hovered=True)
+        super().enterEvent(event)
+
+    def leaveEvent(self, event):
+        self._apply_style(hovered=False)
+        super().leaveEvent(event)
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QColor(self._dot_color))
+        cx, cy = self.width() / 2, self.height() / 2
+        for dy in (-5.5, 0, 5.5):
+            p.drawEllipse(QPointF(cx, cy + dy), 1.6, 1.6)
+        p.end()
+
+
+class _CardText(QWidget):
+    """Draws single-line, left-aligned, vertically-centered text directly via
+    QPainter instead of using a QLabel.
+
+    QLabel — even with an explicit opaque background, zero frame width, and
+    with border-radius and native (non-Fusion) styling both ruled out —
+    consistently left a stray 1px vertical line at its right edge, but only
+    in this exact context (a fixed-width sidebar next to a stretching
+    sibling, inside a real top-level window). Every custom-painted widget
+    already in this file (ToggleSwitch, _KebabButton) is unaffected, so text
+    is drawn directly here rather than chasing the underlying Qt/macOS
+    rendering quirk further."""
+
+    def __init__(self, text: str, font: QFont, color: str, parent=None):
+        super().__init__(parent)
+        self._text = text
+        self._color = QColor(color)
+        self.setFont(font)
+        fm = QFontMetrics(font)
+        self.setFixedHeight(fm.height() + 2)
+
+    def sizeHint(self) -> QSize:
+        fm = QFontMetrics(self.font())
+        return QSize(fm.horizontalAdvance(self._text), fm.height() + 2)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.TextAntialiasing)
+        p.setPen(self._color)
+        p.drawText(self.rect(), Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self._text)
+        p.end()
+
+
 class StrategyCard(QFrame):
     edit_requested   = Signal(dict)
     clone_requested  = Signal(dict)
@@ -907,76 +1020,326 @@ class StrategyCard(QFrame):
         t    = self._theme
         txt  = _t(t, "text_primary")
         txts = _t(t, "text_secondary")
-        a    = _t(t, "accent")
+        bd   = _t(t, "border")
+        bg   = _t(t, "card_bg")
+        accent = _t(t, "accent")
+
+        self.setStyleSheet(
+            f"QFrame#stratCard{{background:{bg};border:1px solid {bd};border-radius:8px;}}"
+            f"QFrame#stratCard:hover{{border-color:{accent};}}"
+        )
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(12, 10, 12, 10)
-        lay.setSpacing(4)
+        lay.setContentsMargins(12, 10, 8, 10)
+        lay.setSpacing(6)
 
+        # Row 1: name (elided so it can never force the row wider than the
+        # sidebar) + an overflow menu for Edit/Clone/Delete — a single
+        # fixed-size icon button instead of three text buttons means this
+        # row's width no longer depends on how wide "Edit"/"Clone"/"Delete"
+        # happen to render on a given platform's font.
         top = QHBoxLayout()
-        name_lbl = QLabel(self._strategy.get("name", "Unnamed"))
-        name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
-        name_lbl.setStyleSheet(f"color:{txt};background:transparent;")
+        top.setSpacing(4)
 
-        active = self._strategy.get("active", True)
-        _color = a if active else txts
-        toggle = QPushButton("● Active" if active else "○ Inactive")
-        toggle.setFixedHeight(24)
-        toggle.setFont(font_scale.font(font_scale.SMALL, False))
-        toggle.setCursor(Qt.CursorShape.PointingHandCursor)
-        toggle.setCheckable(True)
-        toggle.setChecked(active)
-        toggle.setStyleSheet(
-            f"QPushButton{{background:transparent;color:{_color};"
-            f"border:1px solid {_color}44;border-radius:4px;padding:0 8px;}}"
+        name = self._strategy.get("name", "Unnamed")
+        name_font = font_scale.font(font_scale.MEDIUM, True)
+        elided = QFontMetrics(name_font).elidedText(name, Qt.TextElideMode.ElideRight, 175)
+        name_lbl = _CardText(elided, name_font, txt, parent=self)
+        if elided != name:
+            name_lbl.setToolTip(name)
+        top.addWidget(name_lbl, 1)
+
+        kebab = _KebabButton(txts, parent=self)
+        menu = QMenu(self)
+        menu.setFont(font_scale.font(font_scale.SMALL, False))
+        # On macOS, QMenu renders via a native, vibrancy-blurred NSMenu that
+        # ignores the app's global QSS unless it's given its own stylesheet
+        # (that's what pushes Qt to draw the menu itself instead) — without
+        # this it showed up washed-out/translucent with barely-legible text.
+        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        menu.setStyleSheet(
+            f"QMenu{{background-color:{bg};color:{txt};border:1px solid {bd};"
+            "border-radius:6px;padding:4px;}"
+            f"QMenu::item{{padding:6px 24px 6px 12px;border-radius:4px;}}"
+            f"QMenu::item:selected{{background:{accent};color:{_t(t,'background')};}}"
+            f"QMenu::separator{{height:1px;background:{bd};margin:4px 6px;}}"
         )
-        toggle.clicked.connect(self._on_toggle)
-        self._toggle_btn = toggle
-
-        cat = self._strategy.get("category", "Daily")
-        cat_badge = QLabel(cat)
-        cat_badge.setFont(font_scale.font(font_scale.SMALL, False))
-        cat_badge.setStyleSheet(
-            f"color:{txts};background:transparent;"
-            f"border:1px solid {txts}55;border-radius:3px;padding:1px 6px;"
-        )
-
-        top.addWidget(name_lbl)
-        top.addWidget(cat_badge)
-        top.addStretch()
-        top.addWidget(toggle)
+        edit_action = QAction("Edit", menu)
+        edit_action.triggered.connect(lambda: self.edit_requested.emit(self._strategy))
+        clone_action = QAction("Clone", menu)
+        clone_action.triggered.connect(lambda: self.clone_requested.emit(self._strategy))
+        del_action = QAction("Delete", menu)
+        del_action.triggered.connect(lambda: self.delete_requested.emit(self._strategy["id"]))
+        menu.addAction(edit_action)
+        menu.addAction(clone_action)
+        menu.addSeparator()
+        menu.addAction(del_action)
+        kebab.set_menu(menu)
+        top.addWidget(kebab)
         lay.addLayout(top)
 
-        ncols  = len(self._strategy.get("columns", []))
-        info   = QLabel(f"{ncols} column{'s' if ncols != 1 else ''}")
-        info.setFont(font_scale.font(font_scale.SMALL, False))
-        info.setStyleSheet(f"color:{txts};background:transparent;")
-        lay.addWidget(info)
+        # Row 2: column count on the left, the Active/Inactive toggle on the
+        # right. No category badge here — the card already lives inside that
+        # category's own collapsible section (see _CategorySection), so
+        # repeating "Daily"/"Weekly"/etc. on every single card was redundant.
+        meta = QHBoxLayout()
+        meta.setSpacing(8)
 
-        act_row = QHBoxLayout()
-        edit_btn  = _btn("Edit",  theme=t, small=True)
-        clone_btn = _btn("Clone", theme=t, small=True, outlined=True)
-        del_btn   = _btn("Delete", theme=t, small=True, danger=True)
-        edit_btn.clicked.connect(lambda: self.edit_requested.emit(self._strategy))
-        clone_btn.clicked.connect(lambda: self.clone_requested.emit(self._strategy))
-        del_btn.clicked.connect(lambda: self.delete_requested.emit(self._strategy["id"]))
-        act_row.addWidget(edit_btn)
-        act_row.addWidget(clone_btn)
-        act_row.addWidget(del_btn)
-        act_row.addStretch()
-        lay.addLayout(act_row)
+        ncols = len(self._strategy.get("columns", []))
+        info_font = font_scale.font(font_scale.SMALL, False)
+        info = _CardText(f"{ncols} column{'s' if ncols != 1 else ''}", info_font, txts, parent=self)
+        meta.addWidget(info)
+
+        meta.addStretch()
+
+        active = self._strategy.get("active", True)
+        self._toggle = ToggleSwitch(active, parent=self)
+        self._toggle.toggled.connect(self._on_toggle)
+        meta.addWidget(self._toggle)
+        lay.addLayout(meta)
 
     def _on_toggle(self, checked: bool):
         self._strategy["active"] = checked
-        a    = _t(self._theme, "accent")
-        txts = _t(self._theme, "text_secondary")
-        c    = a if checked else txts
-        self._toggle_btn.setText("● Active" if checked else "○ Inactive")
-        self._toggle_btn.setStyleSheet(
-            f"QPushButton{{background:transparent;color:{c};"
-            f"border:1px solid {c}44;border-radius:4px;padding:0 8px;}}"
-        )
         self.toggled.emit(self._strategy["id"], checked)
+
+
+# ── Category section (collapsible group in the sidebar list) ───────────────
+
+class _CategorySection(QWidget):
+    """One collapsible category group in the Strategies sidebar — a header
+    ("DAILY (6)") the user can click to collapse/expand, plus the cards
+    underneath it. Grouping by category (instead of one flat list) is what
+    keeps a sidebar with dozens of strategies scannable."""
+
+    toggled = Signal(str, bool)   # category, expanded
+
+    def __init__(self, category: str, count: int, theme, expanded: bool, parent=None):
+        super().__init__(parent)
+        self._category = category
+        self._theme = theme
+        self._expanded = expanded
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+
+        self._color = _category_color(theme, category)
+        header = QToolButton()
+        header.setAutoRaise(True)
+        header.setCursor(Qt.CursorShape.PointingHandCursor)
+        header.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        header.setFont(font_scale.font(font_scale.SMALL, True))
+        header.setStyleSheet(
+            f"QToolButton{{background:transparent;border:none;color:{self._color};padding:2px 0;}}"
+        )
+        header.setIconSize(QSize(10, 10))
+        header.clicked.connect(self._on_header_clicked)
+        self._header = header
+        self._set_header_text(count)
+        lay.addWidget(header)
+
+        self._body = QWidget()
+        self._body_layout = QVBoxLayout(self._body)
+        self._body_layout.setContentsMargins(0, 0, 0, 0)
+        self._body_layout.setSpacing(8)
+        self._body.setVisible(expanded)
+        lay.addWidget(self._body)
+
+    def _set_header_text(self, count: int):
+        self._header.setIcon(_svg_icon("down.svg" if self._expanded else "up.svg", self._color))
+        self._header.setText(f" {self._category.upper()}  ({count})")
+
+    def _on_header_clicked(self):
+        self._expanded = not self._expanded
+        self._body.setVisible(self._expanded)
+        self._set_header_text(self._body_layout.count())
+        self.toggled.emit(self._category, self._expanded)
+
+    def add_card(self, card: QWidget):
+        self._body_layout.addWidget(card)
+
+
+# ── Add-category dialog ─────────────────────────────────────────────────────
+
+_ADD_CATEGORY_SENTINEL = "+ Add New Category…"
+
+
+class _AddCategoryDialog(QDialog):
+    """Also reused for renaming a category (ManageCategoriesDialog passes
+    a different title/initial_text/action_label) rather than duplicating
+    this same name-prompt layout a second time."""
+
+    def __init__(self, theme, parent=None, title="Add Category",
+                 initial_text="", action_label="Add"):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        _apply_dialog_bg(self, theme)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        lbl = QLabel("CATEGORY NAME")
+        lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        lbl.setStyleSheet(f"color:{_t(theme, 'text_secondary')};")
+        layout.addWidget(lbl)
+
+        self._name_edit = QLineEdit(initial_text)
+        self._name_edit.setPlaceholderText("e.g. Intraday")
+        self._name_edit.setFixedHeight(38)
+        self._name_edit.setFont(font_scale.font(font_scale.MEDIUM, False))
+        layout.addWidget(self._name_edit)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        add_btn = QPushButton(action_label)
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setStyleSheet(
+            f"background:{_t(theme,'accent')};color:{_t(theme,'background')};border:none;"
+        )
+        add_btn.clicked.connect(self.accept)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(add_btn)
+        layout.addLayout(btn_row)
+
+    def category_name(self) -> str:
+        return self._name_edit.text().strip()
+
+
+class ManageCategoriesDialog(QDialog):
+    """Rename/delete user-added categories — opened from the app's Edit menu
+    (see components/topbar.py, app_window.py). Built-in categories
+    (Daily/Weekly/Monthly/Common) aren't listed here at all: they're
+    structural (e.g. every new strategy defaults to Daily), so renaming or
+    deleting them isn't offered rather than needing extra guardrails for it.
+    Deleting a category never deletes its strategies — they're reassigned to
+    services.strategy_store.UNDEFINED_CATEGORY (see strategy_store.
+    delete_custom_category) so nothing silently disappears."""
+
+    def __init__(self, theme, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Manage Categories")
+        self.resize(420, 360)
+        _apply_dialog_bg(self, theme)
+        self._theme = theme
+        self._build()
+
+    def _build(self):
+        t = self._theme
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        info = QLabel(
+            "Built-in categories (Daily/Weekly/Monthly/Common) can't be "
+            "renamed or deleted. Deleting a category moves its strategies "
+            "to “Undefined” instead of deleting them."
+        )
+        info.setWordWrap(True)
+        info.setFont(font_scale.font(font_scale.SMALL, False))
+        info.setStyleSheet(f"color:{_t(t, 'text_secondary')};")
+        layout.addWidget(info)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._list_inner = QWidget()
+        self._list_layout = QVBoxLayout(self._list_inner)
+        self._list_layout.setContentsMargins(0, 0, 0, 0)
+        self._list_layout.setSpacing(8)
+        self._list_layout.addStretch()
+        self._scroll.setWidget(self._list_inner)
+        layout.addWidget(self._scroll, 1)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        self._refresh_rows()
+
+    def _refresh_rows(self):
+        from services import strategy_store as store
+
+        while self._list_layout.count() > 1:
+            item = self._list_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.hide()
+                w.deleteLater()
+
+        categories = store.load_custom_categories()
+        if not categories:
+            empty = QLabel("No custom categories yet.")
+            empty.setFont(font_scale.font(font_scale.SMALL, False))
+            empty.setStyleSheet(f"color:{_t(self._theme, 'text_secondary')};")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self._list_layout.insertWidget(0, empty)
+            return
+
+        for cat in categories:
+            self._list_layout.insertWidget(self._list_layout.count() - 1, self._make_row(cat))
+
+    def _make_row(self, category: str) -> QFrame:
+        t = self._theme
+        row = QFrame()
+        row.setObjectName("stratCard")
+        row.setStyleSheet(
+            f"QFrame#stratCard{{background:{_t(t,'card_bg')};"
+            f"border:1px solid {_t(t,'border')};border-radius:6px;}}"
+        )
+        lay = QHBoxLayout(row)
+        lay.setContentsMargins(12, 8, 8, 8)
+
+        name_lbl = QLabel(category)
+        name_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
+        lay.addWidget(name_lbl, 1)
+
+        rename_btn = _btn("Rename", theme=t, small=True)
+        rename_btn.clicked.connect(lambda: self._rename(category))
+        lay.addWidget(rename_btn)
+
+        del_btn = _btn("Delete", theme=t, small=True, danger=True)
+        del_btn.clicked.connect(lambda: self._delete(category))
+        lay.addWidget(del_btn)
+
+        return row
+
+    def _rename(self, category: str):
+        from services import strategy_store as store
+
+        dlg = _AddCategoryDialog(
+            self._theme, parent=self, title="Rename Category",
+            initial_text=category, action_label="Rename",
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        new_name = dlg.category_name()
+        if new_name:
+            store.rename_custom_category(category, new_name)
+            self._refresh_rows()
+
+    def _delete(self, category: str):
+        from services import strategy_store as store
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Delete Category")
+        msg.setText(
+            f"Delete “{category}”? Any strategies filed under it will "
+            f"move to “{store.UNDEFINED_CATEGORY}”, not be deleted."
+        )
+        msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        msg.setDefaultButton(QMessageBox.StandardButton.No)
+        if msg.exec() != QMessageBox.StandardButton.Yes:
+            return
+        store.delete_custom_category(category)
+        self._refresh_rows()
 
 
 # ── Strategy editor (right panel) ─────────────────────────────────────────
@@ -1015,9 +1378,10 @@ class StrategyEditor(QWidget):
         cat_lbl = QLabel("Category:")
         cat_lbl.setFixedWidth(130)
         self._category_combo = QComboBox()
-        self._category_combo.addItems(["Daily", "Weekly", "Monthly", "Common"])
-        self._category_combo.setCurrentText(self._strategy.get("category", "Daily"))
         self._category_combo.setFixedHeight(36)
+        self._last_valid_category = self._strategy.get("category", "Daily")
+        self._refresh_category_items()
+        self._category_combo.activated.connect(self._on_category_activated)
         cat_row.addWidget(cat_lbl)
         cat_row.addWidget(self._category_combo)
         root.addLayout(cat_row)
@@ -1239,6 +1603,44 @@ class StrategyEditor(QWidget):
                 _tokens_to_display(self._strategy["row_filter"])
             )
 
+    def _refresh_category_items(self, select: str | None = None):
+        """(Re)populates the combo from services.strategy_store.all_categories(),
+        appending the "+ Add New Category…" sentinel last. *select* wins over
+        the box's current text (which, when this runs right after the user
+        just picked the sentinel, would just be the sentinel itself)."""
+        from services import strategy_store as store
+
+        target = select if select is not None else self._last_valid_category
+        self._category_combo.blockSignals(True)
+        self._category_combo.clear()
+        categories = store.all_categories()
+        self._category_combo.addItems(categories)
+        self._category_combo.addItem(_ADD_CATEGORY_SENTINEL)
+        if target in categories:
+            self._category_combo.setCurrentText(target)
+            self._last_valid_category = target
+        self._category_combo.blockSignals(False)
+
+    def _on_category_activated(self, index: int):
+        if self._category_combo.itemText(index) != _ADD_CATEGORY_SENTINEL:
+            self._last_valid_category = self._category_combo.itemText(index)
+            return
+        self._prompt_add_category()
+
+    def _prompt_add_category(self):
+        from services import strategy_store as store
+
+        dlg = _AddCategoryDialog(self._theme, parent=self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            name = dlg.category_name()
+            if name:
+                canonical = store.add_custom_category(name)
+                self._refresh_category_items(select=canonical)
+                return
+        # Cancelled, or blank input — revert off the sentinel back to
+        # whatever was actually selected before.
+        self._refresh_category_items()
+
     def _save(self):
         self._strategy["name"]     = self._name_edit.text().strip() or "Untitled"
         self._strategy["category"] = self._category_combo.currentText()
@@ -1257,6 +1659,11 @@ class StrategyBuilderScreen(QWidget):
         self._lmv_first_row: dict = {}
         self._all_lmv_data: list  = []
         self._active_editor       = None
+        self._search_query        = ""
+        # Empty == every category collapsed — the sidebar starts fully
+        # collapsed and a category only stays expanded once the user
+        # actually opens it (see _on_section_toggled/_refresh_list below).
+        self._expanded_categories: set = set()
         self._build()
 
     def _build(self):
@@ -1310,7 +1717,7 @@ class StrategyBuilderScreen(QWidget):
 
         # Left panel
         self._left_frame = QFrame()
-        self._left_frame.setFixedWidth(260)
+        self._left_frame.setFixedWidth(300)
         self._left_frame.setStyleSheet(
             f"QFrame{{background:{card};border-right:1px solid {bd};}}"
         )
@@ -1321,6 +1728,14 @@ class StrategyBuilderScreen(QWidget):
         list_title = QLabel("Strategies")
         list_title.setFont(font_scale.font(font_scale.MEDIUM, True))
         left_root.addWidget(list_title)
+
+        self._search_box = QLineEdit()
+        self._search_box.setPlaceholderText("Search strategies…")
+        self._search_box.setFixedHeight(30)
+        self._search_box.setFont(font_scale.font(font_scale.SMALL, False))
+        self._style_search_box()
+        self._search_box.textChanged.connect(self._on_search_changed)
+        left_root.addWidget(self._search_box)
 
         self._list_scroll = QScrollArea()
         self._list_scroll.setWidgetResizable(True)
@@ -1361,11 +1776,38 @@ class StrategyBuilderScreen(QWidget):
 
     # ── Strategy list ─────────────────────────────────────────────────────
 
+    def _style_search_box(self):
+        t = self._theme
+        self._search_box.setStyleSheet(
+            f"QLineEdit{{background:{_t(t,'input_bg')};color:{_t(t,'text_primary')};"
+            f"border:1px solid {_t(t,'border')};border-radius:6px;padding:0 8px;}}"
+            f"QLineEdit:focus{{border-color:{_t(t,'accent')};}}"
+        )
+
+    def _on_search_changed(self, text: str):
+        self._search_query = text
+        self._refresh_list()
+
+    def _on_section_toggled(self, category: str, expanded: bool):
+        if expanded:
+            self._expanded_categories.add(category)
+        else:
+            self._expanded_categories.discard(category)
+
     def _refresh_list(self):
         while self._list_layout.count() > 1:
             item = self._list_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w:
+                # takeAt() only detaches the widget from the layout — it stays
+                # a visible child at its old geometry until deleteLater()'s
+                # deferred event actually runs, which can be several event-loop
+                # turns away. Left alone, a fast rebuild (every keystroke in
+                # the search box, now that one exists) briefly stacks stale
+                # cards on top of the freshly-built ones. hide() removes it
+                # from view immediately; deleteLater() still reclaims it.
+                w.hide()
+                w.deleteLater()
 
         if not self._strategies:
             empty = QLabel("No strategies yet.\nClick '+ New Strategy'.")
@@ -1375,13 +1817,54 @@ class StrategyBuilderScreen(QWidget):
             self._list_layout.insertWidget(0, empty)
             return
 
-        for strat in self._strategies:
-            card = StrategyCard(strat, self._theme, parent=self)
-            card.edit_requested.connect(self._open_editor)
-            card.clone_requested.connect(self._clone_strategy)
-            card.delete_requested.connect(self._delete_strategy)
-            card.toggled.connect(self._on_toggled)
-            self._list_layout.insertWidget(self._list_layout.count() - 1, card)
+        query = self._search_query.strip().lower()
+        filtered = (
+            [s for s in self._strategies if query in s.get("name", "").lower()]
+            if query else list(self._strategies)
+        )
+
+        if not filtered:
+            empty = QLabel(f"No strategies match “{self._search_query.strip()}”.")
+            empty.setFont(font_scale.font(font_scale.SMALL, False))
+            empty.setStyleSheet(f"color:{_t(self._theme,'text_secondary')};")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setWordWrap(True)
+            self._list_layout.insertWidget(0, empty)
+            return
+
+        by_category: dict = {}
+        for strat in filtered:
+            by_category.setdefault(strat.get("category", "Daily"), []).append(strat)
+
+        # Built-ins first, then user-added custom categories in creation
+        # order (services.strategy_store.all_categories), then any
+        # unexpected category value (e.g. imported/legacy data predating a
+        # category that's since been renamed) still gets its own section
+        # instead of silently disappearing from the list.
+        known_categories = store.all_categories()
+        ordered_categories = known_categories + [
+            c for c in by_category if c not in known_categories
+        ]
+        for cat in ordered_categories:
+            items = by_category.get(cat)
+            if not items:
+                continue
+            # While actively searching, force every matching category open —
+            # collapsed-by-default sections would otherwise hide the very
+            # matches the search box exists to surface.
+            expanded = bool(query) or cat in self._expanded_categories
+            section = _CategorySection(
+                cat, len(items), self._theme, expanded=expanded, parent=self,
+            )
+            section.toggled.connect(self._on_section_toggled)
+            for strat in items:
+                card = StrategyCard(strat, self._theme, parent=self)
+                card.edit_requested.connect(self._open_editor)
+                card.clone_requested.connect(self._clone_strategy)
+                card.delete_requested.connect(self._delete_strategy)
+                card.toggled.connect(self._on_toggled)
+                section.add_card(card)
+            self._list_layout.insertWidget(self._list_layout.count() - 1, section)
 
     # ── Editor ────────────────────────────────────────────────────────────
 
@@ -1523,6 +2006,7 @@ class StrategyBuilderScreen(QWidget):
         self._placeholder.setStyleSheet(f"color:{txts};")
         _restyle_btn(self._new_btn, t, accent=True)
         _restyle_btn(self._vars_btn, t)
+        self._style_search_box()
         self._update_lmv_warn()
         self._refresh_list()
         # Re-open editor with fresh theme if visible
