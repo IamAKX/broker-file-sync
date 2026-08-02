@@ -144,7 +144,7 @@ class ChannelRow(QFrame):
     dialog instead of being shown inline, to keep the page header short."""
 
     def __init__(self, title: str, icon_file: str, fields: list, send_label: str, theme,
-                 default_enabled: bool = False, parent=None):
+                 default_enabled: bool = False, default_values: dict | None = None, parent=None):
         """
         fields: list of (label, placeholder) tuples
         """
@@ -152,7 +152,7 @@ class ChannelRow(QFrame):
         self._theme = theme
         self._title = title
         self._fields = fields
-        self._values: dict = {}
+        self._values: dict = dict(default_values) if default_values else {}
         self.setObjectName("brokerPanel")
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._toggle = ToggleSwitch(default_enabled)
@@ -204,6 +204,9 @@ class ChannelRow(QFrame):
         dlg = _ChannelConfigDialog(self._title, self._fields, self._values, self._theme, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._values = dlg.values()
+
+    def get_value(self, label: str) -> str:
+        return self._values.get(label, "")
 
     def is_enabled(self) -> bool:
         return self._toggle.isChecked()
@@ -298,9 +301,13 @@ class NotificationsScreen(QWidget):
 
         self._email_card = ChannelRow(
             "Email", "notification.svg",
-            [],   # nothing to configure — always sent to the logged-in user's email
+            [("Email Address", "you@example.com")],
             "Test Notification", t,
             default_enabled=True,   # live channel like System — on by default
+            # Prefilled with the logged-in user's own email — real notifications
+            # always go there regardless of this field; it only controls where
+            # the Test Notification button sends, so it can be pointed anywhere.
+            default_values={"Email Address": token_manager.get_user_email() or ""},
         )
         self._email_card.connect_toggle(self._on_toggle_changed)
         self._email_card.connect_send(self._on_test_email_notification)
@@ -452,19 +459,17 @@ class NotificationsScreen(QWidget):
         )
 
     def _on_test_email_notification(self):
-        """Unlike the System test button, this asks for a destination address
-        first (prefilled with the logged-in user's own email) — real
-        notifications always go to that address automatically, but the test
-        button lets you verify delivery against any inbox."""
-        default_email = token_manager.get_user_email() or ""
-        dlg = _ChannelConfigDialog(
-            "Email", [("Email Address", "you@example.com")],
-            {"Email Address": default_email}, self._controller.theme, parent=self,
-        )
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        to_email = dlg.values().get("Email Address", "").strip()
+        """Sends to whatever address is set in the Email row's gear-icon
+        Configure dialog (defaults to the logged-in user's own email — see
+        _build). Real notifications always go to the logged-in user
+        automatically regardless of this field; it only controls where the
+        test send goes, so it can be pointed at any inbox to verify
+        delivery."""
+        to_email = self._email_card.get_value("Email Address").strip()
         if not to_email:
+            QMessageBox.warning(
+                self, "Error", "Set an email address via Email's Configure button first.",
+            )
             return
 
         self._email_card._send_btn.setEnabled(False)

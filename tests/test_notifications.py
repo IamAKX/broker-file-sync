@@ -85,25 +85,79 @@ def test_system_and_email_channel_cards_enabled_by_default(screen):
     assert "Enabled" in screen._system_status_lbl.text()
 
 
-def test_test_email_dialog_prefilled_with_logged_in_user_email(screen, monkeypatch):
-    import screens.notifications as notifications_module
-    from api.token_store import token_manager
+def test_email_card_has_configure_button(screen):
+    from PySide6.QtWidgets import QToolButton
+    assert screen._email_card.findChildren(QToolButton) != []
 
+
+def test_email_card_prefilled_with_logged_in_user_email(qapp, isolated_store, monkeypatch):
+    from api.token_store import token_manager
     monkeypatch.setattr(token_manager, "get_user_email", lambda: "user@example.com")
 
-    captured = {}
+    from app import AppController
+    from screens.notifications import NotificationsScreen
+    screen = NotificationsScreen(AppController(qapp))
 
-    class FakeDialog:
-        def __init__(self, title, fields, values, theme, parent=None):
-            captured["values"] = values
+    assert screen._email_card.get_value("Email Address") == "user@example.com"
 
-        def exec(self):
-            return notifications_module.QDialog.DialogCode.Rejected
 
-    monkeypatch.setattr(notifications_module, "_ChannelConfigDialog", FakeDialog)
+def test_test_notification_button_sends_to_configured_email(qapp, isolated_store, monkeypatch):
+    from api.token_store import token_manager
+    monkeypatch.setattr(token_manager, "get_user_email", lambda: "user@example.com")
+
+    from app import AppController
+    from screens.notifications import NotificationsScreen
+    screen = NotificationsScreen(AppController(qapp))
+
+    import screens.notifications as notifications_module
+    from PySide6.QtCore import QTimer
+    from api import notifications_api
+
+    scheduled = []
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(lambda ms, cb: scheduled.append(cb)))
+    calls = []
+    monkeypatch.setattr(notifications_api, "send_test_email", lambda *a: calls.append(a))
+    monkeypatch.setattr(notifications_module.QMessageBox, "information", MagicMock())
+
+    screen._email_card._send_btn.click()
+    assert len(scheduled) == 1
+    scheduled[0]()   # run the deferred send synchronously
+
+    assert calls == [(
+        "user@example.com", "Test Notification",
+        "This is a test notification from Broker File Sync.",
+    )]
+
+
+def test_test_notification_button_sends_to_reconfigured_email(screen, monkeypatch):
+    import screens.notifications as notifications_module
+    from PySide6.QtCore import QTimer
+    from api import notifications_api
+
+    screen._email_card._values["Email Address"] = "other@example.com"
+
+    scheduled = []
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(lambda ms, cb: scheduled.append(cb)))
+    calls = []
+    monkeypatch.setattr(notifications_api, "send_test_email", lambda *a: calls.append(a))
+    monkeypatch.setattr(notifications_module.QMessageBox, "information", MagicMock())
+
+    screen._email_card._send_btn.click()
+    scheduled[0]()
+
+    assert calls[0][0] == "other@example.com"
+
+
+def test_test_notification_button_warns_when_email_address_blank(screen, monkeypatch):
+    import screens.notifications as notifications_module
+
+    screen._email_card._values["Email Address"] = ""
+    warn = MagicMock()
+    monkeypatch.setattr(notifications_module.QMessageBox, "warning", warn)
+
     screen._email_card._send_btn.click()
 
-    assert captured["values"] == {"Email Address": "user@example.com"}
+    warn.assert_called_once()
 
 
 def test_send_test_email_calls_api_with_typed_address(screen, monkeypatch):
