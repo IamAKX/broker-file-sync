@@ -111,6 +111,18 @@ class ThemeManager:
             QSpinBox::up-button:hover, QSpinBox::down-button:hover {{
                 background: {p['accent']};
             }}
+            QComboBox::drop-down {{
+                border: none;
+                width: 20px;
+            }}
+            QComboBox QAbstractItemView {{
+                background-color: {p['card_bg']};
+                color: {p['text_primary']};
+                border: 1px solid {p['border']};
+                outline: none;
+                selection-background-color: {p['accent']};
+                selection-color: {p['background']};
+            }}
             QLineEdit:focus, QPlainTextEdit:focus, QSpinBox:focus {{
                 border: 1px solid {p['accent']};
             }}

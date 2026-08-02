@@ -1,6 +1,6 @@
 import sys
 import os
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QStyleFactory
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
 from app import AppController
@@ -62,6 +62,14 @@ def main():
     )
 
     app = QApplication(sys.argv)
+    # Without this, popups (QComboBox dropdowns, QMenu) render through the
+    # native OS style (Aqua on macOS) instead of Qt's own — native popups
+    # follow the OS's own light/dark setting, not this app's in-app theme
+    # toggle, which is what caused combo-box/menu popups to show stale
+    # native dark chrome around QSS-light content right after switching
+    # themes. Fusion is a fully QSS-styleable, non-native style, so every
+    # popup stays in sync with the app's theme instead of the OS's.
+    app.setStyle(QStyleFactory.create("Fusion"))
     app.setQuitOnLastWindowClosed(False)   # tray-resident: hiding the window must not exit the process
     app.setFont(font_scale.F_MEDIUM())   # now uses Segoe UI + scaled size on Windows
     _apply_app_icon(app)
