@@ -23,3 +23,6 @@ OPENING_RANGE_SNAPSHOT = "/opening-range/snapshot"
 OPENING_RANGE = "/opening-range"
 
 HOLIDAYS = "/holidays"
+
+NOTIFICATIONS_EMAIL_SEND = "/notifications/email/send"
+NOTIFICATIONS_EMAIL_TEST = "/notifications/email/test"

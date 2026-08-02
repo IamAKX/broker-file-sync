@@ -19,7 +19,7 @@ def test_load_defaults_when_unsaved(store):
     for c in configs:
         assert c.system_enabled is True
         assert c.telegram_enabled is False
-        assert c.sms_enabled is False
+        assert c.email_enabled is True
 
 
 def test_save_then_load_roundtrip(store):

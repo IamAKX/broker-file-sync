@@ -1,4 +1,6 @@
 import sys
+from unittest.mock import MagicMock
+
 import pytest
 from PySide6.QtWidgets import QApplication
 
@@ -63,24 +65,80 @@ def test_trigger_table_has_four_rows(screen):
     assert screen._table.rowCount() == 4
 
 
-def test_system_default_checked_telegram_sms_default_unchecked(screen):
+def test_system_and_email_default_checked_telegram_default_unchecked(screen):
     from PySide6.QtWidgets import QCheckBox
     for row in range(screen._table.rowCount()):
         system_cb = screen._table.cellWidget(row, 2).findChild(QCheckBox)
         telegram_cb = screen._table.cellWidget(row, 3).findChild(QCheckBox)
-        sms_cb = screen._table.cellWidget(row, 4).findChild(QCheckBox)
+        email_cb = screen._table.cellWidget(row, 4).findChild(QCheckBox)
         assert system_cb.isChecked() is True
         assert telegram_cb.isChecked() is False
-        assert sms_cb.isChecked() is False
+        assert email_cb.isChecked() is True
 
 
-def test_system_channel_card_enabled_by_default(screen):
-    # System is the only live channel — its top-level toggle (and status
-    # dot) must default on, unlike SMS/Telegram which have no backend yet.
+def test_system_and_email_channel_cards_enabled_by_default(screen):
+    # System and Email are both live channels — their top-level toggles (and
+    # status dots) default on, unlike Telegram which has no backend yet.
     assert screen._system_card.is_enabled() is True
-    assert screen._sms_card.is_enabled() is False
+    assert screen._email_card.is_enabled() is True
     assert screen._telegram_card.is_enabled() is False
     assert "Enabled" in screen._system_status_lbl.text()
+
+
+def test_test_email_dialog_prefilled_with_logged_in_user_email(screen, monkeypatch):
+    import screens.notifications as notifications_module
+    from api.token_store import token_manager
+
+    monkeypatch.setattr(token_manager, "get_user_email", lambda: "user@example.com")
+
+    captured = {}
+
+    class FakeDialog:
+        def __init__(self, title, fields, values, theme, parent=None):
+            captured["values"] = values
+
+        def exec(self):
+            return notifications_module.QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(notifications_module, "_ChannelConfigDialog", FakeDialog)
+    screen._email_card._send_btn.click()
+
+    assert captured["values"] == {"Email Address": "user@example.com"}
+
+
+def test_send_test_email_calls_api_with_typed_address(screen, monkeypatch):
+    import screens.notifications as notifications_module
+    from api import notifications_api
+
+    calls = []
+    monkeypatch.setattr(notifications_api, "send_test_email", lambda *a: calls.append(a))
+    # The success path pops a real QMessageBox.information — stub it out so
+    # the test doesn't block on a modal with no user to dismiss it.
+    monkeypatch.setattr(notifications_module.QMessageBox, "information", MagicMock())
+
+    screen._do_send_test_email("someone@example.com")
+
+    assert calls == [(
+        "someone@example.com", "Test Notification",
+        "This is a test notification from Broker File Sync.",
+    )]
+
+
+def test_send_test_email_shows_error_popup_on_failure(screen, monkeypatch):
+    import screens.notifications as notifications_module
+    from api import notifications_api
+    from api.exceptions import NetworkError
+
+    def _raise(*a):
+        raise NetworkError("unreachable")
+
+    monkeypatch.setattr(notifications_api, "send_test_email", _raise)
+    popup = MagicMock()
+    monkeypatch.setattr(notifications_module, "show_api_error", popup)
+
+    screen._do_send_test_email("someone@example.com")
+
+    popup.assert_called_once()
 
 
 def test_edited_time_persists(screen, isolated_store):

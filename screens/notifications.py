@@ -6,12 +6,16 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QLineEdit, QScrollArea, QSizePolicy, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QCheckBox,
-    QDialog, QTimeEdit, QToolButton
+    QDialog, QTimeEdit, QToolButton, QMessageBox, QApplication
 )
-from PySide6.QtCore import Qt, QByteArray, QSize, Signal, QPropertyAnimation, QEasingCurve, Property, QTime
+from PySide6.QtCore import Qt, QByteArray, QSize, Signal, QPropertyAnimation, QEasingCurve, Property, QTime, QTimer
 from PySide6.QtGui import QFont, QIcon, QPixmap, QPainter, QColor, QPen, QBrush
 from PySide6.QtSvg import QSvgRenderer
 
+from api import notifications_api
+from api.exceptions import ApiError, NetworkError
+from api.token_store import token_manager
+from components.error_popup import show_api_error
 from services import trigger_config
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
@@ -255,12 +259,12 @@ class NotificationsScreen(QWidget):
     def __init__(self, controller):
         super().__init__()
         self._controller = controller
-        self._sms_card: ChannelCard = None
+        self._email_card: ChannelCard = None
         self._telegram_card: ChannelCard = None
         self._system_card: ChannelCard = None
         self._configs: list = []
         self._table: QTableWidget = None
-        self._sms_status_lbl: QLabel = None
+        self._email_status_lbl: QLabel = None
         self._telegram_status_lbl: QLabel = None
         self._system_status_lbl: QLabel = None
         self._triggers_status_lbl: QLabel = None
@@ -283,7 +287,7 @@ class NotificationsScreen(QWidget):
         title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
         layout.addWidget(title)
 
-        subtitle = QLabel("Receive alerts via System, SMS, or Telegram when files are imported or processing completes")
+        subtitle = QLabel("Receive alerts via System, Email, or Telegram when files are imported or processing completes")
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         layout.addWidget(subtitle)
@@ -292,12 +296,14 @@ class NotificationsScreen(QWidget):
         channels_col = QVBoxLayout()
         channels_col.setSpacing(10)
 
-        self._sms_card = ChannelRow(
-            "SMS", "notification.svg",
-            [("Mobile Number", "+91 98765 43210")],
-            "Test Notification", t
+        self._email_card = ChannelRow(
+            "Email", "notification.svg",
+            [],   # nothing to configure — always sent to the logged-in user's email
+            "Test Notification", t,
+            default_enabled=True,   # live channel like System — on by default
         )
-        self._sms_card.connect_toggle(self._on_toggle_changed)
+        self._email_card.connect_toggle(self._on_toggle_changed)
+        self._email_card.connect_send(self._on_test_email_notification)
 
         self._telegram_card = ChannelRow(
             "Telegram", "notification.svg",
@@ -311,12 +317,12 @@ class NotificationsScreen(QWidget):
             "System", "notification.svg",
             [],   # nothing to configure — delivered via the local OS tray
             "Test Notification", t,
-            default_enabled=True,   # the only live channel — on by default, unlike SMS/Telegram
+            default_enabled=True,   # live channel — on by default, unlike Telegram
         )
         self._system_card.connect_toggle(self._on_toggle_changed)
         self._system_card.connect_send(self._on_test_system_notification)
 
-        channels_col.addWidget(self._sms_card)
+        channels_col.addWidget(self._email_card)
         channels_col.addWidget(self._telegram_card)
         channels_col.addWidget(self._system_card)
         layout.addLayout(channels_col)
@@ -340,7 +346,7 @@ class NotificationsScreen(QWidget):
         self._configs = trigger_config.load_trigger_configs()
 
         table = QTableWidget(0, 5)
-        table.setHorizontalHeaderLabels(["Trigger", "Time", "System", "Telegram", "SMS"])
+        table.setHorizontalHeaderLabels(["Trigger", "Time", "System", "Telegram", "Email"])
         table.verticalHeader().setVisible(False)
         table.setShowGrid(False)
         table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
@@ -377,10 +383,10 @@ class NotificationsScreen(QWidget):
         sb_layout.setContentsMargins(16, 0, 16, 0)
         sb_layout.setSpacing(16)
 
-        self._sms_status_lbl = self._make_status_dot("SMS: Disabled", t.get("text_secondary"))
+        self._email_status_lbl = self._make_status_dot("Email: Disabled", t.get("text_secondary"))
         self._telegram_status_lbl = self._make_status_dot("Telegram: Disabled", t.get("text_secondary"))
         self._system_status_lbl = self._make_status_dot("System: Enabled", t.get("accent"))
-        sb_layout.addWidget(self._sms_status_lbl)
+        sb_layout.addWidget(self._email_status_lbl)
         sb_layout.addWidget(self._telegram_status_lbl)
         sb_layout.addWidget(self._system_status_lbl)
         sb_layout.addStretch()
@@ -408,10 +414,10 @@ class NotificationsScreen(QWidget):
     def _on_toggle_changed(self):
         t = self._controller.theme
 
-        sms_on = self._sms_card.is_enabled()
-        self._sms_status_lbl.setText(f"● SMS: {'Enabled' if sms_on else 'Disabled'}")
-        self._sms_status_lbl.setStyleSheet(
-            f"color: {t.get('accent') if sms_on else t.get('text_secondary')};"
+        email_on = self._email_card.is_enabled()
+        self._email_status_lbl.setText(f"● Email: {'Enabled' if email_on else 'Disabled'}")
+        self._email_status_lbl.setStyleSheet(
+            f"color: {t.get('accent') if email_on else t.get('text_secondary')};"
         )
 
         tg_on = self._telegram_card.is_enabled()
@@ -445,6 +451,40 @@ class NotificationsScreen(QWidget):
             action=lambda: self._controller.show_and_navigate("historic_upload"),
         )
 
+    def _on_test_email_notification(self):
+        """Unlike the System test button, this asks for a destination address
+        first (prefilled with the logged-in user's own email) — real
+        notifications always go to that address automatically, but the test
+        button lets you verify delivery against any inbox."""
+        default_email = token_manager.get_user_email() or ""
+        dlg = _ChannelConfigDialog(
+            "Email", [("Email Address", "you@example.com")],
+            {"Email Address": default_email}, self._controller.theme, parent=self,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        to_email = dlg.values().get("Email Address", "").strip()
+        if not to_email:
+            return
+
+        self._email_card._send_btn.setEnabled(False)
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QTimer.singleShot(0, lambda: self._do_send_test_email(to_email))
+
+    def _do_send_test_email(self, to_email: str):
+        try:
+            notifications_api.send_test_email(
+                to_email, "Test Notification",
+                "This is a test notification from Broker File Sync.",
+            )
+        except (ApiError, NetworkError) as exc:
+            show_api_error(self._controller.theme, self, exc)
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self._email_card._send_btn.setEnabled(True)
+        QMessageBox.information(self, "Test Email Sent", f"A test email was sent to {to_email}.")
+
     # ── Trigger table ────────────────────────────────────────────────────────
 
     def _populate_trigger_table(self):
@@ -457,7 +497,7 @@ class NotificationsScreen(QWidget):
             table.setCellWidget(row, 1, self._make_time_widget(cfg, t))
             table.setCellWidget(row, 2, self._make_checkbox_widget(cfg, "system"))
             table.setCellWidget(row, 3, self._make_checkbox_widget(cfg, "telegram"))
-            table.setCellWidget(row, 4, self._make_checkbox_widget(cfg, "sms"))
+            table.setCellWidget(row, 4, self._make_checkbox_widget(cfg, "email"))
 
     def _make_name_widget(self, cfg, t) -> QWidget:
         cell = QWidget()

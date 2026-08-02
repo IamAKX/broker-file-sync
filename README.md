@@ -15,7 +15,7 @@
 - 🔀 **Live Master View** — real-time merged table that auto-refreshes when files change on disk
 - 🧮 **Strategy Builder** — visual formula builder with conditional formatting and color rules
 - ⚙️ **Config Editor** — manage sector mappings, script names, and column order
-- 🔔 **Notifications** — SMS and Telegram alerts for trade triggers
+- 🔔 **Notifications** — Email and Telegram alerts for trade triggers
 - 🌗 **Dark / Light theme** — toggle anytime, all screens update instantly
 - 🖥️ **Cross-platform** — macOS and Windows, HiDPI aware
 

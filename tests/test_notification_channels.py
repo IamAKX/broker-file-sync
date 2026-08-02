@@ -1,5 +1,6 @@
 import os
 import sys
+from unittest.mock import patch
 
 import pytest
 from PySide6.QtCore import QObject, Signal
@@ -100,7 +101,7 @@ def test_system_channel_no_action_on_message_clicked_when_none_pending(qapp):
     tray.messageClicked.emit()   # must not raise
 
 
-# ── Telegram / Email placeholders ───────────────────────────────────────────
+# ── Telegram placeholder ─────────────────────────────────────────────────────
 
 def test_telegram_channel_not_implemented():
     from services.notifications.channels.telegram import TelegramChannel
@@ -110,12 +111,42 @@ def test_telegram_channel_not_implemented():
         TelegramChannel().send(NotificationPayload(title="T", message="M"))
 
 
-def test_email_channel_not_implemented():
+def test_email_channel_sends_title_and_message_via_notifications_api():
+    from api import notifications_api
     from services.notifications.channels.email import EmailChannel
     from services.notifications.payload import NotificationPayload
 
-    with pytest.raises(NotImplementedError):
+    calls = []
+    with patch.object(notifications_api, "send_email", lambda title, message: calls.append((title, message))):
         EmailChannel().send(NotificationPayload(title="T", message="M"))
+
+    assert calls == [("T", "M")]
+
+
+def test_email_channel_swallows_api_error_instead_of_raising():
+    from api import notifications_api
+    from api.exceptions import ApiError
+    from services.notifications.channels.email import EmailChannel
+    from services.notifications.payload import NotificationPayload
+
+    def _raise(title, message):
+        raise ApiError("boom", "unknown_error", 500)
+
+    with patch.object(notifications_api, "send_email", _raise):
+        EmailChannel().send(NotificationPayload(title="T", message="M"))   # must not raise
+
+
+def test_email_channel_swallows_network_error_instead_of_raising():
+    from api import notifications_api
+    from api.exceptions import NetworkError
+    from services.notifications.channels.email import EmailChannel
+    from services.notifications.payload import NotificationPayload
+
+    def _raise(title, message):
+        raise NetworkError("unreachable")
+
+    with patch.object(notifications_api, "send_email", _raise):
+        EmailChannel().send(NotificationPayload(title="T", message="M"))   # must not raise
 
 
 # ── Sound asset ──────────────────────────────────────────────────────────
@@ -133,14 +164,32 @@ def test_alert_sound_plays_without_raising(qapp):
 # ── NotificationService facade ──────────────────────────────────────────────
 
 def test_notification_service_dispatches_to_system_channel(qapp):
+    from api import notifications_api
     from services.notifications.manager import NotificationService
     from services.notifications.levels import NotificationLevel
 
     tray = _FakeTrayIcon()
-    service = NotificationService(tray)
-    service.notify("T", "M", level=NotificationLevel.SUCCESS)
+    # EmailChannel is also registered (see manager.py) — stub it out so this
+    # test doesn't make a real HTTP call to the backend.
+    with patch.object(notifications_api, "send_email", lambda title, message: None):
+        service = NotificationService(tray)
+        service.notify("T", "M", level=NotificationLevel.SUCCESS)
 
     assert tray.messages == [("T", "M", QSystemTrayIcon.MessageIcon.Information, 10_000)]
+
+
+def test_notification_service_dispatches_to_email_channel(qapp):
+    from api import notifications_api
+    from services.notifications.manager import NotificationService
+    from services.notifications.levels import NotificationLevel
+
+    tray = _FakeTrayIcon()
+    calls = []
+    with patch.object(notifications_api, "send_email", lambda title, message: calls.append((title, message))):
+        service = NotificationService(tray)
+        service.notify("T", "M", level=NotificationLevel.SUCCESS)
+
+    assert calls == [("T", "M")]
 
 
 def test_notification_service_lazy_import_from_package(qapp):

@@ -22,7 +22,7 @@ class TriggerConfig:
     time: dtime
     system_enabled: bool
     telegram_enabled: bool
-    sms_enabled: bool
+    email_enabled: bool
 
 
 def load_trigger_configs() -> list:
@@ -38,7 +38,7 @@ def load_trigger_configs() -> list:
             time=dtime(int(hh), int(mm)),
             system_enabled=bool(s.get("system", True)),
             telegram_enabled=bool(s.get("telegram", False)),
-            sms_enabled=bool(s.get("sms", False)),
+            email_enabled=bool(s.get("email", True)),
         ))
     return out
 
@@ -49,7 +49,7 @@ def save_trigger_configs(configs: list) -> None:
             "time": c.time.strftime("%H:%M"),
             "system": c.system_enabled,
             "telegram": c.telegram_enabled,
-            "sms": c.sms_enabled,
+            "email": c.email_enabled,
         }
         for c in configs
     })

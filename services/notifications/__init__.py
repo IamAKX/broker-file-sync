@@ -1,8 +1,8 @@
 """
-Outbound notification delivery, organized by channel. System (tray) is the
-only live channel today; Telegram and Email are staged as not-yet-implemented
-placeholders (see channels/telegram.py, channels/email.py) for when their
-backends land.
+Outbound notification delivery, organized by channel. System (tray) and Email
+(via broker-sync-api's SMTP-backed endpoint) are both live; Telegram is staged
+as a not-yet-implemented placeholder (see channels/telegram.py) for when its
+bot backend lands.
 
 NotificationService is imported lazily (module __getattr__ below) rather
 than at package import time: it pulls in channels/system.py -> sound.py ->

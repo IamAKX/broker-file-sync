@@ -1,13 +1,14 @@
 """
 Facade the rest of the app calls into — services/scheduled_jobs.py and
 screens/notifications.py's "Test Notification" button both go through
-.notify() without knowing which channels are live. System is the only
-channel registered today; Telegram/Email join _channels once implemented
-(see channels/telegram.py, channels/email.py).
+.notify() without knowing which channels are live. System and Email are both
+live; Telegram joins _channels once its backend exists (see
+channels/telegram.py).
 """
 
 from PySide6.QtWidgets import QSystemTrayIcon
 
+from services.notifications.channels.email import EmailChannel
 from services.notifications.channels.system import SystemChannel
 from services.notifications.levels import NotificationLevel
 from services.notifications.payload import NotificationPayload
@@ -17,7 +18,7 @@ from services.notifications.sound import AlertSound
 class NotificationService:
     def __init__(self, tray_icon: QSystemTrayIcon):
         sound = AlertSound()
-        self._channels = [SystemChannel(tray_icon, sound)]
+        self._channels = [SystemChannel(tray_icon, sound), EmailChannel()]
 
     def notify(self, title: str, message: str, action=None,
                level: NotificationLevel = NotificationLevel.INFO,
