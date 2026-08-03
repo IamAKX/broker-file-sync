@@ -882,7 +882,6 @@ class LiveViewerWindow(QWidget):
         t      = self._theme
         accent = t.get("accent")        if t else "#39d353"
         text_s = t.get("text_secondary") if t else "#8b949e"
-        red    = t.get("status_red")    if t else "#f85149"
         divclr = t.get("divider")       if t else "#30363d"
 
         root = QVBoxLayout(self)
@@ -978,17 +977,6 @@ class LiveViewerWindow(QWidget):
         )
         self._reset_btn.clicked.connect(self._reset_view)
 
-        stop_btn = QPushButton("Stop")
-        stop_btn.setFixedHeight(30)
-        stop_btn.setFont(font_scale.font(font_scale.SMALL, False))
-        stop_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        stop_btn.setStyleSheet(
-            f"QPushButton {{ background: transparent; color: {red};"
-            f"border: 1px solid {red}; border-radius: 4px; padding: 0 12px; }}"
-            f"QPushButton:hover {{ background: {red}; color: #ffffff; }}"
-        )
-        stop_btn.clicked.connect(self._stop)
-
         top.addWidget(self._dot)
         top.addSpacing(4)
         top.addWidget(self._status_lbl)
@@ -1002,8 +990,6 @@ class LiveViewerWindow(QWidget):
         top.addWidget(self._highlight_btn)
         top.addSpacing(8)
         top.addWidget(self._reset_btn)
-        top.addSpacing(8)
-        top.addWidget(stop_btn)
         root.addLayout(top)
 
         # ── Divider ───────────────────────────────────────────────────────────
