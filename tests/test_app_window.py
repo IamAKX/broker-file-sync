@@ -55,6 +55,33 @@ def test_reload_per_user_data_refreshes_strategy_notifications_and_formula_scree
     w._screens["formula_builder"].reload_formulas.assert_called_once()
 
 
+def test_lmv_ready_only_pushes_strategies_active_in_strategy_builder(controller):
+    """A strategy switched off in Strategy Builder shouldn't even appear in
+    LMV's Strategies picker — see app_window.py::_on_lmv_ready, which now
+    sources from get_active_strategies() instead of get_all_strategies()."""
+    from app_window import MainWindow
+    from unittest.mock import MagicMock
+
+    w = MainWindow(controller)
+    data_import = w._screens["data_import"]
+    strategy_builder = w._screens["strategy_builder"]
+    strategy_builder._strategies = [
+        {"id": "1", "name": "Active One", "active": True},
+        {"id": "2", "name": "Inactive One", "active": False},
+    ]
+
+    fake_viewer = MagicMock()
+    data_import._live_viewer = fake_viewer
+
+    data_import.lmv_headers_ready.emit(["Scrip Name", "High", "Low"])
+
+    pushed = fake_viewer.set_strategies.call_args[0][0]
+    assert [s["name"] for s in pushed] == ["Active One"]
+    # None auto-applied even though it's active in Strategy Builder — the
+    # user still opts it in per LMV session (see the closure's comment).
+    assert pushed[0]["active"] is False
+
+
 def test_reload_per_user_data_rebuilds_config_editor_screen(controller):
     """ConfigEditorScreen has no in-place reload method (see
     app_window.py::_reload_config_editor's docstring) — reload_per_user_data
