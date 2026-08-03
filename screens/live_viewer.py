@@ -7,6 +7,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from components.column_filter_popup import ColumnFilterPopup
+from services.master_generator import _build_script_name_lookup, _strip_rolling_suffix
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -102,6 +103,28 @@ def _inject_sector_rows(headers: list, data: list, sector_map: dict) -> tuple:
     return new_headers, new_data
 
 
+def _inject_opening_range_columns(headers: list, data: list, or_map: dict,
+                                  name_to_symbol: dict) -> tuple:
+    """Append OR.High/OR.Low columns — today's Opening Range High/Low
+    capture (services/scheduled_jobs.py::run_opening_range_capture), keyed
+    by the same symbol resolution used when that job uploaded it, so a row
+    here lines up with the matching row uploaded from this exact LMV.
+    Module-level, like _inject_sector_rows, so the worker thread can call it
+    without touching GUI-thread-owned state beyond the read-only dicts
+    passed in. Blank ("—") before today's capture has run, or for a stock
+    added after it did."""
+    scrip_idx = headers.index("Scrip Name") if "Scrip Name" in headers else -1
+    new_headers = list(headers) + ["OR.High", "OR.Low"]
+    new_data = []
+    for row in data:
+        raw_name = str(row[scrip_idx]) if scrip_idx >= 0 and scrip_idx < len(row) else ""
+        display_name = _strip_rolling_suffix(raw_name) or raw_name
+        symbol = name_to_symbol.get(display_name.lower()) or display_name
+        high, low = or_map.get(symbol, ("—", "—"))
+        new_data.append(list(row) + [high, low])
+    return new_headers, new_data
+
+
 class _LiveDataWorker(QObject):
     """
     Runs the read+merge, and the strategy-formula computation on top of it,
@@ -122,11 +145,44 @@ class _LiveDataWorker(QObject):
     recompute_result = Signal(list, list)     # disp_headers, disp_data
     recompute_failed = Signal(str)            # error message, already prefixed
 
-    def __init__(self, reader, sector_map: dict):
+    opening_range_ready = Signal()            # fresh OR.High/OR.Low data is available
+
+    def __init__(self, reader, sector_map: dict, name_to_symbol: dict):
         super().__init__()
-        self._reader     = reader
-        self._sector_map = sector_map
-        self._started    = False
+        self._reader         = reader
+        self._sector_map     = sector_map
+        self._name_to_symbol = name_to_symbol
+        self._opening_range_map: dict = {}
+        self._started        = False
+
+    def refresh_opening_range(self) -> None:
+        """Pull today's Opening Range High/Low snapshot from the server.
+        Triggered on a coarse timer from the GUI thread (see
+        LiveViewerWindow._setup_watcher's _or_timer) rather than on every
+        do_read tick, since the snapshot only changes once a day. Runs on
+        this same worker thread as do_read, so do_read's read of
+        self._opening_range_map never races this write — Qt's event loop
+        serializes queued slot calls landing on one thread. Best-effort: a
+        network hiccup just keeps the last-known map rather than blanking
+        the columns."""
+        from datetime import date
+        from api import opening_range_api
+        from api.exceptions import ApiError, NetworkError
+        try:
+            snapshot = opening_range_api.get_snapshot(date.today())
+        except (ApiError, NetworkError):
+            return
+        self._opening_range_map = {
+            s["symbol"]: (s.get("high"), s.get("low"))
+            for s in snapshot.get("stocks", [])
+        }
+        # do_read only runs on a live tick (COM poll or a detected broker-file
+        # change) — with neither happening right now (e.g. a quiet feed, or
+        # COM unavailable on this platform), this freshly-fetched map would
+        # otherwise sit here unused, never reaching the table. Ask the GUI
+        # thread to force one read so it's reflected without waiting on
+        # unrelated market-data activity.
+        self.opening_range_ready.emit()
 
     def recompute(self, headers: list, data: list, strategies: list) -> None:
         """Re-run apply_strategies() on already-fetched data (no new read) —
@@ -162,6 +218,9 @@ class _LiveDataWorker(QObject):
             self.failed.emit(f"Read error: {exc}"[:200])
             return
         headers, data = _inject_sector_rows(headers, data, self._sector_map)
+        headers, data = _inject_opening_range_columns(
+            headers, data, self._opening_range_map, self._name_to_symbol
+        )
         try:
             active = [s for s in strategies if s.get("active")]
             if active:
@@ -736,6 +795,7 @@ class LiveViewerWindow(QWidget):
     _request_read      = Signal(bool, float, list)  # force_slow, settle_seconds, strategies
     _request_recompute = Signal(list, list, list)   # headers, data, strategies
     _request_shutdown  = Signal()              # release COM on the worker thread
+    _request_or_refresh = Signal()             # re-pull today's Opening Range snapshot
     data_updated       = Signal(list, list)    # headers, data — for downstream consumers
 
     def __init__(self, sharekhan_path: str, reliable_path: str,
@@ -783,6 +843,12 @@ class LiveViewerWindow(QWidget):
         # Build sector lookup from config defaults once at init
         from config_defaults import SECTOR_STOCK_DATA
         self._sector_map: dict = {stock: sector for sector, stock in SECTOR_STOCK_DATA}
+
+        # Same symbol resolution used by the Opening Range capture job
+        # (services/scheduled_jobs.py::_build_opening_range_payload) — needed
+        # so the OR.High/OR.Low columns injected below join back to the
+        # right row by symbol, not by display name.
+        self._or_name_to_symbol: dict = _build_script_name_lookup(self._script_name_data)
 
         # Live-update bookkeeping
         self._render_sig         = None    # signature of last full rebuild
@@ -1017,16 +1083,28 @@ class LiveViewerWindow(QWidget):
         # blocks the UI.  Requests go out via _request_read; results come
         # back via queued signals (thread-safe).
         self._worker_thread = QThread(self)
-        self._worker        = _LiveDataWorker(self._reader, self._sector_map)
+        self._worker        = _LiveDataWorker(self._reader, self._sector_map, self._or_name_to_symbol)
         self._worker.moveToThread(self._worker_thread)
         self._request_read.connect(self._worker.do_read)
         self._request_recompute.connect(self._worker.recompute)
         self._request_shutdown.connect(self._worker.shutdown)
+        self._request_or_refresh.connect(self._worker.refresh_opening_range)
         self._worker.result.connect(self._on_data_ready)
         self._worker.failed.connect(self._on_read_failed)
         self._worker.recompute_result.connect(self._on_recompute_ready)
         self._worker.recompute_failed.connect(self._on_recompute_failed)
+        self._worker.opening_range_ready.connect(self._on_opening_range_ready)
         self._worker_thread.start()
+
+        # Opening Range High/Low only changes once a day (the capture job
+        # fires once, ~15min after market open) — a coarse 60s poll here,
+        # decoupled from the fast COM/disk tick rate above, is enough to
+        # pick it up shortly after it lands without hammering the server.
+        self._or_timer = QTimer(self)
+        self._or_timer.setInterval(60_000)
+        self._or_timer.timeout.connect(self._request_or_refresh.emit)
+        self._or_timer.start()
+        QTimer.singleShot(0, self._request_or_refresh.emit)
 
         # Safety net for teardown that bypasses closeEvent (e.g. the widget is
         # garbage-collected directly).  Qt emits destroyed() before deleting
@@ -1091,6 +1169,13 @@ class LiveViewerWindow(QWidget):
             self._status_lbl.setText(f"Error loading: {exc}")
             return
         headers, data = self._inject_sector(headers, data)
+        # No server round-trip on this synchronous first read (see this
+        # method's docstring on why it stays off the worker thread) — the
+        # worker's periodic _or_timer fetch (started in _setup_watcher,
+        # which already ran before this) fills OR.High/OR.Low in shortly
+        # after via the first live tick. Empty map here just means "—" for
+        # one frame.
+        headers, data = _inject_opening_range_columns(headers, data, {}, self._or_name_to_symbol)
         self._headers = headers
         self._data    = data
         self._initial_load_done = True
@@ -1133,6 +1218,14 @@ class LiveViewerWindow(QWidget):
     def _refresh_live(self):
         # COM reads Excel's in-memory state, which is always consistent — no
         # settle delay, keeping the LMV in lock-step with the sheet.
+        self._request_refresh(settle=0.0)
+
+    def _on_opening_range_ready(self):
+        """The worker just refreshed its OR.High/OR.Low map (see
+        _LiveDataWorker.refresh_opening_range) — force one read so it's
+        injected and rendered right away, instead of waiting on the next
+        market-data-driven tick, which may not come for a while (or at all,
+        e.g. COM unavailable and a quiet broker file)."""
         self._request_refresh(settle=0.0)
 
     def _request_refresh(self, settle: float, force: bool = False):
@@ -2185,6 +2278,8 @@ class LiveViewerWindow(QWidget):
             self._com_timer.stop()
         if hasattr(self, "_sweep_timer"):
             self._sweep_timer.stop()
+        if hasattr(self, "_or_timer"):
+            self._or_timer.stop()
         self._pulse_timer.stop()
         self._shutdown_worker()
         t   = self._theme
