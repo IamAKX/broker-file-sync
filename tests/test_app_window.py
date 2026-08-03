@@ -19,7 +19,8 @@ def test_main_window_creates(controller):
 def test_navigate_does_not_raise(controller):
     from app_window import MainWindow
     w = MainWindow(controller)
-    for name in ["dashboard", "data_import", "config_editor", "notifications", "profile", "formula_builder"]:
+    for name in ["dashboard", "data_import", "config_editor", "notifications", "profile",
+                 "formula_builder", "formula_stats"]:
         w.navigate(name)
 
 def test_close_event_hides_instead_of_quitting_by_default(controller):
@@ -47,12 +48,14 @@ def test_reload_per_user_data_refreshes_strategy_notifications_and_formula_scree
     w._screens["strategy_builder"].reload_strategies = MagicMock()
     w._screens["notifications"].reload_configs = MagicMock()
     w._screens["formula_builder"].reload_formulas = MagicMock()
+    w._screens["formula_stats"].reload_strategies = MagicMock()
 
     w.reload_per_user_data()
 
     w._screens["strategy_builder"].reload_strategies.assert_called_once()
     w._screens["notifications"].reload_configs.assert_called_once()
     w._screens["formula_builder"].reload_formulas.assert_called_once()
+    w._screens["formula_stats"].reload_strategies.assert_called_once()
 
 
 def test_lmv_ready_only_pushes_strategies_active_in_strategy_builder(controller):

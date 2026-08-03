@@ -15,6 +15,7 @@ HISTORIC = "/historic"
 LMV_SNAPSHOT_DAILY_UPLOAD = "/lmv-snapshot/daily-upload"
 LMV_SNAPSHOT_AVAILABILITY = "/lmv-snapshot/availability"
 LMV_SNAPSHOT_SNAPSHOT = "/lmv-snapshot/snapshot"
+LMV_SNAPSHOT_RANGE = "/lmv-snapshot/range"
 LMV_SNAPSHOT = "/lmv-snapshot"
 
 OPENING_RANGE_DAILY_UPLOAD = "/opening-range/daily-upload"

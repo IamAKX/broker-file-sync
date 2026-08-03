@@ -5,6 +5,7 @@ from api.endpoints import (
     LMV_SNAPSHOT,
     LMV_SNAPSHOT_AVAILABILITY,
     LMV_SNAPSHOT_DAILY_UPLOAD,
+    LMV_SNAPSHOT_RANGE,
     LMV_SNAPSHOT_SNAPSHOT,
 )
 
@@ -30,3 +31,10 @@ def get_snapshot(trade_date: date | None) -> dict:
 
 def delete_day(trade_date: date) -> dict:
     return api_client.delete(f"{LMV_SNAPSHOT}/{trade_date.isoformat()}")
+
+
+def get_range(days: int) -> dict:
+    """The `days` most recent trade dates with saved snapshot data, each
+    pivoted the same way as get_snapshot — backs the Formula Stats feature's
+    per-day recomputation (see services/formula_stats_engine.py)."""
+    return api_client.get(LMV_SNAPSHOT_RANGE, params={"days": days})

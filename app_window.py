@@ -62,6 +62,7 @@ class MainWindow(QMainWindow):
         from screens.holidays import HolidaysScreen
         from screens.lmv_upload import LmvUploadScreen
         from screens.jobs import JobsScreen
+        from screens.formula_stats import FormulaStatsScreen
 
         dashboard        = DashboardScreen(self._controller)
         data_import      = DataImportScreen(self._controller)
@@ -112,6 +113,7 @@ class MainWindow(QMainWindow):
             ("holidays",         HolidaysScreen(self._controller)),
             ("lmv_upload",       LmvUploadScreen(self._controller)),
             ("jobs",             JobsScreen(self._controller)),
+            ("formula_stats",    FormulaStatsScreen(self._controller)),
         ]
         for name, widget in screens:
             self._screens[name] = widget
@@ -305,6 +307,10 @@ class MainWindow(QMainWindow):
         if formula_builder is not None:
             formula_builder.reload_formulas()
 
+        formula_stats = self._screens.get("formula_stats")
+        if formula_stats is not None:
+            formula_stats.reload_strategies()
+
         self._reload_config_editor()
 
     def _reload_config_editor(self):
@@ -357,3 +363,6 @@ class MainWindow(QMainWindow):
         jobs = self._screens.get("jobs")
         if jobs is not None:
             jobs.refresh_theme()
+        formula_stats = self._screens.get("formula_stats")
+        if formula_stats is not None:
+            formula_stats.refresh_theme()
