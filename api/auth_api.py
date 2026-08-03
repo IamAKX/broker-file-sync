@@ -1,6 +1,6 @@
 # api/auth_api.py
 from api.client import api_client
-from api.endpoints import CHANGE_PASSWORD, LOGIN, LOGOUT, ME, SIGNUP
+from api.endpoints import CHANGE_PASSWORD, LOGIN, LOGOUT, ME, SIGNUP, THEME
 
 
 def login(email: str, password: str) -> dict:
@@ -36,3 +36,11 @@ def change_password(current_password: str, new_password: str) -> None:
         CHANGE_PASSWORD,
         json_body={"current_password": current_password, "new_password": new_password},
     )
+
+
+def get_theme() -> dict:
+    return api_client.get(THEME)
+
+
+def update_theme(theme: str) -> dict:
+    return api_client.put(THEME, json_body={"theme": theme})

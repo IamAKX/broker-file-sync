@@ -244,21 +244,28 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Import Failed", f"Could not import:\n\n{exc}")
             return
 
-        existing_count = len(strategy_store.load_all())
+        existing_names = {s.get("name") for s in strategy_store.load_all()}
+        imported_names = {s.get("name") for s in data}
+        overwrite_count = len(existing_names & imported_names)
+        new_count = len(data) - overwrite_count
         reply = QMessageBox.question(
             self, "Import All Strategies",
-            f"This will replace all {existing_count} existing strategies with "
-            f"{len(data)} strategies from the file. This cannot be undone. Continue?",
+            f"{overwrite_count} strategy name(s) from the file match an existing "
+            f"strategy and will be overwritten; {new_count} will be added as new. "
+            f"Every other existing strategy is left untouched. Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        strategy_store.import_all(data)
+        overwritten, added = strategy_store.import_all(data)
         strategy_builder = self._screens.get("strategy_builder")
         if strategy_builder is not None:
             strategy_builder.reload_strategies()
-        QMessageBox.information(self, "Import All Strategies", f"Imported {len(data)} strategies.")
+        QMessageBox.information(
+            self, "Import All Strategies",
+            f"Imported: {overwritten} strategy(ies) overwritten, {added} added.",
+        )
 
     def _open_manage_categories(self):
         from screens.strategy_builder import ManageCategoriesDialog
@@ -272,6 +279,54 @@ class MainWindow(QMainWindow):
         strategy_builder = self._screens.get("strategy_builder")
         if strategy_builder is not None:
             strategy_builder.reload_strategies()
+
+    def reload_per_user_data(self):
+        """Re-pulls every eagerly-loaded, now-per-user store — called on
+        every successful login (see AppController.show_main_window), not
+        just the first. MainWindow itself is reused across a logout/login
+        cycle within the same running process (rebuilding it would lose the
+        scheduler/tray/notifier state, which must survive — see
+        _ensure_scheduler's own comment on that), but each screen's
+        in-memory copy of what used to be purely local, device-scoped data
+        is now per-user: without this, a second user logging in on the same
+        device/process would keep seeing the first user's strategies,
+        config, and formulas instead of their own.
+        """
+        strategy_builder = self._screens.get("strategy_builder")
+        if strategy_builder is not None:
+            strategy_builder.reload_strategies()
+
+        notifications = self._screens.get("notifications")
+        if notifications is not None:
+            notifications.reload_configs()
+
+        formula_builder = self._screens.get("formula_builder")
+        if formula_builder is not None:
+            formula_builder.reload_formulas()
+
+        self._reload_config_editor()
+
+    def _reload_config_editor(self):
+        """ConfigEditorScreen's 4 tabs each load their rows once, inside
+        their own __init__ (see screens/config_editor.py::ConfigTabWidget) —
+        rather than teaching each one how to repopulate its QTableWidget in
+        place, just rebuild the whole screen and swap it into the stack;
+        config editor isn't performance-sensitive enough for a full rebuild
+        on login to matter."""
+        from screens.config_editor import ConfigEditorScreen
+
+        old = self._screens.get("config_editor")
+        if old is None:
+            return
+        was_current = self._stack.currentWidget() is old
+        new_screen = ConfigEditorScreen(self._controller)
+        idx = self._stack.indexOf(old)
+        self._stack.removeWidget(old)
+        old.deleteLater()
+        self._stack.insertWidget(idx, new_screen)
+        self._screens["config_editor"] = new_screen
+        if was_current:
+            self._stack.setCurrentWidget(new_screen)
 
     def _on_theme_toggled(self):
         self._controller.theme.apply()

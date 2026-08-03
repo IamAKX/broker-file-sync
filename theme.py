@@ -80,6 +80,20 @@ class ThemeManager:
         config_store.save_theme(self._mode)
         self.apply()
 
+    def sync_from_server(self) -> bool:
+        """Pulls the logged-in user's theme from the server and re-applies
+        it if it differs from what __init__ already showed from the local
+        cache. Call once, right after a successful login (fresh or via a
+        persisted token) — see app.py::AppController.show_main_window.
+        Returns whether the mode actually changed."""
+        from services import config_store
+        server_mode = config_store.sync_theme_from_server()
+        if server_mode is not None and server_mode != self._mode:
+            self._mode = server_mode
+            self.apply()
+            return True
+        return False
+
     def apply(self):
         p = PALETTES[self._mode]
 

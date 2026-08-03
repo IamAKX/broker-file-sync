@@ -56,6 +56,9 @@ class ApiClient:
     def patch(self, path: str, json_body: dict | None = None, auth: bool = True) -> dict:
         return self._request("PATCH", path, json_body=json_body, auth=auth)
 
+    def put(self, path: str, json_body: dict | None = None, auth: bool = True) -> dict:
+        return self._request("PUT", path, json_body=json_body, auth=auth)
+
     def delete(self, path: str, params: dict | None = None, auth: bool = True) -> dict:
         return self._request("DELETE", path, params=params, auth=auth)
 

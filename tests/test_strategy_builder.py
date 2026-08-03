@@ -81,6 +81,71 @@ def test_load_all_backfills_category(tmp_path, monkeypatch):
     assert result[0]["category"] == "Daily"
 
 
+# ── import_all: merge by name, not destructive replace ──────────────────────
+
+def test_import_all_overwrites_matching_name_in_place(tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "strategies.json"))
+
+    existing = store.new_strategy("DayTop Buy")
+    existing["active"] = False
+    store.save_strategy(existing)
+
+    imported = store.new_strategy("DayTop Buy")
+    imported["id"] = "brand-new-id"
+    imported["active"] = True
+
+    overwritten, added = store.import_all([imported])
+
+    assert (overwritten, added) == (1, 0)
+    reloaded = store.load_all()
+    assert len(reloaded) == 1
+    assert reloaded[0]["id"] == "brand-new-id"   # imported entry fully wins
+    assert reloaded[0]["active"] is True
+
+
+def test_import_all_adds_new_names(tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "strategies.json"))
+
+    store.save_strategy(store.new_strategy("Existing One"))
+    overwritten, added = store.import_all([store.new_strategy("Brand New")])
+
+    assert (overwritten, added) == (0, 1)
+    names = {s["name"] for s in store.load_all()}
+    assert names == {"Existing One", "Brand New"}
+
+
+def test_import_all_leaves_untouched_strategies_alone(tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "strategies.json"))
+
+    store.save_strategy(store.new_strategy("Untouched"))
+    store.save_strategy(store.new_strategy("Overwrite Me"))
+
+    store.import_all([store.new_strategy("Overwrite Me")])
+
+    names = {s["name"] for s in store.load_all()}
+    assert "Untouched" in names
+    assert len(store.load_all()) == 2   # not wiped down to just the 1 imported
+
+
+def test_import_all_last_duplicate_in_file_wins(tmp_path, monkeypatch):
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "strategies.json"))
+
+    first = store.new_strategy("Dup")
+    first["active"] = True
+    second = store.new_strategy("Dup")
+    second["active"] = False
+
+    store.import_all([first, second])
+
+    reloaded = store.load_all()
+    assert len(reloaded) == 1
+    assert reloaded[0]["active"] is False
+
+
 def test_strategy_editor_has_category_combo(qapp):
     from services.strategy_store import new_strategy
     from screens.strategy_builder import StrategyEditor

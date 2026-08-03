@@ -26,3 +26,12 @@ HOLIDAYS = "/holidays"
 
 NOTIFICATIONS_EMAIL_SEND = "/notifications/email/send"
 NOTIFICATIONS_EMAIL_TEST = "/notifications/email/test"
+
+STRATEGIES = "/strategies"
+STRATEGIES_IMPORT = "/strategies/import"
+
+FORMULA_VARIABLES = "/formula-variables"
+
+SETTINGS = "/settings"
+
+THEME = "/auth/me/theme"

@@ -43,7 +43,39 @@ def _save_raw(data: list):
 
 
 def load_all() -> list:
-    return _load_raw()
+    """Tries the server first, refreshing the local cache on success and
+    returning that. Falls back to the local cache on NetworkError/ApiError
+    (offline reads).
+
+    One-time migration: if the server has never seen any variables for this
+    user but the local cache already has some (e.g. this install predates
+    server sync), they're pushed up once — same shape as
+    config_store.load_json's / strategy_store.load_all's migration.
+    """
+    from api import formula_variables_api
+    from api.exceptions import ApiError, NetworkError
+
+    local = _load_raw()
+
+    try:
+        result = formula_variables_api.list_variables()
+    except (ApiError, NetworkError):
+        return local
+
+    server_variables = result.get("variables", [])
+    if server_variables:
+        _save_raw(server_variables)
+        return server_variables
+
+    if local:
+        for v in local:
+            try:
+                formula_variables_api.upsert_variable(v["id"], v.get("name", ""), v.get("formula", []))
+            except (ApiError, NetworkError):
+                pass
+        return local
+
+    return []
 
 
 def get_by_name(name: str) -> dict | None:
@@ -61,6 +93,15 @@ def get_by_id(var_id: str) -> dict | None:
 
 
 def save_variable(variable: dict):
+    """Upserts by id, both on the server and in the local cache. Propagates
+    ApiError/NetworkError from the server call — a failed save must be
+    visible to the caller, not silently kept local-only."""
+    from api import formula_variables_api
+
+    formula_variables_api.upsert_variable(
+        variable["id"], variable.get("name", ""), variable.get("formula", []),
+    )
+
     all_v = _load_raw()
     for i, v in enumerate(all_v):
         if v["id"] == variable["id"]:
@@ -73,6 +114,10 @@ def save_variable(variable: dict):
 
 
 def delete_variable(var_id: str):
+    from api import formula_variables_api
+
+    formula_variables_api.delete_variable(var_id)
+
     all_v = [v for v in _load_raw() if v["id"] != var_id]
     _save_raw(all_v)
     _invalidate_formula_cache()

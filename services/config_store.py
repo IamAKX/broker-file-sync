@@ -1,16 +1,26 @@
 """
-Persistence for Config Editor tab data.
+Persistence for Config Editor tab data — and the client's per-user settings
+cache generally. load_json()/save_json() are server-backed (see
+api/settings_api.py, backed by the backend's UserSetting table: one row per
+(user, key)); config_data.json survives as a local read cache so the app
+still has last-known data when offline. Every other function below (tabs,
+column order, LMV highlight colors) is a thin wrapper over load_json/
+save_json, so those two are the only functions that had to learn about the
+server — see their docstrings for the offline-fallback and one-time-
+migration behavior.
 
-Each tab's rows are stored under a string key in a single JSON file. A row is a
-list of cell strings (matching ConfigTabWidget.get_data() tuples). When a tab
-has no saved entry, callers fall back to the defaults in config_defaults.py.
+Theme is the one key handled separately (see load_theme/save_theme/
+sync_theme_from_server) — it's synced via the dedicated /auth/me/theme
+endpoint (a column on the central User row), not this generic per-tenant
+settings store, since it's an identity-level preference with no tenant
+dependency.
 
 Tab keys (stable identifiers, independent of UI labels):
   "sector_stock"      — (Sector, Stock)
   "script_name"       — (Stock, Initial)
   "main_column_name"  — (Actual, Renamed)
   "main_column_order" — (Column Name,)
-  "theme"             — "dark" | "light"
+  "theme"             — "dark" | "light" (local-cache key only — see above)
 """
 
 import json
@@ -42,23 +52,68 @@ def _save_raw(data: dict):
 
 
 def save_json(key: str, value) -> None:
-    """Persist any JSON-serializable value under *key* (for data that isn't
-    a flat row-table, e.g. the ExternalImport formula list)."""
+    """Persist any JSON-serializable value under *key*. The server is the
+    source of truth; config_data.json is only a local read cache, updated
+    here on every successful server write so the next load_json() call has
+    something to fall back to if offline. A failed server write propagates
+    to the caller (ApiError/NetworkError) rather than silently degrading to
+    a local-only save — losing sync silently would defeat the point of
+    this store.
+    """
+    from api import settings_api
+
+    settings_api.put_setting(key, value)
+
     data = _load_raw()
     data[key] = value
     _save_raw(data)
 
 
 def load_json(key: str, default):
-    """Return the saved value for *key*, or *default* when none saved."""
+    """Return the saved value for *key*. Tries the server first; on
+    success, refreshes the local cache and returns the server's value. On
+    NetworkError/ApiError (offline, or session not ready), falls back to
+    the last-cached local value, or *default* if nothing's ever been
+    cached.
+
+    One-time migration: if the server has never seen this key but the local
+    cache already has a value (e.g. this install predates server sync), that
+    local value is pushed up to the server once here rather than silently
+    orphaned — idempotent, since after the push the server is no longer
+    empty for this key and this branch doesn't fire again.
+    """
+    from api import settings_api
+    from api.exceptions import ApiError, NetworkError
+
     data = _load_raw()
-    return data.get(key, default)
+    has_local = key in data
+    local_value = data.get(key)
+
+    try:
+        result = settings_api.get_setting(key)
+    except (ApiError, NetworkError):
+        return local_value if has_local else default
+
+    server_value = result.get("value")
+    if server_value is not None:
+        if data.get(key) != server_value:
+            data[key] = server_value
+            _save_raw(data)
+        return server_value
+
+    if has_local:
+        try:
+            settings_api.put_setting(key, local_value)
+        except (ApiError, NetworkError):
+            pass
+        return local_value
+
+    return default
 
 
 def load_tab(key: str, default: list) -> list:
     """Return saved rows for *key*, or *default* (as lists) when none saved."""
-    data = _load_raw()
-    rows = data.get(key)
+    rows = load_json(key, None)
     if rows is None:
         return [list(r) for r in default]
     return [list(r) for r in rows]
@@ -66,55 +121,89 @@ def load_tab(key: str, default: list) -> list:
 
 def save_tab(key: str, rows: list):
     """Persist *rows* (iterable of cell sequences) under *key*."""
-    data = _load_raw()
-    data[key] = [list(r) for r in rows]
-    _save_raw(data)
+    save_json(key, [list(r) for r in rows])
 
 
 def save_column_order(ordered_names: list):
     """Persist the user's column order as a list of column names."""
-    data = _load_raw()
-    data[MAIN_COLUMN_ORDER] = list(ordered_names)
-    _save_raw(data)
+    save_json(MAIN_COLUMN_ORDER, list(ordered_names))
 
 
 def load_column_order() -> list:
     """Return saved column order (list of names), or [] if none saved."""
-    data = _load_raw()
-    order = data.get(MAIN_COLUMN_ORDER)
+    order = load_json(MAIN_COLUMN_ORDER, None)
     return list(order) if isinstance(order, list) else []
 
 
 def save_theme(mode: str):
-    """Persist the selected theme mode ("dark" or "light")."""
+    """Persist the selected theme mode ("dark" or "light"). Always called
+    post-login (from the theme-toggle button in the main window's topbar,
+    never visible before login), so a valid session always exists here —
+    pushed via the dedicated /auth/me/theme endpoint (api/auth_api.py), not
+    the generic settings store. A failed server push is swallowed rather
+    than surfaced: unlike a strategy or config-table edit, a cosmetic
+    dark/light toggle failing loudly over a flaky connection would be poor
+    UX for something this low-stakes — the choice still applies locally and
+    re-syncs whenever the server is next reachable.
+    """
+    from api import auth_api
+    from api.exceptions import ApiError, NetworkError
+
+    try:
+        auth_api.update_theme(mode)
+    except (ApiError, NetworkError):
+        pass
+
     data = _load_raw()
     data[THEME] = mode
     _save_raw(data)
 
 
 def load_theme(default: str = "light") -> str:
-    """Return the saved theme mode, or *default* if none saved."""
+    """Return the LOCALLY cached theme mode only. Called once, from
+    ThemeManager.__init__ before login even happens (so the window can
+    paint immediately without a token to authenticate a server call yet) —
+    see sync_theme_from_server for the server-authoritative pull that runs
+    once a session actually exists."""
     data = _load_raw()
     mode = data.get(THEME)
     return mode if mode in ("dark", "light") else default
 
 
+def sync_theme_from_server() -> str | None:
+    """Pulls the logged-in user's theme from the server and updates the
+    local cache. Called once, right after a successful login (fresh or via
+    a persisted "keep me logged in" token) — see
+    app.py::AppController.show_main_window / theme.py::ThemeManager.
+    sync_from_server. Returns the server's theme, or None if it couldn't be
+    reached (caller keeps showing whatever load_theme() already applied at
+    boot)."""
+    from api import auth_api
+    from api.exceptions import ApiError, NetworkError
+
+    try:
+        result = auth_api.get_theme()
+    except (ApiError, NetworkError):
+        return None
+    mode = result.get("theme")
+    if mode not in ("dark", "light"):
+        return None
+    data = _load_raw()
+    data[THEME] = mode
+    _save_raw(data)
+    return mode
+
+
 def save_lmv_highlight_color(hex_color: str | None):
     """Persist the LMV's value-changed highlight color ("#rrggbb"), or None
     to clear the override and fall back to the theme's own amber."""
-    data = _load_raw()
-    if hex_color is None:
-        data.pop(LMV_HIGHLIGHT_COLOR, None)
-    else:
-        data[LMV_HIGHLIGHT_COLOR] = hex_color
-    _save_raw(data)
+    save_json(LMV_HIGHLIGHT_COLOR, hex_color)
 
 
 def load_lmv_highlight_color() -> str | None:
     """Return the saved override color, or None if the user hasn't picked
     one (callers fall back to the theme's status_amber in that case)."""
-    data = _load_raw()
-    color = data.get(LMV_HIGHLIGHT_COLOR)
+    color = load_json(LMV_HIGHLIGHT_COLOR, None)
     return color if isinstance(color, str) else None
 
 
@@ -122,16 +211,13 @@ def save_lmv_column_highlight_colors(colors: dict):
     """Persist the per-column value-changed highlight overrides
     ({column_name: "#rrggbb"}) — a column absent from this dict falls back
     to the LMV-wide default (see save_lmv_highlight_color)."""
-    data = _load_raw()
-    data[LMV_COLUMN_HIGHLIGHT_COLORS] = dict(colors)
-    _save_raw(data)
+    save_json(LMV_COLUMN_HIGHLIGHT_COLORS, dict(colors))
 
 
 def load_lmv_column_highlight_colors() -> dict:
     """Return the saved {column_name: "#rrggbb"} overrides, or {} if none
     saved."""
-    data = _load_raw()
-    colors = data.get(LMV_COLUMN_HIGHLIGHT_COLORS)
+    colors = load_json(LMV_COLUMN_HIGHLIGHT_COLORS, None)
     return dict(colors) if isinstance(colors, dict) else {}
 
 

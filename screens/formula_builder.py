@@ -457,6 +457,18 @@ class FormulaBuilderScreen(QWidget):
     def _persist(self):
         config_store.save_json(_STORE_KEY, self._formulas)
 
+    def reload_formulas(self):
+        """Re-reads formulas from the server/cache — called on every
+        successful login (not just the first), since this data is now
+        per-user: a second user logging in on the same running app
+        instance must not keep seeing the first user's formulas (see
+        app_window.py::MainWindow.reload_per_user_data)."""
+        self._formulas = config_store.load_json(_STORE_KEY, _default_formulas())
+        self._refresh_list()
+        self._placeholder.show()
+        self._editor_container.hide()
+        self._active_editor = None
+
     def refresh_theme(self):
         t = self._theme
         bd, card, bg = _t(t, "border"), _t(t, "card_bg"), _t(t, "background")

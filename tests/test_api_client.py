@@ -141,3 +141,28 @@ def test_non_list_non_string_detail_is_coerced_to_string(monkeypatch):
         assert False, "expected ApiError"
     except ApiError as exc:
         assert isinstance(exc.detail, str)
+
+
+def test_put_sends_put_method_with_json_body(monkeypatch):
+    """put() backs the new strategies/formula-variables/settings upsert
+    endpoints (api/strategies_api.py etc.) — this is the one HTTP verb
+    ApiClient didn't already have a method for."""
+    from api.client import ApiClient
+
+    client = ApiClient()
+    captured = {}
+
+    def _fake_request(method, url, **kwargs):
+        captured["method"] = method
+        captured["url"] = url
+        captured["json"] = kwargs.get("json")
+        return _FakeResponse(200, {"ok": True})
+
+    monkeypatch.setattr(client._session, "request", _fake_request)
+
+    result = client.put("/strategies/abc", json_body={"name": "Test"})
+
+    assert captured["method"] == "PUT"
+    assert captured["url"].endswith("/strategies/abc")
+    assert captured["json"] == {"name": "Test"}
+    assert result == {"ok": True}

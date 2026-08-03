@@ -44,10 +44,20 @@ class AppController:
             self._login.hide()
         if self._signup:
             self._signup.hide()
+        # Runs on every successful login (fresh or persisted-token
+        # auto-login), not just the first — pulls the now-authenticated
+        # user's theme from the server, re-applying if it differs from
+        # whatever the local cache showed at boot.
+        self.theme.sync_from_server()
         if self._main_window is None:
             self._main_window = MainWindow(self)
         else:
             self._main_window.refresh_user()
+            # MainWindow (and its screens) are reused across a logout/login
+            # cycle within the same process — the per-user data those
+            # screens eagerly loaded at construction is now stale the
+            # moment a *different* user logs in on this same instance.
+            self._main_window.reload_per_user_data()
         self._main_window.show()
         self._main_window.check_holiday_gate(initial=True)
         self._ensure_scheduler()

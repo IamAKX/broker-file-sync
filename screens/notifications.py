@@ -490,6 +490,16 @@ class NotificationsScreen(QWidget):
             self._email_card._send_btn.setEnabled(True)
         QMessageBox.information(self, "Test Email Sent", f"A test email was sent to {to_email}.")
 
+    def reload_configs(self):
+        """Re-reads trigger configs from the server/cache — called on every
+        successful login (not just the first), since trigger_config.py's
+        data is now per-user: a second user logging in on the same running
+        app instance must not keep seeing the first user's config (see
+        app_window.py::MainWindow.reload_per_user_data)."""
+        self._configs = trigger_config.load_trigger_configs()
+        self._populate_trigger_table()
+        self._on_toggle_changed()
+
     # ── Trigger table ────────────────────────────────────────────────────────
 
     def _populate_trigger_table(self):

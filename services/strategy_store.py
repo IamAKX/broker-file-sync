@@ -165,15 +165,61 @@ def _save_raw(data: list):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
-def load_all() -> list:
-    strategies = _load_raw()
+def _backfill_defaults(strategies: list) -> list:
     for s in strategies:
         s.setdefault("category", "Daily")
         s.setdefault("row_filter", [])
     return strategies
 
 
+def load_all() -> list:
+    """Tries the server first, refreshing the local cache on success and
+    returning that. Falls back to the local cache on NetworkError/ApiError
+    (offline reads).
+
+    One-time migration: if the server has never seen any strategies for
+    this user but the local cache already has some (e.g. this install
+    predates server sync), they're pushed up once via import_all's
+    merge-by-name path — same shape as config_store.load_json's migration.
+    """
+    from api import strategies_api
+    from api.exceptions import ApiError, NetworkError
+
+    local = _load_raw()
+
+    try:
+        result = strategies_api.list_strategies()
+    except (ApiError, NetworkError):
+        return _backfill_defaults(local)
+
+    server_strategies = result.get("strategies", [])
+    if server_strategies:
+        _save_raw(server_strategies)
+        return _backfill_defaults(server_strategies)
+
+    if local:
+        try:
+            import_all(local)
+        except (ApiError, NetworkError):
+            pass
+        return _backfill_defaults(local)
+
+    return []
+
+
 def save_strategy(strategy: dict):
+    """Upserts by id, both on the server and in the local cache. Propagates
+    ApiError/NetworkError from the server call — a failed save must be
+    visible to the caller, not silently kept local-only with no guarantee
+    it'll ever reach the server."""
+    from api import strategies_api
+
+    strategies_api.upsert_strategy(
+        strategy["id"], strategy.get("name", ""), strategy.get("active", True),
+        strategy.get("category", "Daily"), strategy.get("columns", []),
+        strategy.get("row_filter", []),
+    )
+
     all_s = _load_raw()
     for i, s in enumerate(all_s):
         if s["id"] == strategy["id"]:
@@ -185,14 +231,53 @@ def save_strategy(strategy: dict):
 
 
 def delete_strategy(strategy_id: str):
+    from api import strategies_api
+
+    strategies_api.delete_strategy(strategy_id)
+
     all_s = [s for s in _load_raw() if s["id"] != strategy_id]
     _save_raw(all_s)
 
 
-def import_all(strategies: list):
-    """Replace every persisted strategy with the given list (used by the
-    File > Import All Strategies menu action)."""
-    _save_raw(strategies)
+def import_all(strategies: list) -> tuple:
+    """Merges *strategies* into the persisted list by name (used by the
+    File > Import All Strategies menu action) — an imported strategy whose
+    name matches an existing one overwrites it in place (imported data wins,
+    including its id); one with a new name is added; any existing strategy
+    not present in the import is left untouched. First-match-wins if the
+    existing list already has duplicate names (only id is unique).
+
+    Pushes the same merge to the server first (raises on failure — this is
+    an explicit, deliberate user action, so it fails loudly rather than
+    silently importing local-only); the local merge below is this
+    function's own already-proven logic rather than trusting a re-fetch of
+    the server's independently-computed result.
+
+    Returns (overwritten_count, added_count).
+    """
+    from api import strategies_api
+
+    strategies_api.import_strategies(strategies)
+
+    existing = _load_raw()
+    index_by_name = {}
+    for i, s in enumerate(existing):
+        index_by_name.setdefault(s.get("name"), i)
+
+    overwritten = 0
+    added = 0
+    for imp in strategies:
+        name = imp.get("name")
+        if name in index_by_name:
+            existing[index_by_name[name]] = imp
+            overwritten += 1
+        else:
+            index_by_name[name] = len(existing)
+            existing.append(imp)
+            added += 1
+
+    _save_raw(existing)
+    return overwritten, added
 
 
 def new_strategy(name: str) -> dict:
