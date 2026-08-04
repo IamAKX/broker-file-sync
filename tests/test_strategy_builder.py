@@ -765,6 +765,23 @@ def test_strategy_editor_content_is_page_scrollable(qapp):
     assert outer.widget().isAncestorOf(editor._notif_section)
 
 
+def test_save_strategy_button_stays_outside_the_scroll_area(qapp):
+    # Regression guard: Save Strategy used to live inline in the Columns
+    # header, which scrolls out of view once the Notifications section below
+    # it makes the page long — it now lives in a persistent footer bar
+    # outside the scroll area instead, so it's always reachable.
+    from PySide6.QtWidgets import QPushButton, QScrollArea
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyEditor
+    s = new_strategy("T")
+    editor = StrategyEditor(s, [], None)
+
+    save_btns = [b for b in editor.findChildren(QPushButton) if b.text() == "Save Strategy"]
+    assert len(save_btns) == 1
+    scroll = editor.findChild(QScrollArea)
+    assert not scroll.widget().isAncestorOf(save_btns[0])
+
+
 def test_fmt_rule_condition_has_edit_button(qapp):
     from services.strategy_store import new_column, new_fmt_rule
     from screens.strategy_builder import ColumnEditorDialog

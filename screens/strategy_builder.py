@@ -1815,14 +1815,10 @@ class StrategyEditor(QWidget):
         col_title = QLabel("Columns")
         col_title.setFont(font_scale.font(font_scale.MEDIUM, True))
         add_col  = _btn("+ Add Column",  outlined=True, theme=t, small=True)
-        save_btn = _btn("Save Strategy", accent=True,   theme=t, small=True)
         add_col.clicked.connect(self._add_column)
-        save_btn.clicked.connect(self._save)
         col_hdr.addWidget(col_title)
         col_hdr.addStretch()
         col_hdr.addWidget(add_col)
-        col_hdr.addSpacing(8)
-        col_hdr.addWidget(save_btn)
         root.addLayout(col_hdr)
 
         is_dark = (t.current_mode == "dark") if t else True
@@ -1860,7 +1856,21 @@ class StrategyEditor(QWidget):
         root.addStretch()
 
         editor_scroll.setWidget(editor_inner)
-        outer.addWidget(editor_scroll)
+        outer.addWidget(editor_scroll, 1)
+
+        # A persistent footer bar, outside the scroll area, so Save Strategy
+        # stays reachable regardless of scroll position — it used to live
+        # inline in the Columns header, which scrolled out of view once the
+        # Notifications section (below Columns) made the page long.
+        footer = QFrame()
+        footer.setStyleSheet(f"QFrame {{ background: {_t(t, 'card_bg')}; border-top: 1px solid {_t(t, 'border')}; }}")
+        footer_lay = QHBoxLayout(footer)
+        footer_lay.setContentsMargins(20, 10, 20, 10)
+        footer_lay.addStretch()
+        save_btn = _btn("Save Strategy", accent=True, theme=t)
+        save_btn.clicked.connect(self._save)
+        footer_lay.addWidget(save_btn)
+        outer.addWidget(footer)
 
         self._refresh_columns()
 
