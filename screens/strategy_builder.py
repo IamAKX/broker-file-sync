@@ -13,13 +13,16 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QLineEdit, QSizePolicy, QDialog,
     QColorDialog, QMessageBox, QApplication, QComboBox,
-    QToolButton, QMenu
+    QToolButton, QMenu, QSpinBox, QCheckBox
 )
 from PySide6.QtCore import Qt, Signal, QByteArray, QSize, QPointF
 from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QPainter, QFontMetrics, QAction
 from PySide6.QtSvg import QSvgRenderer
 
 from services import strategy_store as store
+from services.strategy_alerts import config_store as alerts_config_store
+from services.strategy_alerts import models as alerts_models
+from services.strategy_alerts import state_store as alerts_state_store
 from screens.notifications import ToggleSwitch
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
@@ -1344,6 +1347,360 @@ class ManageCategoriesDialog(QDialog):
 
 # ── Strategy editor (right panel) ─────────────────────────────────────────
 
+# ── Notification section ────────────────────────────────────────────────────
+
+class NotificationSection(QWidget):
+    """Inline (non-modal) block inside StrategyEditor: configures when this
+    strategy should fire a trade-signal notification (entry alert, then
+    Target/Stop Loss/Trailing Exit lifecycle tracking — see
+    services/strategy_alerts). Mutates *config* in place; StrategyEditor
+    persists it via services.strategy_alerts.config_store on Save, separately
+    from services.strategy_store.save_strategy — a notification config never
+    touches strategies.json or the strategies backend sync.
+    """
+
+    def __init__(self, config: dict, strategy: dict, theme, combined_headers_fn,
+                 lmv_first_row: dict, all_lmv_data: list, parent=None):
+        super().__init__(parent)
+        self._config = config
+        self._strategy = strategy
+        self._theme = theme
+        self._combined_headers_fn = combined_headers_fn
+        self._lmv_first_row = lmv_first_row
+        self._all_lmv_data = all_lmv_data
+        self._build()
+
+    def result_config(self) -> dict:
+        return self._config
+
+    def update_lmv_data(self, first_row: dict, all_data: list):
+        self._lmv_first_row = first_row
+        self._all_lmv_data = all_data
+
+    def _build(self):
+        t = self._theme
+        txts = _t(t, "text_secondary")
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(10)
+
+        hdr = QHBoxLayout()
+        title = QLabel("Notifications")
+        title.setFont(font_scale.font(font_scale.MEDIUM, True))
+        enabled_lbl = QLabel("Enabled")
+        enabled_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._enabled_toggle = ToggleSwitch(bool(self._config.get("enabled")))
+        self._enabled_toggle.toggled.connect(lambda v: self._config.update({"enabled": v}))
+        hdr.addWidget(title)
+        hdr.addStretch()
+        hdr.addWidget(enabled_lbl)
+        hdr.addWidget(self._enabled_toggle)
+        root.addLayout(hdr)
+
+        info = QLabel(
+            "Fires an entry alert when the trigger condition holds continuously "
+            "for the debounce window (to avoid false breakouts), then tracks "
+            "Target / Stop Loss / Trailing Exit crossings until the signal "
+            "resolves. Delivered via whichever channels are enabled on the "
+            "Notifications screen."
+        )
+        info.setFont(font_scale.font(font_scale.SMALL, False))
+        info.setStyleSheet(f"color:{txts};")
+        info.setWordWrap(True)
+        root.addWidget(info)
+
+        # ── Direction ────────────────────────────────────────────────────
+        dir_row = QHBoxLayout()
+        dir_lbl = QLabel("Direction:")
+        dir_lbl.setFixedWidth(140)
+        self._direction_combo = QComboBox()
+        self._direction_combo.addItems([alerts_models.DIRECTION_BUY, alerts_models.DIRECTION_SELL])
+        self._direction_combo.setCurrentText(
+            self._config.get("direction", alerts_models.DIRECTION_BUY)
+        )
+        self._direction_combo.currentTextChanged.connect(
+            lambda v: self._config.update({"direction": v})
+        )
+        dir_row.addWidget(dir_lbl)
+        dir_row.addWidget(self._direction_combo)
+        dir_row.addStretch()
+        root.addLayout(dir_row)
+
+        # ── Trigger condition ────────────────────────────────────────────
+        # Deliberately a single standalone condition, not "pick one column's
+        # existing conditional-formatting rule": a strategy can have several
+        # columns, and conditional formatting is inherently per-column, so
+        # there's no one well-defined "the strategy's rule" to point at. This
+        # condition can reference any/all of the strategy's columns via the
+        # same combined-headers picker the row filter and metrics use.
+        root.addWidget(_sep(t))
+        trig_title = QLabel("Trigger Condition")
+        trig_title.setFont(font_scale.font(font_scale.SMALL, True))
+        root.addWidget(trig_title)
+
+        self._config.setdefault("trigger_condition", [])
+
+        cond_row = QHBoxLayout()
+        cond_lbl = QLabel("Condition:")
+        cond_lbl.setFixedWidth(140)
+        self._trigger_preview = QLabel(
+            _tokens_to_display(self._config.get("trigger_condition", []))
+        )
+        self._trigger_preview.setFont(QFont("Menlo,Consolas,monospace", 9))
+        self._trigger_preview.setStyleSheet(f"color:{_t(t,'accent')};background:transparent;")
+        self._trigger_preview.setWordWrap(True)
+        edit_trigger_btn = _btn("Edit Condition…", outlined=True, theme=t, small=True)
+        edit_trigger_btn.clicked.connect(self._open_trigger_condition_editor)
+        cond_row.addWidget(cond_lbl)
+        cond_row.addWidget(self._trigger_preview, 1)
+        cond_row.addWidget(edit_trigger_btn)
+        root.addLayout(cond_row)
+
+        # ── Debounce ─────────────────────────────────────────────────────
+        root.addWidget(_sep(t))
+        deb_row = QHBoxLayout()
+        deb_lbl = QLabel("Debounce (minutes):")
+        deb_lbl.setFixedWidth(140)
+        self._debounce_spin = QSpinBox()
+        self._debounce_spin.setRange(0, 60)
+        self._debounce_spin.setValue(int(self._config.get("debounce_minutes", 2)))
+        self._debounce_spin.valueChanged.connect(
+            lambda v: self._config.update({"debounce_minutes": v})
+        )
+        deb_row.addWidget(deb_lbl)
+        deb_row.addWidget(self._debounce_spin)
+        deb_row.addStretch()
+        root.addLayout(deb_row)
+
+        # ── Score ────────────────────────────────────────────────────────
+        score_row = QHBoxLayout()
+        score_lbl = QLabel("Strength/Weakness Score:")
+        score_lbl.setFixedWidth(140)
+        self._score_edit = QLineEdit(
+            "" if self._config.get("score") is None else str(self._config["score"])
+        )
+        self._score_edit.setPlaceholderText("optional constant")
+        self._score_edit.setFixedHeight(30)
+        self._score_edit.textChanged.connect(self._on_score_changed)
+        score_row.addWidget(score_lbl)
+        score_row.addWidget(self._score_edit)
+        root.addLayout(score_row)
+
+        # ── Risk:Reward ──────────────────────────────────────────────────
+        root.addWidget(_sep(t))
+        rr_hdr = QHBoxLayout()
+        rr_title = QLabel("Risk : Reward")
+        rr_title.setFont(font_scale.font(font_scale.SMALL, True))
+        self._rr_enabled_check = QCheckBox("Enabled")
+        self._rr_enabled_check.setChecked(self._config.get("risk_reward") is not None)
+        self._rr_enabled_check.toggled.connect(self._on_rr_enabled_toggled)
+        rr_hdr.addWidget(rr_title)
+        rr_hdr.addStretch()
+        rr_hdr.addWidget(self._rr_enabled_check)
+        root.addLayout(rr_hdr)
+
+        self._rr_widget = QWidget()
+        rr_lay = QVBoxLayout(self._rr_widget)
+        rr_lay.setContentsMargins(0, 0, 0, 0)
+        rr_lay.setSpacing(6)
+
+        num_row = QHBoxLayout()
+        num_lbl = QLabel("Numerator:")
+        num_lbl.setFixedWidth(140)
+        self._rr_num_preview = QLabel()
+        self._rr_num_preview.setFont(QFont("Menlo,Consolas,monospace", 9))
+        self._rr_num_preview.setStyleSheet(f"color:{_t(t,'accent')};background:transparent;")
+        self._rr_num_preview.setWordWrap(True)
+        num_btn = _btn("Edit Formula…", outlined=True, theme=t, small=True)
+        num_btn.clicked.connect(lambda: self._open_rr_formula_editor("numerator", self._rr_num_preview))
+        num_row.addWidget(num_lbl)
+        num_row.addWidget(self._rr_num_preview, 1)
+        num_row.addWidget(num_btn)
+        rr_lay.addLayout(num_row)
+
+        den_row = QHBoxLayout()
+        den_lbl = QLabel("Denominator:")
+        den_lbl.setFixedWidth(140)
+        self._rr_den_preview = QLabel()
+        self._rr_den_preview.setFont(QFont("Menlo,Consolas,monospace", 9))
+        self._rr_den_preview.setStyleSheet(f"color:{_t(t,'accent')};background:transparent;")
+        self._rr_den_preview.setWordWrap(True)
+        den_btn = _btn("Edit Formula…", outlined=True, theme=t, small=True)
+        den_btn.clicked.connect(lambda: self._open_rr_formula_editor("denominator", self._rr_den_preview))
+        den_row.addWidget(den_lbl)
+        den_row.addWidget(self._rr_den_preview, 1)
+        den_row.addWidget(den_btn)
+        rr_lay.addLayout(den_row)
+
+        root.addWidget(self._rr_widget)
+        self._refresh_rr_previews()
+        self._rr_widget.setVisible(self._config.get("risk_reward") is not None)
+
+        # ── Metrics ──────────────────────────────────────────────────────
+        root.addWidget(_sep(t))
+        metrics_hdr = QHBoxLayout()
+        metrics_title = QLabel("Metrics  (Stop Loss / Target / Trailing Exit / Informational)")
+        metrics_title.setFont(font_scale.font(font_scale.SMALL, True))
+        add_metric_btn = _btn("+ Add Metric", outlined=True, theme=t, small=True)
+        add_metric_btn.clicked.connect(self._add_metric)
+        metrics_hdr.addWidget(metrics_title)
+        metrics_hdr.addStretch()
+        metrics_hdr.addWidget(add_metric_btn)
+        root.addLayout(metrics_hdr)
+
+        # No nested QScrollArea here — this list lives inside StrategyEditor's
+        # single page-level scroll area (see StrategyEditor._build), so it
+        # just flows as normal content instead of getting its own cramped,
+        # fixed-height inner scrollbar on top of the outer one.
+        self._metrics_inner = QWidget()
+        self._metrics_inner.setStyleSheet("background:transparent;")
+        self._metrics_layout = QVBoxLayout(self._metrics_inner)
+        self._metrics_layout.setSpacing(8)
+        self._metrics_layout.setContentsMargins(0, 0, 0, 0)
+        self._metrics_layout.addStretch()
+        root.addWidget(self._metrics_inner)
+
+        self._refresh_metrics()
+
+    # ── Trigger ──────────────────────────────────────────────────────────
+
+    def _open_trigger_condition_editor(self):
+        from screens.formula_editor import ExpressionEditorDialog
+        headers, extra_values = self._combined_headers_fn()
+        dlg = ExpressionEditorDialog(
+            tokens=list(self._config.get("trigger_condition", [])),
+            lmv_headers=headers, strategy_col_headers=[],
+            lmv_first_row=self._lmv_first_row, all_lmv_data=self._all_lmv_data,
+            theme=self._theme, mode="condition", allow_self=False,
+            extra_row_values=extra_values, parent=self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._config["trigger_condition"] = dlg.get_tokens()
+            self._trigger_preview.setText(
+                _tokens_to_display(self._config["trigger_condition"]) or "—"
+            )
+
+    # ── Score ────────────────────────────────────────────────────────────
+
+    def _on_score_changed(self, text: str):
+        text = text.strip()
+        if not text:
+            self._config["score"] = None
+            return
+        try:
+            self._config["score"] = float(text)
+        except ValueError:
+            pass  # leave the last valid value until the text parses again
+
+    # ── Risk:Reward ──────────────────────────────────────────────────────
+
+    def _on_rr_enabled_toggled(self, checked: bool):
+        if checked:
+            self._config["risk_reward"] = self._config.get("risk_reward") or {
+                "numerator": [], "denominator": [],
+            }
+        else:
+            self._config["risk_reward"] = None
+        self._rr_widget.setVisible(checked)
+        self._refresh_rr_previews()
+
+    def _refresh_rr_previews(self):
+        rr = self._config.get("risk_reward") or {"numerator": [], "denominator": []}
+        self._rr_num_preview.setText(_tokens_to_display(rr.get("numerator", [])) or "—")
+        self._rr_den_preview.setText(_tokens_to_display(rr.get("denominator", [])) or "—")
+
+    def _open_rr_formula_editor(self, key: str, preview_label: QLabel):
+        from screens.formula_editor import ExpressionEditorDialog
+        headers, extra_values = self._combined_headers_fn()
+        rr = self._config.setdefault("risk_reward", {"numerator": [], "denominator": []})
+        dlg = ExpressionEditorDialog(
+            tokens=list(rr.get(key, [])),
+            lmv_headers=headers, strategy_col_headers=[],
+            lmv_first_row=self._lmv_first_row, all_lmv_data=self._all_lmv_data,
+            theme=self._theme, mode="value", extra_row_values=extra_values, parent=self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            rr[key] = dlg.get_tokens()
+            preview_label.setText(_tokens_to_display(rr[key]) or "—")
+
+    # ── Metrics ──────────────────────────────────────────────────────────
+
+    def _add_metric(self):
+        self._config["metrics"].append(
+            alerts_models.new_metric(f"Metric {len(self._config['metrics']) + 1}")
+        )
+        self._refresh_metrics()
+
+    def _delete_metric(self, idx: int):
+        del self._config["metrics"][idx]
+        self._refresh_metrics()
+
+    def _refresh_metrics(self):
+        t = self._theme
+        bd = _t(t, "border")
+        bg = _t(t, "button_bg")
+
+        while self._metrics_layout.count() > 1:
+            item = self._metrics_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        for idx, m in enumerate(self._config.get("metrics", [])):
+            frame = QFrame()
+            frame.setStyleSheet(f"QFrame{{background:{bg};border:1px solid {bd};border-radius:6px;}}")
+            lay = QVBoxLayout(frame)
+            lay.setContentsMargins(10, 8, 10, 8)
+            lay.setSpacing(6)
+
+            top = QHBoxLayout()
+            name_edit = QLineEdit(m.get("name", ""))
+            name_edit.setFixedHeight(28)
+            name_edit.textChanged.connect(
+                lambda v, i=idx: self._config["metrics"][i].update({"name": v})
+            )
+            role_combo = QComboBox()
+            role_combo.addItems(list(alerts_models.ROLES))
+            role_combo.setCurrentText(m.get("role", alerts_models.ROLE_INFORMATIONAL))
+            role_combo.currentTextChanged.connect(
+                lambda v, i=idx: self._config["metrics"][i].update({"role": v})
+            )
+            del_btn = _btn("✕", theme=t, small=True, danger=True)
+            del_btn.setFixedWidth(30)
+            del_btn.clicked.connect(lambda _, i=idx: self._delete_metric(i))
+            top.addWidget(name_edit, 1)
+            top.addWidget(role_combo)
+            top.addWidget(del_btn)
+            lay.addLayout(top)
+
+            formula_row = QHBoxLayout()
+            preview = QLabel(_tokens_to_display(m.get("formula", [])))
+            preview.setFont(QFont("Menlo,Consolas,monospace", 9))
+            preview.setStyleSheet(f"color:{_t(t,'accent')};background:transparent;")
+            preview.setWordWrap(True)
+            edit_btn = _btn("Edit Formula…", outlined=True, theme=t, small=True)
+            edit_btn.clicked.connect(lambda _, i=idx, p=preview: self._open_metric_formula_editor(i, p))
+            formula_row.addWidget(preview, 1)
+            formula_row.addWidget(edit_btn)
+            lay.addLayout(formula_row)
+
+            self._metrics_layout.insertWidget(self._metrics_layout.count() - 1, frame)
+
+    def _open_metric_formula_editor(self, idx: int, preview_label: QLabel):
+        from screens.formula_editor import ExpressionEditorDialog
+        headers, extra_values = self._combined_headers_fn()
+        metric = self._config["metrics"][idx]
+        dlg = ExpressionEditorDialog(
+            tokens=list(metric.get("formula", [])),
+            lmv_headers=headers, strategy_col_headers=[],
+            lmv_first_row=self._lmv_first_row, all_lmv_data=self._all_lmv_data,
+            theme=self._theme, mode="value", extra_row_values=extra_values, parent=self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            metric["formula"] = dlg.get_tokens()
+            preview_label.setText(_tokens_to_display(metric["formula"]) or "—")
+
+
 class StrategyEditor(QWidget):
     saved = Signal(dict)
 
@@ -1354,13 +1711,51 @@ class StrategyEditor(QWidget):
         self._theme         = theme
         self._lmv_first_row: dict = {}
         self._all_lmv_data: list  = []
+        self._notif_config = (
+            alerts_config_store.load_config(self._strategy["id"])
+            or alerts_models.new_notification_config()
+        )
         self._build()
+
+    def _combined_headers_and_values(self) -> tuple:
+        """This strategy's own column names + the loaded LMV's columns, plus
+        each own-column's computed value on the first row — for any formula/
+        condition editor that should be able to reference either kind of
+        column (the row filter editor, and every Notifications-section
+        formula/condition editor)."""
+        from services.strategy_engine import evaluate
+        strat_cols = self._strategy.get("columns", [])
+        all_headers = self._lmv_headers + [c["name"] for c in strat_cols]
+        extra_values = {}
+        for col in strat_cols:
+            extra_values[col["name"]] = evaluate(
+                col.get("formula", []), self._lmv_first_row, self._all_lmv_data
+            )
+        return all_headers, extra_values
 
     def _build(self):
         t    = self._theme
         txts = _t(t, "text_secondary")
 
-        root = QVBoxLayout(self)
+        # The whole editor scrolls as one page — Row Filter + Columns +
+        # Notifications together can easily exceed the right panel's height
+        # (which, unlike this widget, is never itself wrapped in a scroll
+        # area — see StrategyBuilderScreen._build's _editor_container), and
+        # without an outer scroll here every section was forced to fight for
+        # a share of whatever height happened to be available, collapsing
+        # below its minimum size and overlapping once two sections
+        # (Columns, Notifications) both wanted "the rest of the space".
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        editor_scroll = QScrollArea()
+        editor_scroll.setWidgetResizable(True)
+        editor_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        editor_inner = QWidget()
+        editor_inner.setStyleSheet("background:transparent;")
+
+        root = QVBoxLayout(editor_inner)
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(14)
 
@@ -1420,14 +1815,10 @@ class StrategyEditor(QWidget):
         col_title = QLabel("Columns")
         col_title.setFont(font_scale.font(font_scale.MEDIUM, True))
         add_col  = _btn("+ Add Column",  outlined=True, theme=t, small=True)
-        save_btn = _btn("Save Strategy", accent=True,   theme=t, small=True)
         add_col.clicked.connect(self._add_column)
-        save_btn.clicked.connect(self._save)
         col_hdr.addWidget(col_title)
         col_hdr.addStretch()
         col_hdr.addWidget(add_col)
-        col_hdr.addSpacing(8)
-        col_hdr.addWidget(save_btn)
         root.addLayout(col_hdr)
 
         is_dark = (t.current_mode == "dark") if t else True
@@ -1444,17 +1835,42 @@ class StrategyEditor(QWidget):
         self._warn_lbl.setVisible(not self._lmv_headers)
         root.addWidget(self._warn_lbl)
 
-        self._col_scroll  = QScrollArea()
-        self._col_scroll.setWidgetResizable(True)
-        self._col_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        # No nested QScrollArea here — this list lives inside the single
+        # page-level scroll area set up below, so it just flows as normal
+        # content instead of getting its own cramped, fixed-height inner
+        # scrollbar stacked on top of the outer one.
         self._col_inner   = QWidget()
         self._col_inner.setStyleSheet("background:transparent;")
         self._col_layout  = QVBoxLayout(self._col_inner)
         self._col_layout.setSpacing(8)
         self._col_layout.setContentsMargins(0, 0, 0, 0)
         self._col_layout.addStretch()
-        self._col_scroll.setWidget(self._col_inner)
-        root.addWidget(self._col_scroll, 1)
+        root.addWidget(self._col_inner)
+
+        root.addWidget(_sep(t))
+        self._notif_section = NotificationSection(
+            self._notif_config, self._strategy, t, self._combined_headers_and_values,
+            self._lmv_first_row, self._all_lmv_data, parent=self,
+        )
+        root.addWidget(self._notif_section)
+        root.addStretch()
+
+        editor_scroll.setWidget(editor_inner)
+        outer.addWidget(editor_scroll, 1)
+
+        # A persistent footer bar, outside the scroll area, so Save Strategy
+        # stays reachable regardless of scroll position — it used to live
+        # inline in the Columns header, which scrolled out of view once the
+        # Notifications section (below Columns) made the page long.
+        footer = QFrame()
+        footer.setStyleSheet(f"QFrame {{ background: {_t(t, 'card_bg')}; border-top: 1px solid {_t(t, 'border')}; }}")
+        footer_lay = QHBoxLayout(footer)
+        footer_lay.setContentsMargins(20, 10, 20, 10)
+        footer_lay.addStretch()
+        save_btn = _btn("Save Strategy", accent=True, theme=t)
+        save_btn.clicked.connect(self._save)
+        footer_lay.addWidget(save_btn)
+        outer.addWidget(footer)
 
         self._refresh_columns()
 
@@ -1483,6 +1899,7 @@ class StrategyEditor(QWidget):
     def update_lmv_data(self, first_row: dict, all_data: list):
         self._lmv_first_row = first_row
         self._all_lmv_data  = all_data
+        self._notif_section.update_lmv_data(first_row, all_data)
 
     def _edit_column(self, idx: int):
         col = self._strategy["columns"][idx]
@@ -1572,19 +1989,10 @@ class StrategyEditor(QWidget):
 
     def _open_filter_editor(self):
         from screens.formula_editor import ExpressionEditorDialog
-        from services.strategy_engine import evaluate
         # A row filter can reference this strategy's own columns by name, so the
         # column names appear in the Fields list (THIS is disabled — ambiguous
         # when a strategy has multiple columns).
-        strat_cols = self._strategy.get("columns", [])
-        all_headers = self._lmv_headers + [c["name"] for c in strat_cols]
-        # Compute each strategy column's value on the first row so the compile
-        # test can evaluate the filter against those columns.
-        extra_values = {}
-        for col in strat_cols:
-            extra_values[col["name"]] = evaluate(
-                col.get("formula", []), self._lmv_first_row, self._all_lmv_data
-            )
+        all_headers, extra_values = self._combined_headers_and_values()
         dlg = ExpressionEditorDialog(
             tokens=list(self._strategy.get("row_filter", [])),
             lmv_headers=all_headers,
@@ -1644,6 +2052,7 @@ class StrategyEditor(QWidget):
     def _save(self):
         self._strategy["name"]     = self._name_edit.text().strip() or "Untitled"
         self._strategy["category"] = self._category_combo.currentText()
+        alerts_config_store.save_config(self._strategy["id"], self._notif_section.result_config())
         self.saved.emit(copy.deepcopy(self._strategy))
 
 
@@ -1919,6 +2328,8 @@ class StrategyBuilderScreen(QWidget):
             return
         self._strategies = [s for s in self._strategies if s["id"] != strategy_id]
         store.delete_strategy(strategy_id)
+        alerts_config_store.delete_config(strategy_id)
+        alerts_state_store.clear_strategy(strategy_id)
         self._refresh_list()
         self._placeholder.show()
         self._editor_container.hide()

@@ -1,8 +1,38 @@
 import os
-from PySide6.QtWidgets import QApplication
+from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import QApplication, QComboBox, QFrame
 import font_scale
 
 _CHECK_ICON = os.path.join(os.path.dirname(__file__), "assets", "icons", "check.svg").replace("\\", "/")
+
+
+def _patch_combo_popup_frame():
+    """QComboBox's popup is backed by a QListView that draws its own native
+    frame by default, on top of this module's QSS border on the same
+    QAbstractItemView selector — the combination reads as a doubled/"extra"
+    border around every dropdown (most visible before the QPalette below is
+    applied, when the native frame falls back to plain white and the seam
+    against the QSS-styled list looks like a second border). Clearing the
+    view's own frame here, once, for every QComboBox in the app — present
+    and future — leaves exactly the one QSS-declared border.
+
+    Patched at import time (not per-instance) so no call site needs to
+    remember to opt in; guarded so re-importing this module doesn't wrap
+    showPopup twice.
+    """
+    if getattr(QComboBox.showPopup, "_no_frame_patched", False):
+        return
+    original_show_popup = QComboBox.showPopup
+
+    def _show_popup_no_frame(self):
+        self.view().setFrameShape(QFrame.Shape.NoFrame)
+        original_show_popup(self)
+
+    _show_popup_no_frame._no_frame_patched = True
+    QComboBox.showPopup = _show_popup_no_frame
+
+
+_patch_combo_popup_frame()
 
 DARK = {
     "background":    "#0d1117",
@@ -94,9 +124,52 @@ class ThemeManager:
             return True
         return False
 
+    def _build_palette(self, p: dict) -> QPalette:
+        """Explicit QPalette to go alongside the QSS stylesheet below.
+
+        Fusion-style popups that spawn their own top-level window — a
+        QComboBox dropdown, a QMenu, a tooltip — paint their surrounding
+        frame from the application's ambient QPalette before any QSS on the
+        inner view is applied. Without this, only the *stylesheet's* colors
+        show (e.g. QComboBox QAbstractItemView's background) while the
+        popup's own frame stays whatever QPalette.Base/Window defaulted to —
+        white, on macOS — regardless of dark/light mode. Setting the palette
+        here keeps every native-ish popup in sync with the theme instead of
+        just the widgets QSS selectors happen to reach directly.
+        """
+        palette = QPalette()
+        window = QColor(p["background"])
+        base = QColor(p["input_bg"])
+        alt_base = QColor(p["card_bg"])
+        text = QColor(p["text_primary"])
+        button = QColor(p["button_bg"])
+        highlight = QColor(p["accent"])
+        highlighted_text = QColor(p["background"])
+        disabled_text = QColor(p["text_secondary"])
+
+        palette.setColor(QPalette.ColorRole.Window, window)
+        palette.setColor(QPalette.ColorRole.WindowText, text)
+        palette.setColor(QPalette.ColorRole.Base, base)
+        palette.setColor(QPalette.ColorRole.AlternateBase, alt_base)
+        palette.setColor(QPalette.ColorRole.ToolTipBase, alt_base)
+        palette.setColor(QPalette.ColorRole.ToolTipText, text)
+        palette.setColor(QPalette.ColorRole.Text, text)
+        palette.setColor(QPalette.ColorRole.Button, button)
+        palette.setColor(QPalette.ColorRole.ButtonText, text)
+        palette.setColor(QPalette.ColorRole.Highlight, highlight)
+        palette.setColor(QPalette.ColorRole.HighlightedText, highlighted_text)
+        palette.setColor(QPalette.ColorRole.Link, highlight)
+
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText, disabled_text)
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text, disabled_text)
+        palette.setColor(QPalette.ColorGroup.Disabled, QPalette.ColorRole.ButtonText, disabled_text)
+
+        return palette
+
     def apply(self):
         p = PALETTES[self._mode]
 
+        self._app.setPalette(self._build_palette(p))
         self._app.setStyleSheet(f"""
             QWidget {{
                 background-color: {p['background']};

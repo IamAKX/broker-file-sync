@@ -260,6 +260,9 @@ def test_theme_manager_sync_from_server_reapplies_on_change(monkeypatch):
         def setStyleSheet(self, *a, **kw):
             pass
 
+        def setPalette(self, *a, **kw):
+            pass
+
     config_store._save_raw({"theme": "light"})
     tm = ThemeManager(_FakeApp())
     assert tm.current_mode == "light"
@@ -276,6 +279,9 @@ def test_theme_manager_sync_from_server_noop_when_unchanged(monkeypatch):
 
     class _FakeApp:
         def setStyleSheet(self, *a, **kw):
+            pass
+
+        def setPalette(self, *a, **kw):
             pass
 
     config_store._save_raw({"theme": "light"})

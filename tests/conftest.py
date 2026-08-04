@@ -26,9 +26,14 @@ def _isolate_disk_stores(tmp_path, monkeypatch):
     handling override these within their own test function.
     """
     from services import config_store, strategy_store, formula_variable_store
+    from services.strategy_alerts import config_store as alerts_config_store
+    from services.strategy_alerts import state_store as alerts_state_store
     monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
     monkeypatch.setattr(strategy_store, "_STORE_FILE", str(tmp_path / "strategies.json"))
     monkeypatch.setattr(formula_variable_store, "_STORE_FILE", str(tmp_path / "formula_variables.json"))
+    monkeypatch.setattr(alerts_state_store, "_STORE_DIR", str(tmp_path))
+    alerts_state_store.reset_for_user_switch()
+    alerts_config_store.reload_cache()
 
     from api import auth_api, formula_variables_api, settings_api, strategies_api
 
