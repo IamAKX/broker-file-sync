@@ -20,6 +20,8 @@ from services.notifications.payload import NotificationPayload
 
 
 class EmailChannel(NotificationChannel):
+    CHANNEL_ID = "email"
+
     def send(self, payload: NotificationPayload) -> None:
         try:
             notifications_api.send_email(payload.title, payload.message)

@@ -18,6 +18,30 @@ Download a pre-built executable from the [Releases page](https://github.com/IamA
 
 ---
 
+## 🔐 Account & Backend
+
+The app is **not** a purely offline tool anymore — it talks to a backend
+(`broker-sync-api`, a separate repo) for authentication, and to sync strategies,
+formula variables, settings, theme, historic data, and notification config.
+
+- **Login is required.** On launch, if there's no valid saved session
+  (`token_manager.load_persisted()`), the app shows a **Login** screen and
+  nothing else works until you sign up or log in. There is no "skip login" or
+  fully-offline mode.
+- **Backend URL**: the app talks to whatever `BROKER_SYNC_API_URL` is set to,
+  defaulting to a hosted instance if unset (`api/config.py`):
+  ```bash
+  export BROKER_SYNC_API_URL="http://your-backend-host:8000"   # macOS/Linux
+  set BROKER_SYNC_API_URL=http://your-backend-host:8000        # Windows cmd
+  ```
+  Point this at a locally-running `broker-sync-api` instance if you're
+  developing against the backend too; otherwise the default hosted instance is
+  used automatically.
+- Once logged in, the session persists across restarts (unless you log out), so
+  this is a one-time step per machine, not per launch.
+
+---
+
 ## 🍎 macOS Setup
 
 ### 1. Clone the Repository
@@ -45,6 +69,10 @@ pip install -r requirements.txt
 ```bash
 python main.py
 ```
+
+First launch shows a **Login** screen — sign up for an account (or log in if you
+already have one) before anything else in the app becomes usable; see
+[Account & Backend](#-account--backend) above.
 
 ---
 
@@ -87,6 +115,10 @@ python -m pywin32_postinstall -install
 python main.py
 ```
 
+First launch shows a **Login** screen — sign up for an account (or log in if you
+already have one) before anything else in the app becomes usable; see
+[Account & Backend](#-account--backend) above.
+
 ---
 
 ## 🔴 Setting Up TradeTiger Live Data (Windows)
@@ -112,7 +144,10 @@ For the Live Master View to update in real time, TradeTiger must push data to Ex
 | `PySide6 >= 6.6` | Qt6 GUI framework | All |
 | `openpyxl` | Read/write `.xlsx` files | All |
 | `xlrd` | Read legacy `.xls` files | All |
+| `requests` | HTTP client for the backend (`api/`) — auth, strategy/settings sync, historic uploads, notifications | All |
+| `pytest` | Test suite | All (dev) |
 | `pywin32` | COM automation for live TradeTiger data | Windows only |
+| `pyobjc-framework-Cocoa` | Real Dock icon/app name for `python main.py` dev runs (not needed for PyInstaller `.app` builds) | macOS only (dev, optional) |
 
 ---
 

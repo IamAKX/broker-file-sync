@@ -197,3 +197,44 @@ def test_notification_service_lazy_import_from_package(qapp):
     # heavier dependency chain (see services/notifications/__init__.py).
     from services.notifications import NotificationService
     assert NotificationService is not None
+
+
+def test_notification_service_channels_filter_restricts_delivery(qapp):
+    from api import notifications_api
+    from services.notifications.manager import NotificationService
+
+    tray = _FakeTrayIcon()
+    email_calls = []
+    with patch.object(notifications_api, "send_email", lambda title, message: email_calls.append(1)):
+        service = NotificationService(tray)
+        service.notify("T", "M", channels={"system"})
+
+    assert tray.messages  # system delivered
+    assert email_calls == []  # email filtered out
+
+
+def test_notification_service_channels_filter_unknown_id_is_noop(qapp):
+    from api import notifications_api
+    from services.notifications.manager import NotificationService
+
+    tray = _FakeTrayIcon()
+    with patch.object(notifications_api, "send_email", lambda title, message: None):
+        service = NotificationService(tray)
+        # "telegram" matches no registered channel today — must not raise.
+        service.notify("T", "M", channels={"telegram"})
+
+    assert tray.messages == []
+
+
+def test_notification_service_none_channels_delivers_to_all(qapp):
+    from api import notifications_api
+    from services.notifications.manager import NotificationService
+
+    tray = _FakeTrayIcon()
+    email_calls = []
+    with patch.object(notifications_api, "send_email", lambda title, message: email_calls.append(1)):
+        service = NotificationService(tray)
+        service.notify("T", "M")
+
+    assert tray.messages
+    assert email_calls == [1]

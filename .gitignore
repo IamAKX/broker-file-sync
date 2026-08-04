@@ -69,6 +69,7 @@ strategies.json
 config_data.json
 historic_data.json
 formula_variables.json
+strategy_alert_state_*.json
 
 # Skill installer lockfile (local install state, not source)
 skills-lock.json

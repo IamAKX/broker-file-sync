@@ -16,7 +16,7 @@ from api import notifications_api
 from api.exceptions import ApiError, NetworkError
 from api.token_store import token_manager
 from components.error_popup import show_api_error
-from services import trigger_config
+from services import notification_channels, trigger_config
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
 
@@ -299,11 +299,13 @@ class NotificationsScreen(QWidget):
         channels_col = QVBoxLayout()
         channels_col.setSpacing(10)
 
+        enabled_channels = notification_channels.load_enabled_channels()
+
         self._email_card = ChannelRow(
             "Email", "notification.svg",
             [("Email Address", "you@example.com")],
             "Test Notification", t,
-            default_enabled=True,   # live channel like System — on by default
+            default_enabled=enabled_channels["email"],
             # Prefilled with the logged-in user's own email — real notifications
             # always go there regardless of this field; it only controls where
             # the Test Notification button sends, so it can be pointed anywhere.
@@ -316,7 +318,8 @@ class NotificationsScreen(QWidget):
             "Telegram", "notification.svg",
             [("Bot Token", "110201543:AAHdqTcvCH1vGWJxfSeofSAsGK5PALDsaw"),
              ("Chat ID",   "-100123456789")],
-            "Test Notification", t
+            "Test Notification", t,
+            default_enabled=enabled_channels["telegram"],
         )
         self._telegram_card.connect_toggle(self._on_toggle_changed)
 
@@ -324,7 +327,7 @@ class NotificationsScreen(QWidget):
             "System", "notification.svg",
             [],   # nothing to configure — delivered via the local OS tray
             "Test Notification", t,
-            default_enabled=True,   # live channel — on by default, unlike Telegram
+            default_enabled=enabled_channels["system"],
         )
         self._system_card.connect_toggle(self._on_toggle_changed)
         self._system_card.connect_send(self._on_test_system_notification)
@@ -437,6 +440,10 @@ class NotificationsScreen(QWidget):
         self._system_status_lbl.setText(f"● System: {'Enabled' if sys_on else 'Disabled'}")
         self._system_status_lbl.setStyleSheet(
             f"color: {t.get('accent') if sys_on else t.get('text_secondary')};"
+        )
+
+        notification_channels.save_enabled_channels(
+            {"system": sys_on, "email": email_on, "telegram": tg_on}
         )
 
         active = sum(1 for c in self._configs if c.system_enabled)

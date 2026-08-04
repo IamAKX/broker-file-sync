@@ -55,6 +55,7 @@ class MainWindow(QMainWindow):
         from screens.data_import import DataImportScreen
         from screens.config_editor import ConfigEditorScreen
         from screens.notifications import NotificationsScreen
+        from screens.live_alerts import LiveAlertsScreen
         from screens.profile import ProfileScreen
         from screens.strategy_builder import StrategyBuilderScreen
         from screens.historic_upload import HistoricUploadScreen
@@ -107,6 +108,7 @@ class MainWindow(QMainWindow):
             ("config_editor",    ConfigEditorScreen(self._controller)),
             ("strategy_builder", strategy_builder),
             ("notifications",    NotificationsScreen(self._controller)),
+            ("live_alerts",      LiveAlertsScreen(self._controller)),
             ("profile",          ProfileScreen(self._controller)),
             ("historic_upload",  HistoricUploadScreen(self._controller)),
             ("formula_builder",  FormulaBuilderScreen(self._controller)),
@@ -299,9 +301,18 @@ class MainWindow(QMainWindow):
         if strategy_builder is not None:
             strategy_builder.reload_strategies()
 
+        from services.strategy_alerts import config_store as alerts_config_store
+        from services.strategy_alerts import state_store as alerts_state_store
+        alerts_config_store.reload_cache()
+        alerts_state_store.reset_for_user_switch()
+
         notifications = self._screens.get("notifications")
         if notifications is not None:
             notifications.reload_configs()
+
+        live_alerts = self._screens.get("live_alerts")
+        if live_alerts is not None:
+            live_alerts.reload_alerts()
 
         formula_builder = self._screens.get("formula_builder")
         if formula_builder is not None:

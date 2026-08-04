@@ -74,22 +74,60 @@ Each broker exports Excel files in a different format. The file reader handles t
 
 ---
 
-## Column Filter
+## Toolbar
 
-Click **⊞ Columns** in the LMV toolbar to show/hide columns:
+The LMV toolbar has five controls: **⊞ Filters**, **⚡ Strategies**, **⭳ Export**,
+a value-change highlight-color swatch, and a reset button (clears all filters,
+turns off all strategies). There is no separate "Columns" button — it's nested
+inside **⊞ Filters** (see below). A previous "Stop" button was removed as unused.
 
-- Search by column name
-- Toggle individual columns
-- **Select All / Clear All** buttons
-- Badge shows count of hidden columns
+## Filters Panel
 
----
+Click **⊞ Filters** to open a single unified popup covering everything that can
+narrow down the table:
+
+- **Columns** — opens the column visibility picker: search by name, toggle
+  individual columns, **Select All / Clear All**, with a badge showing how many
+  columns are currently hidden.
+- **Category** — filter rows to strategies filed under a specific Strategy
+  Builder category (`All` / `Daily` / `Weekly` / `Monthly` / `Common` / custom).
+- **Sector** — filter rows to a single sector (from the sector/stock mapping in
+  Config Editor), or `All`.
+- **Clear all** — appears once any filter is active, resets Columns/Category/Sector
+  together in one click.
 
 ## Strategy Columns
 
-Click **⚡ Strategies** in the LMV toolbar to choose which strategies apply. Active strategy columns appear on the right side of the table with a tinted header.
+Click **⚡ Strategies** to choose which strategies apply — **only strategies
+toggled Active in Strategy Builder appear in this picker** (an inactive strategy
+never shows up here, so there's nothing to accidentally enable). Active strategy
+columns appear on the right side of the table with a tinted header.
 
 Conditional formatting rules are evaluated per cell — the cell background changes to the rule's color with auto-contrasted text (luminance check ensures readability).
+
+If a strategy also has [Strategy Notifications](strategy-notifications.md)
+enabled, every LMV refresh also runs that strategy's trigger/lifecycle
+evaluation and can push System/Email alerts — this happens as part of the same
+render pass described below, so notifications only fire while LMV is open.
+
+---
+
+## Opening Range Columns
+
+Two extra columns, `OR.High` / `OR.Low`, can appear in the table — the highest
+High and lowest Low captured during the configured opening-range window (see
+**Jobs** screen for the capture time). These are pulled from the backend's saved
+opening-range snapshot for the day, not computed locally from the live feed.
+
+---
+
+## LMV Daily Snapshots
+
+Beyond the live view itself, **Data → LMV Upload** lets you save the current LMV
+grid (or a past one) to the backend as a dated snapshot, and **LMV Snapshot
+Viewer** lets you browse previously saved snapshots — useful for keeping a
+historical record of exactly what the merged table showed on a given day,
+independent of the raw historic-value uploads.
 
 ---
 
@@ -97,14 +135,15 @@ Conditional formatting rules are evaluated per cell — the cell background chan
 
 | Platform | Trigger | Interval |
 |----------|---------|----------|
-| Windows (COM) | QTimer poll | Every 1 second |
+| Windows (COM) | QTimer poll | 200ms while data is actively changing, backing off to 1000ms after a quiet spell (adaptive) |
 | macOS / Linux | File change event | Immediate + 300ms debounce |
 
-On Windows, every poll cycle:
-1. Reads all rows from `Streaming_Stock_Watch` sheet in the open Excel instance
-2. Re-applies active strategies
-3. Re-renders the table
-4. Updates the status bar timestamp
+On every poll/refresh cycle:
+1. **Windows**: reads all rows from the `Streaming_Stock_Watch` sheet in the open Excel instance (macOS/Linux: reads whatever changed on disk)
+2. Re-applies active strategies (formula columns + conditional formatting) — on a worker thread, not the GUI thread
+3. Runs strategy-notification evaluation for any strategy with alerts enabled
+4. Re-renders the table
+5. Updates the status bar timestamp
 
 ---
 

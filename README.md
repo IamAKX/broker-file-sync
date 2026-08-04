@@ -11,11 +11,15 @@
 
 ## ✨ Features
 
+- 🔐 **Accounts & sync** — sign up / log in against the Broker Sync backend; strategies, formula variables, settings, and theme all sync to your account, not just this machine
 - 📥 **Multi-broker import** — drag-and-drop Excel exports from Sharekhan, ReliableSoftware, and NiftyInvest
-- 🔀 **Live Master View** — real-time merged table that auto-refreshes when files change on disk
+- 🔀 **Live Master View** — real-time merged table that auto-refreshes when files change on disk, with Sector filtering and Opening Range High/Low columns
 - 🧮 **Strategy Builder** — visual formula builder with conditional formatting and color rules
+- 🔔 **Strategy Notifications** — turn a strategy into a live trade-signal alert: debounced entry trigger, Stop Loss/Target/Trailing Exit lifecycle tracking, delivered via System tray or Email — see [docs/strategy-notifications.md](docs/strategy-notifications.md)
+- 🗂 **Live Alerts** — a log of every open and resolved signal, filterable by recency
+- 📅 **Historic data & LMV snapshots** — upload daily historic values and full LMV snapshots to the backend, browse them back, gated by a Market Holidays calendar so a holiday's data is never mistakenly saved
+- 📊 **Formula Stats** — aggregate a strategy's formula columns over N historic days
 - ⚙️ **Config Editor** — manage sector mappings, script names, and column order
-- 🔔 **Notifications** — Email and Telegram alerts for trade triggers
 - 🌗 **Dark / Light theme** — toggle anytime, all screens update instantly
 - 🖥️ **Cross-platform** — macOS and Windows, HiDPI aware
 
@@ -28,6 +32,7 @@
 | [🚀 Setup & Installation](docs/setup.md) | Python setup, dependencies, running the app |
 | [🏗️ Architecture](docs/architecture.md) | Project structure, MVC design, data flow |
 | [🧮 Strategy Builder](docs/strategy-builder.md) | Formula syntax, functions, conditional formatting |
+| [🔔 Strategy Notifications](docs/strategy-notifications.md) | Trade-signal alerts: trigger, debounce, metrics, lifecycle, channels |
 | [🔄 Live Master View](docs/live-master-view.md) | File watcher, merge logic, column filter |
 | [🎨 Theming & Fonts](docs/theming.md) | Theme tokens, font scale constants, customisation |
 | [🧪 Testing](docs/testing.md) | Running tests, CI pipeline, writing new tests |
@@ -70,36 +75,58 @@ python main.py
 ```
 broker-file-sync/
 ├── main.py               # Entry point, DPI + font setup
-├── app.py                # AppController (lifecycle)
-├── app_window.py         # MainWindow, screen routing
-├── theme.py              # ThemeManager, global stylesheet
+├── app.py                # AppController (lifecycle, scheduler, notifier)
+├── app_window.py         # MainWindow, screen routing, per-user reload
+├── theme.py              # ThemeManager, global stylesheet + QPalette
 ├── font_scale.py         # SMALL / MEDIUM / LARGE constants
 ├── config_defaults.py    # 216-row stock/column mappings
 │
+├── api/                  # Backend HTTP client (see broker-sync-api)
+│   ├── client.py             # requests.Session wrapper, token refresh
+│   ├── auth_api.py            # login/signup/theme
+│   ├── token_store.py         # in-memory + persisted JWT
+│   ├── strategies_api.py, holidays_api.py, settings_api.py,
+│   │   formula_variables_api.py, historic_api.py, opening_range_api.py,
+│   │   lmv_snapshot_api.py, notifications_api.py   # one module per resource
+│   └── config.py, endpoints.py, exceptions.py, api_logger.py
+│
 ├── screens/              # One file per screen
-│   ├── login.py
-│   ├── signup.py
-│   ├── dashboard.py
-│   ├── data_import.py
-│   ├── live_viewer.py
-│   ├── config_editor.py
-│   ├── strategy_builder.py
-│   ├── notifications.py
-│   └── profile.py
+│   ├── login.py, signup.py, dashboard.py, data_import.py
+│   ├── live_viewer.py                        # Live Master View window
+│   ├── config_editor.py, strategy_builder.py
+│   ├── notifications.py, live_alerts.py, profile.py
+│   ├── historic_upload.py, historic_viewer.py
+│   ├── lmv_upload.py, lmv_snapshot_viewer.py
+│   ├── formula_builder.py, formula_editor.py, formula_field_editor.py,
+│   │   formula_stats.py
+│   └── holidays.py, jobs.py
 │
 ├── components/           # Reusable widgets
-│   ├── sidebar.py
-│   └── topbar.py
+│   ├── sidebar.py, topbar.py
+│   └── column_filter_popup.py, error_popup.py, update_dialog.py
 │
 ├── services/             # Business logic
-│   ├── file_reader.py
-│   ├── master_generator.py
-│   ├── watcher.py
-│   ├── strategy_engine.py
-│   └── strategy_store.py
+│   ├── file_reader.py, master_generator.py, watcher.py   # import + merge
+│   ├── strategy_engine.py, strategy_store.py             # Strategy Builder
+│   ├── formula_engine.py, formula_stats_engine.py, formula_tokens.py,
+│   │   formula_variable_store.py                          # Formula Builder
+│   ├── strategy_alerts/       # Strategy Notifications engine
+│   │   ├── engine.py              # trigger/debounce/lifecycle state machine
+│   │   ├── config_store.py        # per-strategy notification config (backend-synced)
+│   │   ├── state_store.py         # open signals + alert history (local)
+│   │   └── models.py, messages.py
+│   ├── notifications/         # Delivery channels
+│   │   ├── manager.py             # NotificationService facade
+│   │   └── channels/              # system.py, email.py, telegram.py (stub)
+│   ├── notification_channels.py, trigger_config.py    # channel/schedule config
+│   ├── scheduler.py, scheduled_jobs.py                # background jobs (tray-resident)
+│   ├── config_store.py, historic_lmv_merge.py, live_formula.py, live_merge.py,
+│   │   lmv_export.py, trading_calendar.py, update_checker.py, tray.py,
+│   │   single_instance.py, autostart.py, error_logging.py
+│   └── broker_db_source.py, com_reader.py, external_import_source.py
 │
 ├── assets/icons/         # SVG icons
-├── tests/                # pytest test suite
+├── tests/                # pytest test suite (59 files, see docs/testing.md)
 └── docs/                 # Extended documentation
 ```
 

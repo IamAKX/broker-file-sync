@@ -18,6 +18,8 @@ _ICON_BY_LEVEL = {
 
 
 class SystemChannel(NotificationChannel):
+    CHANNEL_ID = "system"
+
     def __init__(self, tray_icon: QSystemTrayIcon, sound: AlertSound):
         self._tray = tray_icon
         self._sound = sound

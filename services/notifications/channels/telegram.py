@@ -12,5 +12,7 @@ from services.notifications.payload import NotificationPayload
 
 
 class TelegramChannel(NotificationChannel):
+    CHANNEL_ID = "telegram"
+
     def send(self, payload: NotificationPayload) -> None:
         raise NotImplementedError("Telegram notifications are not implemented yet")

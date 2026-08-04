@@ -1343,6 +1343,44 @@ class LiveViewerWindow(QWidget):
             return ""
         return str(val)
 
+    def _run_strategy_alert_checks(self, active_strategies: list, all_dicts: list,
+                                    sym_index: dict, agg_cache: dict) -> None:
+        """Evaluates every strategy with an enabled notification config
+        against this render pass's rows (services.strategy_alerts.engine),
+        reusing the same all_dicts/sym_index/agg_cache just built for
+        conditional-formatting colors — cheap relative to apply_strategies's
+        own already-budgeted per-tick cost, since only strategies with a
+        notification config actually configured pay anything extra. Runs on
+        the GUI thread (unlike apply_strategies, which runs on the worker
+        thread) since delivery itself — the OS tray, a sound effect — needs
+        to be on the GUI thread anyway; see the plan this feature followed
+        for why that trade-off was made deliberately for a first version.
+        """
+        from services.strategy_alerts import config_store as alerts_config_store
+        from services.strategy_alerts import state_store as alerts_state_store
+        from services.strategy_alerts.engine import evaluate_tick
+
+        configs = alerts_config_store.load_configs()
+        if not configs:
+            return
+        events = evaluate_tick(active_strategies, configs, all_dicts, sym_index, agg_cache)
+        if not events:
+            return
+
+        alerts_state_store.flush()
+        notifier = getattr(self._controller, "_notifier", None)
+        if notifier is None:
+            return
+        from services import notification_channels
+
+        enabled_channels = notification_channels.enabled_channel_ids()
+        for event in events:
+            notifier.notify(
+                event.payload.get("title", event.strategy_name),
+                event.payload.get("message", ""),
+                channels=enabled_channels,
+            )
+
     def _populate_table(self, data: list[list], changed_keys=set(), precomputed_disp=None):
         """
         Render *data* into the table.
@@ -1413,6 +1451,8 @@ class LiveViewerWindow(QWidget):
         # Symbol -> row-dict lookup for "[Col of Symbol]" fmt-rule conditions,
         # built once per render pass instead of once per row.
         sym_index = build_symbol_index(all_dicts)
+
+        self._run_strategy_alert_checks(active_strategies, all_dicts, sym_index, agg_cache)
 
         # ── Fast path ───────────────────────────────────────────────────────
         # When only cell values changed (same headers, same row count, same

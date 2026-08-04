@@ -106,4 +106,13 @@ Multiple strategies can be active at the same time. Each active strategy appends
 
 ---
 
+## Notifications
+
+Below Columns, each strategy also has a **Notifications** section for turning it
+into a live trade-signal alert (entry alert, then Target/Stop Loss/Trailing Exit
+tracking until the signal resolves) — see
+[🔔 Strategy Notifications](strategy-notifications.md) for the full setup guide.
+
+---
+
 ← [Back to README](../README)

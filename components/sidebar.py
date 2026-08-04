@@ -27,6 +27,7 @@ NAV_ITEMS = [
     ("config_editor",    "Config Editor",   "config_editor.svg"),
     ("strategy_builder", "Strategy Builder","strategy_builder.svg"),
     ("notifications",    "Notifications",   "notification.svg"),
+    ("live_alerts",      "Live Alerts",     "database.svg"),
     ("profile",          "My Profile",      "profile.svg"),
 ]
 

@@ -22,7 +22,7 @@ If you just want to run the app without installing Python or building anything y
 ### macOS
 
 1. Go to the [Releases page](https://github.com/IamAKX/broker-file-sync/releases)
-2. Download `BrokerFileSync-mac.zip` from the latest release
+2. Download `BrokerFileSync-macos.zip` from the latest release
 3. Unzip it — you'll get `BrokerFileSync.app`
 4. Drag it to your **Applications** folder (optional but recommended)
 5. Double-click to launch

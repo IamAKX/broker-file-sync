@@ -740,6 +740,31 @@ def test_strategy_editor_has_lmv_data_attrs(qapp):
     assert hasattr(editor, "_all_lmv_data")
 
 
+def test_strategy_editor_content_is_page_scrollable(qapp):
+    # Regression guard: Row Filter + Columns + Notifications together can
+    # exceed the right panel's height (never itself wrapped in a scroll
+    # area), so the editor's own content must be wrapped in one QScrollArea
+    # rather than having Columns and Notifications both fight for "the rest
+    # of the space" via stretch factors — that's what previously collapsed
+    # both sections below their minimum size and rendered them overlapping.
+    #
+    # Exactly one — not one outer plus cramped fixed-height inner scroll
+    # areas for Columns/Metrics on top of it, which is its own regression
+    # (a second, much shorter scrollbar nested inside the first).
+    from PySide6.QtWidgets import QScrollArea
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyEditor
+    s = new_strategy("T")
+    editor = StrategyEditor(s, [], None)
+
+    scrolls = editor.findChildren(QScrollArea)
+    assert len(scrolls) == 1, f"expected exactly one QScrollArea in the editor, found {len(scrolls)}"
+    outer = scrolls[0]
+    assert outer.widget() is not None
+    assert outer.widget().isAncestorOf(editor._col_inner)
+    assert outer.widget().isAncestorOf(editor._notif_section)
+
+
 def test_fmt_rule_condition_has_edit_button(qapp):
     from services.strategy_store import new_column, new_fmt_rule
     from screens.strategy_builder import ColumnEditorDialog
