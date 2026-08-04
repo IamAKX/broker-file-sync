@@ -115,4 +115,52 @@ tracking until the signal resolves) — see
 
 ---
 
+## Historic (N days) Aggregates
+
+`AVG_DAYS`, `MIN_DAYS`, `MAX_DAYS`, `SUM_DAYS`, `COUNT_DAYS`, `STDDEV_DAYS`,
+`MEDIAN_DAYS`, `VARIANCE_DAYS`, and `RANGE_DAYS` are functions in the same
+formula language as everything else — right there in the Expression Editor's
+Functions list, under "Historic (per stock, over the last N trading days)".
+They work exactly like `AVG_ALL`/`SUM_ALL`/etc. except aggregating over
+*historic days* for the *same stock* instead of across this tick's rows:
+
+```
+AVG_DAYS([High], 20)          — 20-day average High for this stock
+MIN_DAYS([Low], 10)           — 10-day low
+AVG_DAYS([MyComputedCol], 20) — 20-day average of another of THIS strategy's
+                                 own columns — any custom formula, since a
+                                 column can already be any custom formula
+```
+
+Because it's a formula function, not a separate feature, it works anywhere a
+formula already works — a column's value, a conditional-formatting rule's
+condition, a Notifications trigger condition, risk:reward, or a metric — with
+no extra step. Combine it with other operators normally, e.g.
+`[Current] > AVG_DAYS([High], 20)`.
+
+**This is the one thing about it that isn't like every other formula
+function:** it can't be computed from the row/sheet data alone — it needs a
+historic-snapshot fetch from the backend (the same one the Data menu's
+**Formula Stats** screen uses). So it does **not** recompute on every live
+tick like a normal column does. It (re)computes:
+- once when Live Master View first loads,
+- again whenever you toggle a strategy on/off or change the category filter,
+- or on demand via the **↻ N-Day Data** toolbar button.
+
+Between those, the column just holds its last-computed value — a live price
+crossing an `AVG_DAYS(...)` threshold updates correctly (the column's value is
+stable, only the live side of the comparison moves), but the average itself
+won't drift more current than that. While editing a formula that uses one of
+these functions, **Compile & Test** can't run the real historic fetch either
+— it reports a placeholder result and says so, rather than blocking Save.
+
+**Click any cell in one of these columns in Live Master View** to see the
+individual day-by-day values behind it for that stock — the same breakdown
+the Data menu's Formula Stats screen shows on right-click, just one click
+away since the stock and column are already known from where you clicked. A
+strategy column with an ordinary (non-historic) formula isn't clickable this
+way.
+
+---
+
 ← [Back to README](../README)

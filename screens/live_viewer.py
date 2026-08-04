@@ -184,17 +184,20 @@ class _LiveDataWorker(QObject):
         # unrelated market-data activity.
         self.opening_range_ready.emit()
 
-    def recompute(self, headers: list, data: list, strategies: list) -> None:
+    def recompute(self, headers: list, data: list, strategies: list,
+                 day_history: dict | None = None) -> None:
         """Re-run apply_strategies() on already-fetched data (no new read) —
         used for the interactive strategy-toggle / category-change path so
         the O(rows x strategies x columns) formula evaluation runs off the
         GUI thread instead of blocking it synchronously (see
-        LiveViewerWindow._recompute_display)."""
+        LiveViewerWindow._recompute_display). ``day_history`` is a snapshot
+        (see LiveViewerWindow._day_history) resolving any _DAYS historic
+        aggregate functions — never fetched here, just forwarded."""
         try:
             active = [s for s in strategies if s.get("active")]
             if active:
                 from services.strategy_engine import apply_strategies
-                disp_headers, disp_data = apply_strategies(active, headers, data)
+                disp_headers, disp_data = apply_strategies(active, headers, data, day_history)
             else:
                 disp_headers, disp_data = headers, data
         except Exception as exc:
@@ -202,7 +205,8 @@ class _LiveDataWorker(QObject):
             return
         self.recompute_result.emit(disp_headers, disp_data)
 
-    def do_read(self, force_slow: bool, settle_s: float, strategies: list) -> None:
+    def do_read(self, force_slow: bool, settle_s: float, strategies: list,
+               day_history: dict | None = None) -> None:
         if not self._started:
             try:
                 self._reader.start()
@@ -225,7 +229,7 @@ class _LiveDataWorker(QObject):
             active = [s for s in strategies if s.get("active")]
             if active:
                 from services.strategy_engine import apply_strategies
-                disp_headers, disp_data = apply_strategies(active, headers, data)
+                disp_headers, disp_data = apply_strategies(active, headers, data, day_history)
             else:
                 disp_headers, disp_data = headers, data
         except Exception as exc:
@@ -792,8 +796,8 @@ class LiveViewerWindow(QWidget):
     """
 
     # Emitted from the GUI thread to drive work on the worker thread.
-    _request_read      = Signal(bool, float, list)  # force_slow, settle_seconds, strategies
-    _request_recompute = Signal(list, list, list)   # headers, data, strategies
+    _request_read      = Signal(bool, float, list, dict)  # force_slow, settle_seconds, strategies, day_history
+    _request_recompute = Signal(list, list, list, dict)   # headers, data, strategies, day_history
     _request_shutdown  = Signal()              # release COM on the worker thread
     _request_or_refresh = Signal()             # re-pull today's Opening Range snapshot
     data_updated       = Signal(list, list)    # headers, data — for downstream consumers
@@ -828,6 +832,14 @@ class LiveViewerWindow(QWidget):
         self._visible_cols: set  = set()   # populated after first load
         self._strategies: list   = []      # injected by DataImportScreen
         self._selected_category: str = "All"
+        self._strat_col_defs: list = []    # set each render — see _populate_table
+        self._base_col_count: int  = 0     # columns >= this are strategy-formula columns
+        # {(col_name, days): {symbol: {agg_name: value}}} — resolves _DAYS
+        # historic aggregate functions (services.strategy_engine). Recomputed
+        # on load/strategy-toggle/manual refresh, NOT every live tick (each
+        # refresh is a historic-snapshot network fetch) — see
+        # _refresh_day_history.
+        self._day_history: dict = {}
 
         # Column sort — a snapshot of row order (by "Scrip Name") captured
         # at the moment the user clicks a header, not a live re-sort every
@@ -942,6 +954,25 @@ class LiveViewerWindow(QWidget):
         )
         self._strat_btn.clicked.connect(self._show_strategy_picker)
 
+        # Manually re-fetch _DAYS historic aggregate columns (see
+        # _refresh_day_history) — those never recompute on a live tick, only
+        # on load/strategy-toggle/category-change, so this is the way to
+        # pull a fresher N-day value without one of those happening.
+        self._day_history_btn = QPushButton("↻  N-Day Data")
+        self._day_history_btn.setFixedHeight(30)
+        self._day_history_btn.setFont(font_scale.font(font_scale.SMALL, False))
+        self._day_history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._day_history_btn.setToolTip(
+            "Re-fetch AVG_DAYS/MIN_DAYS/etc. historic aggregate columns — "
+            "these don't update on every live tick like other columns do."
+        )
+        self._day_history_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {text_s};"
+            f"border: 1px solid {divclr}; border-radius: 4px; padding: 0 12px; }}"
+            f"QPushButton:hover {{ border-color: {accent}; color: {accent}; }}"
+        )
+        self._day_history_btn.clicked.connect(self._refresh_day_history)
+
         self._export_btn = QPushButton("⭳  Export")
         self._export_btn.setFixedHeight(30)
         self._export_btn.setFont(font_scale.font(font_scale.SMALL, False))
@@ -985,6 +1016,8 @@ class LiveViewerWindow(QWidget):
         top.addSpacing(8)
         top.addWidget(self._strat_btn)
         top.addSpacing(8)
+        top.addWidget(self._day_history_btn)
+        top.addSpacing(8)
         top.addWidget(self._export_btn)
         top.addSpacing(8)
         top.addWidget(self._highlight_btn)
@@ -1015,6 +1048,7 @@ class LiveViewerWindow(QWidget):
         hdr.setSortIndicatorShown(True)
         hdr.sectionClicked.connect(self._on_header_clicked)
         self._table.setShowGrid(True)
+        self._table.cellClicked.connect(self._on_cell_clicked)
         root.addWidget(self._table, 1)
 
         self._setup_frozen_column()
@@ -1191,6 +1225,11 @@ class LiveViewerWindow(QWidget):
             # bad initial render would wait forever for a render pass that
             # already happened (see set_strategies below).
             self._initial_render_done = True
+        # Deferred (not inline above) so the just-built table paints first —
+        # this is a historic-snapshot network fetch, and _DAYS columns are
+        # rare enough that most windows pay nothing here (collect_day_requests
+        # returns empty, _refresh_day_history is a no-op recompute).
+        QTimer.singleShot(0, self._refresh_day_history)
 
     def _inject_sector(self, headers: list, data: list) -> tuple:
         """Prepend a Sector column to headers and every data row."""
@@ -1223,11 +1262,50 @@ class LiveViewerWindow(QWidget):
         # Snapshot, not a live reference — the worker thread must never touch
         # GUI-thread-owned state concurrently.
         strategies_snapshot = list(self._filtered_strategies())
-        self._request_read.emit(force, settle, strategies_snapshot)
+        self._request_read.emit(force, settle, strategies_snapshot, dict(self._day_history))
 
     def _on_read_failed(self, msg: str):
         self._refreshing = False
         self._status_lbl.setText(msg)
+
+    def _refresh_day_history(self):
+        """Recompute self._day_history — the lookup _DAYS historic aggregate
+        functions (services.strategy_engine) resolve against — from scratch,
+        then re-render. A historic-snapshot network fetch per distinct N
+        days referenced across active strategies' formulas (columns, row
+        filter, fmt-rule conditions) and their notification configs (trigger
+        condition, risk:reward, metrics), so this runs on initial load, on a
+        strategy toggle, and via the manual "↻ N-Day Data" action — never on
+        every live tick, unlike everything else this window recomputes.
+        Synchronous (like the Data menu's own Formula Stats screen) rather
+        than routed through the worker thread — acceptable since it only
+        runs on those occasions, not per tick."""
+        from services.strategy_engine import collect_day_requests
+        from services.formula_stats_engine import compute_day_history
+        from services.strategy_alerts import config_store as alerts_config_store
+        from api import lmv_snapshot_api
+        from api.exceptions import ApiError, NetworkError
+
+        active = [s for s in self._filtered_strategies() if s.get("active")]
+        notif_configs = alerts_config_store.load_configs()
+        requests = collect_day_requests(active, notif_configs)
+        if not requests:
+            # Common case (no _DAYS functions anywhere) — cheap scan, no
+            # network call, and nothing to re-render if the cache was
+            # already empty (callers that also need a normal-column
+            # recompute, e.g. a strategy toggle, trigger their own).
+            if self._day_history:
+                self._day_history = {}
+                self._recompute_display()
+            return
+        try:
+            self._day_history = compute_day_history(requests, lmv_snapshot_api.get_range)
+        except (ApiError, NetworkError) as exc:
+            # Keep whatever was cached before — a failed refresh shouldn't
+            # blank out a previously-good one.
+            self._status_lbl.setText(f"N-day column refresh failed: {exc}")
+            return
+        self._recompute_display()
 
     def _recompute_display(self):
         """Re-render the table after a strategy toggle or category change.
@@ -1260,6 +1338,7 @@ class LiveViewerWindow(QWidget):
         self._request_recompute.emit(
             list(self._headers), [list(r) for r in self._data],
             [dict(s) for s in self._filtered_strategies()],
+            dict(self._day_history),
         )
 
     def _on_recompute_ready(self, disp_headers: list, disp_data: list):
@@ -1363,7 +1442,8 @@ class LiveViewerWindow(QWidget):
         configs = alerts_config_store.load_configs()
         if not configs:
             return
-        events = evaluate_tick(active_strategies, configs, all_dicts, sym_index, agg_cache)
+        events = evaluate_tick(active_strategies, configs, all_dicts, sym_index,
+                               agg_cache, day_history=self._day_history)
         if not events:
             return
 
@@ -1410,7 +1490,7 @@ class LiveViewerWindow(QWidget):
         elif active_strategies:
             # Apply active strategies — may extend headers and data
             disp_headers, disp_data = apply_strategies(
-                active_strategies, self._headers, data
+                active_strategies, self._headers, data, self._day_history
             )
         else:
             disp_headers, disp_data = self._headers, data
@@ -1442,6 +1522,13 @@ class LiveViewerWindow(QWidget):
         for s in active_strategies:
             for col in s.get("columns", []):
                 strat_col_defs.append(col)
+
+        # Stashed for _on_cell_clicked (columns >= base_col_count are
+        # strategy-formula columns, clickable for a last-N-days popup) —
+        # this render pass's values are current until the next one replaces
+        # them, which is exactly the window a click needs to stay accurate.
+        self._strat_col_defs  = strat_col_defs
+        self._base_col_count  = base_col_count
 
         all_dicts = [dict(zip(disp_headers, row)) for row in disp_data]
         # Memoizes SUM_ALL/AVG_ALL/etc. fmt-rule aggregates for this render
@@ -1498,7 +1585,7 @@ class LiveViewerWindow(QWidget):
             row_dict = all_dicts[r]
             row_colors = get_row_fmt_colors(
                 strat_col_defs, row, base_col_count, row_dict, all_dicts,
-                agg_cache, sym_index)
+                agg_cache, sym_index, self._day_history)
             for c, val in enumerate(row):
                 item = QTableWidgetItem(self._fmt_cell(val))
                 item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
@@ -1571,6 +1658,95 @@ class LiveViewerWindow(QWidget):
             hdr.moveSection(frm, to)
         finally:
             self._programmatic_reorder = False
+
+    # ── Strategy-column history popup ───────────────────────────────────────
+
+    def _on_cell_clicked(self, row: int, col: int):
+        """Click a strategy column cell whose formula references a _DAYS
+        historic aggregate function (AVG_DAYS, MIN_DAYS, ...) to see that
+        stock's day-by-day values behind the first such reference — no
+        dedicated "day-aggregate column type" is needed since AVG_DAYS(...)
+        IS the column's own formula (services.strategy_engine's "Historic
+        (N days) aggregates"). Any other strategy column, or a native sheet
+        column, isn't clickable this way."""
+        idx = col - self._base_col_count
+        if idx < 0 or idx >= len(self._strat_col_defs):
+            return
+        col_def = self._strat_col_defs[idx]
+
+        from services.strategy_engine import scan_day_funcs
+        day_refs = scan_day_funcs(col_def.get("formula", []))
+        if not day_refs:
+            return
+        source_col, days = day_refs[0]
+
+        scrip_col = self._headers.index("Scrip Name") if "Scrip Name" in self._headers else -1
+        if scrip_col < 0:
+            return
+        symbol_item = self._table.item(row, scrip_col)
+        if symbol_item is None or not symbol_item.text():
+            return
+        self._open_formula_history(symbol_item.text(), source_col, days,
+                                   col_def.get("name", ""))
+
+    def _resolve_day_source_formula(self, col_name: str) -> list:
+        """Mirrors services.strategy_engine.collect_day_requests's own
+        resolution: if *col_name* names one of the active strategies' own
+        columns, use ITS formula — so "any custom formula over N days"
+        drills into the real formula behind AVG_DAYS([MyComputedCol], 20),
+        not a literal raw column named "MyComputedCol". Otherwise it's
+        treated as a raw sheet/historic column reference."""
+        for strat in self._filtered_strategies():
+            if not strat.get("active"):
+                continue
+            for c in strat.get("columns", []):
+                if c.get("name") == col_name:
+                    return c.get("formula", [])
+        return [{"type": "col", "value": col_name}]
+
+    def _open_formula_history(self, symbol: str, source_col_name: str,
+                              days: int, display_name: str):
+        from components.formula_stats_panel import FormulaStatsPanel, apply_dialog_bg
+
+        t = self._theme
+        formula = self._resolve_day_source_formula(source_col_name)
+        dlg = QDialog(self)
+        dlg.setWindowTitle(f"{symbol} — {display_name}")
+        apply_dialog_bg(dlg, t)
+        dlg.resize(560, 520)
+        lay = QVBoxLayout(dlg)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+
+        desc = QLabel(
+            f'Last {days} day(s) of "{source_col_name}" behind {display_name} '
+            f"for {symbol}, computed from saved historic data. Right-click "
+            f"the row for the day-by-day values."
+        )
+        desc.setWordWrap(True)
+        desc.setFont(font_scale.font(font_scale.SMALL, False))
+        desc.setStyleSheet(f"color:{t.get('text_secondary') if t else '#8b949e'};")
+        lay.addWidget(desc)
+
+        panel = FormulaStatsPanel(
+            t, columns=[{"name": source_col_name, "formula": formula}],
+            symbol_filter=symbol, initial_days=days, parent=dlg,
+        )
+        lay.addWidget(panel, 1)
+        # Click-through convenience: the stock and column are already known
+        # from the click, so run immediately instead of waiting on a second
+        # Compute click.
+        panel.compute()
+
+        close_row = QHBoxLayout()
+        close_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        close_btn.clicked.connect(dlg.accept)
+        close_row.addWidget(close_btn)
+        lay.addLayout(close_row)
+
+        dlg.exec()
 
     # ── Column sort ───────────────────────────────────────────────────────────
 
@@ -1825,7 +2001,7 @@ class LiveViewerWindow(QWidget):
             row_dict = all_dicts[r]
             row_colors = get_row_fmt_colors(
                 strat_col_defs, row, base_col_count, row_dict, all_dicts,
-                agg_cache, sym_index)
+                agg_cache, sym_index, self._day_history)
             for c, val in enumerate(row):
                 item = self._table.item(r, c)
                 if item is None:
@@ -1924,6 +2100,10 @@ class LiveViewerWindow(QWidget):
         # Don't reset _visible_cols here — that would undo any column filter
         # the user has applied. _populate_table already extends _visible_cols
         # to cover any new strategy columns while leaving the rest untouched.
+        # The category filter changes which strategies count as "active" for
+        # _filtered_strategies() (see collect_day_requests's caller), so a
+        # _DAYS request set can change here too.
+        self._refresh_day_history()
         self._recompute_display()
 
     def _show_strategy_picker(self):
@@ -1945,6 +2125,12 @@ class LiveViewerWindow(QWidget):
         # Don't reset _visible_cols here — that would undo any column filter
         # the user has applied. _populate_table already extends _visible_cols
         # to cover any new strategy columns while leaving the rest untouched.
+        # A toggle can change which _DAYS requests are needed (a newly-active
+        # strategy referencing one, or the last one going inactive) — refresh
+        # that cache first; it recomputes display itself when something
+        # actually changed, and the plain call below still covers every
+        # ordinary (non-historic) column regardless.
+        self._refresh_day_history()
         self._recompute_display()
 
     def _update_strat_btn_label(self):

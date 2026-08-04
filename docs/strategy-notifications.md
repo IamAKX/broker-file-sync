@@ -123,6 +123,13 @@ reference:
 a trigger condition isn't "owned" by one column, so there's no single self-value
 for it to mean.
 
+A trigger condition can also use a historic aggregate function —
+`[Current] > AVG_DAYS([High], 20)` fires when price breaks above its own
+20-day average High. See [🧮 Strategy Builder → Historic (N days)
+Aggregates](strategy-builder.md#historic-n-days-aggregates) for the full
+function list and, importantly, how its refresh cadence differs from every
+other column (not live every tick).
+
 ---
 
 ## ⏱ Debounce (minutes)
@@ -187,6 +194,13 @@ A metric's formula can reference:
 - A fixed number (e.g. Stop Loss = a constant price)
 - Any LMV column (e.g. an ATR, Williams %R, or Fibonacci-level column you've
   already built via Formula Builder / this strategy's own columns)
+- A historic aggregate function, e.g. `AVG_DAYS([Low], 10)` as a trailing stop
+  loss — see [🧮 Strategy Builder → Historic (N days)
+  Aggregates](strategy-builder.md#historic-n-days-aggregates). Its caveat
+  applies here too: a `trailing_exit` metric re-evaluates every tick, but an
+  `AVG_DAYS(...)` inside it only actually changes when the historic data
+  itself refreshes (load/strategy-toggle/**↻ N-Day Data**) — it won't drift
+  intraday the way a live-data trailing formula would.
 - Any combination via the same formula builder used elsewhere
 
 **Important limitation**: a metric's formula evaluates against the stock's live

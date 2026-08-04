@@ -2,29 +2,25 @@
 Formula Stats screen (Data menu > Formula Stats): pick an existing strategy
 and a number of days, and see Min/Max/Average/etc. of each of that
 strategy's formula columns, computed per stock over the most recent N
-trading days of saved historic data (services/formula_stats_engine.py does
-the actual recompute, reusing services/strategy_engine.evaluate — the same
-evaluator used for live LMV data). Right-click any result cell to see the
-individual day-by-day values behind it.
+trading days of saved historic data. The day-count/aggregate controls,
+results table and right-click day-by-day breakdown all live in
+components/formula_stats_panel.py's FormulaStatsPanel — this screen just
+adds the "which strategy" picker on top of it. That same panel also backs
+Live Master View's per-cell history popup for a strategy column whose
+formula uses one of the AVG_DAYS/MIN_DAYS/etc. historic aggregate functions
+(services/strategy_engine.py) — see docs/strategy-builder.md's "Historic
+(N days) Aggregates" section for how those functions fit into the formula
+language itself, which is the primary way to pull a historic aggregate into
+a strategy now (a column, a condition, a notification metric — anywhere a
+formula runs) rather than through this screen's ad-hoc analysis view.
 """
 import font_scale
 
-from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox,
-    QSpinBox, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
-    QAbstractItemView, QMenu, QDialog, QFrame
-)
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QComboBox
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
 
-from api import lmv_snapshot_api
-from api.exceptions import ApiError, NetworkError
-from components.error_popup import show_api_error
-from screens.strategy_builder import _apply_dialog_bg, _t
+from components.formula_stats_panel import FormulaStatsPanel
 from services import strategy_store
-from services.formula_stats_engine import AGGREGATES, DEFAULT_AGGREGATES, compute_stats
-
-_MAX_DAYS = 90
 
 
 class FormulaStatsScreen(QWidget):
@@ -32,9 +28,6 @@ class FormulaStatsScreen(QWidget):
         super().__init__()
         self._controller = controller
         self._strategies: list = []
-        self._computed: dict = {}
-        self._table_columns: list = []   # [(formula_column_name, aggregate_name), ...]
-        self._agg_checks: dict = {}      # aggregate name -> QCheckBox
         self._build()
         self.reload_strategies()
 
@@ -61,80 +54,27 @@ class FormulaStatsScreen(QWidget):
         desc.setStyleSheet(f"color: {t.get('text_secondary')};")
         layout.addWidget(desc)
 
-        controls = QHBoxLayout()
-        controls.setSpacing(10)
-
+        strat_row = QHBoxLayout()
+        strat_row.setSpacing(10)
         strat_lbl = QLabel("Strategy")
         strat_lbl.setFont(font_scale.font(font_scale.SMALL, False))
-        controls.addWidget(strat_lbl)
+        strat_row.addWidget(strat_lbl)
         self._strategy_combo = QComboBox()
         self._strategy_combo.setMinimumWidth(220)
         self._strategy_combo.setFont(font_scale.font(font_scale.SMALL, False))
-        controls.addWidget(self._strategy_combo)
+        self._strategy_combo.currentIndexChanged.connect(self._sync_panel_columns)
+        strat_row.addWidget(self._strategy_combo)
+        strat_row.addStretch()
+        layout.addLayout(strat_row)
 
-        days_lbl = QLabel("Days")
-        days_lbl.setFont(font_scale.font(font_scale.SMALL, False))
-        controls.addWidget(days_lbl)
-        self._days_spin = QSpinBox()
-        self._days_spin.setRange(1, _MAX_DAYS)
-        self._days_spin.setValue(20)
-        self._days_spin.setFont(font_scale.font(font_scale.SMALL, False))
-        controls.addWidget(self._days_spin)
-
-        self._compute_btn = QPushButton("Compute")
-        self._compute_btn.setFixedHeight(32)
-        self._compute_btn.setFont(font_scale.font(font_scale.SMALL, True))
-        self._compute_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._style_compute_btn()
-        self._compute_btn.clicked.connect(self._on_compute)
-        controls.addWidget(self._compute_btn)
-
-        controls.addStretch()
-        layout.addLayout(controls)
-
-        agg_row = QHBoxLayout()
-        agg_row.setSpacing(12)
-        agg_lbl = QLabel("Aggregates:")
-        agg_lbl.setFont(font_scale.font(font_scale.SMALL, False))
-        agg_row.addWidget(agg_lbl)
-        for name in AGGREGATES:
-            cb = QCheckBox(name)
-            cb.setFont(font_scale.font(font_scale.SMALL, False))
-            cb.setChecked(name in DEFAULT_AGGREGATES)
-            self._agg_checks[name] = cb
-            agg_row.addWidget(cb)
-        agg_row.addStretch()
-        layout.addLayout(agg_row)
-
-        div = QFrame()
-        div.setFixedHeight(1)
-        div.setStyleSheet(f"background: {t.get('divider')};")
-        layout.addWidget(div)
-
-        self._status_lbl = QLabel("Pick a strategy, choose a day count, then Compute.")
-        self._status_lbl.setFont(font_scale.font(font_scale.SMALL, False))
-        self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
-        layout.addWidget(self._status_lbl)
-
-        self._table = QTableWidget()
-        self._table.setFont(font_scale.font(font_scale.SMALL, False))
-        self._table.verticalHeader().setVisible(False)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        hdr = self._table.horizontalHeader()
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        hdr.setStretchLastSection(True)
-        self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self._table.customContextMenuRequested.connect(self._show_context_menu)
-        layout.addWidget(self._table, 1)
-
-    def _style_compute_btn(self):
-        t = self._controller.theme
-        self._compute_btn.setStyleSheet(
-            f"QPushButton {{ background: {t.get('accent')}; color: {t.get('background')};"
-            f"border: none; border-radius: 4px; padding: 0 16px; }}"
-            f"QPushButton:disabled {{ background: {t.get('button_bg')}; color: {t.get('text_secondary')}; }}"
-        )
+        self._panel = FormulaStatsPanel(t, columns=[], parent=self)
+        # This screen decides *which* strategy's columns Compute should run
+        # against (and shows a strategy-named message when it has none), so
+        # Compute is driven through _on_compute rather than the panel's
+        # default self-contained wiring.
+        self._panel._compute_btn.clicked.disconnect()
+        self._panel._compute_btn.clicked.connect(self._on_compute)
+        layout.addWidget(self._panel, 1)
 
     # ── strategy list ────────────────────────────────────────────────────────
 
@@ -160,13 +100,21 @@ class FormulaStatsScreen(QWidget):
                     self._strategy_combo.setCurrentIndex(i)
                     break
 
-        self._compute_btn.setEnabled(bool(self._strategies))
+        self._panel._compute_btn.setEnabled(bool(self._strategies))
+        self._sync_panel_columns()
         if not self._strategies:
-            self._status_lbl.setText("No strategies yet — create one in Strategy Builder first.")
+            self._panel._status_lbl.setText("No strategies yet — create one in Strategy Builder first.")
 
     def showEvent(self, event):
         super().showEvent(event)
         self.reload_strategies()
+
+    def _sync_panel_columns(self, *_args):
+        idx = self._strategy_combo.currentIndex()
+        if 0 <= idx < len(self._strategies):
+            self._panel.set_columns(self._strategies[idx].get("columns", []))
+        else:
+            self._panel.set_columns([])
 
     # ── compute ──────────────────────────────────────────────────────────────
 
@@ -176,128 +124,12 @@ class FormulaStatsScreen(QWidget):
             return
         strategy = self._strategies[idx]
         if not strategy.get("columns"):
-            self._status_lbl.setText(f'"{strategy.get("name")}" has no formula columns to analyze.')
+            self._panel._status_lbl.setText(f'"{strategy.get("name")}" has no formula columns to analyze.')
             return
-
-        days = self._days_spin.value()
-        self._compute_btn.setEnabled(False)
-        self._compute_btn.setText("Computing…")
-        try:
-            range_response = lmv_snapshot_api.get_range(days)
-        except (ApiError, NetworkError) as exc:
-            self._compute_btn.setEnabled(True)
-            self._compute_btn.setText("Compute")
-            show_api_error(self._controller.theme, self, exc)
-            return
-        self._compute_btn.setEnabled(True)
-        self._compute_btn.setText("Compute")
-
-        self._computed = compute_stats(strategy, range_response)
-        self._populate_table(strategy)
-
-    def _populate_table(self, strategy: dict):
-        checked_aggs = [name for name in AGGREGATES if self._agg_checks[name].isChecked()]
-        columns = strategy.get("columns", [])
-        self._table_columns = [(col["name"], agg) for col in columns for agg in checked_aggs]
-
-        headers = ["Symbol", "Display Name"] + [
-            f"{col_name} ({agg})" for col_name, agg in self._table_columns
-        ]
-        symbols = sorted(self._computed.keys())
-
-        self._table.clear()
-        self._table.setColumnCount(len(headers))
-        self._table.setHorizontalHeaderLabels(headers)
-        self._table.setRowCount(len(symbols))
-
-        for r, symbol in enumerate(symbols):
-            entry = self._computed[symbol]
-            self._table.setItem(r, 0, QTableWidgetItem(symbol))
-            self._table.setItem(r, 1, QTableWidgetItem(entry.get("display_name") or symbol))
-            for c, (col_name, agg) in enumerate(self._table_columns, start=2):
-                value = entry["columns"].get(col_name, {}).get(agg)
-                self._table.setItem(r, c, QTableWidgetItem(_fmt_value(value)))
-
-        self._table.resizeColumnsToContents()
-        if self._computed and columns:
-            any_entry = next(iter(self._computed.values()))
-            n_days = len(any_entry["columns"].get(columns[0]["name"], {}).get("daily", []))
-        else:
-            n_days = 0
-        self._status_lbl.setText(
-            f"{len(symbols)} stock(s) · {len(columns)} formula column(s) · {n_days} day(s) of data."
-        )
-
-    # ── right-click: day-by-day breakdown ───────────────────────────────────
-
-    def _show_context_menu(self, pos):
-        index = self._table.indexAt(pos)
-        if not index.isValid() or index.column() < 2:
-            return
-        row, col = index.row(), index.column()
-        symbol_item = self._table.item(row, 0)
-        if symbol_item is None:
-            return
-        symbol = symbol_item.text()
-        col_name, _agg = self._table_columns[col - 2]
-
-        t = self._controller.theme
-        menu = QMenu(self)
-        menu.setFont(font_scale.font(font_scale.SMALL, False))
-        # Same native-NSMenu translucency fix used elsewhere (e.g.
-        # screens/strategy_builder.py's card overflow menu) — without this,
-        # macOS renders it washed-out/illegible regardless of the app's theme.
-        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
-        menu.setStyleSheet(
-            f"QMenu{{background-color:{_t(t,'card_bg')};color:{_t(t,'text_primary')};"
-            f"border:1px solid {_t(t,'border')};border-radius:6px;padding:4px;}}"
-            f"QMenu::item{{padding:6px 24px 6px 12px;border-radius:4px;}}"
-            f"QMenu::item:selected{{background:{_t(t,'accent')};color:{_t(t,'background')};}}"
-        )
-        action = QAction(f"View last {self._days_spin.value()} days — {col_name}", menu)
-        action.triggered.connect(lambda: self._show_daily_popup(symbol, col_name))
-        menu.addAction(action)
-        menu.exec(self._table.viewport().mapToGlobal(pos))
-
-    def _show_daily_popup(self, symbol: str, col_name: str):
-        entry = self._computed.get(symbol, {})
-        daily = entry.get("columns", {}).get(col_name, {}).get("daily", [])
-
-        dlg = QDialog(self)
-        dlg.setWindowTitle(f"{symbol} — {col_name}")
-        _apply_dialog_bg(dlg, self._controller.theme)
-        layout = QVBoxLayout(dlg)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
-
-        table = QTableWidget(len(daily), 2)
-        table.setFont(font_scale.font(font_scale.SMALL, False))
-        table.verticalHeader().setVisible(False)
-        table.setHorizontalHeaderLabels(["Date", "Value"])
-        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        for r, (trade_date, value) in enumerate(sorted(daily, key=lambda p: p[0], reverse=True)):
-            table.setItem(r, 0, QTableWidgetItem(str(trade_date)))
-            table.setItem(r, 1, QTableWidgetItem(_fmt_value(value)))
-        table.resizeColumnsToContents()
-        layout.addWidget(table)
-
-        close_btn = QPushButton("Close")
-        close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        close_btn.clicked.connect(dlg.accept)
-        layout.addWidget(close_btn)
-
-        dlg.resize(340, 420)
-        dlg.exec()
+        self._panel.set_columns(strategy["columns"])
+        self._panel.compute()
 
     # ── theme ────────────────────────────────────────────────────────────────
 
     def refresh_theme(self):
-        self._style_compute_btn()
-
-
-def _fmt_value(value) -> str:
-    if value is None:
-        return "-"
-    if isinstance(value, float):
-        return f"{value:.4g}"
-    return str(value)
+        self._panel.refresh_theme()

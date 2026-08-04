@@ -175,7 +175,10 @@ def _tokens_to_display(tokens: list) -> str:
         elif kind == "func":
             fname = val.rstrip("(")
             col_arg = tok.get("col_arg", "")
-            if fname.endswith("_ALL"):
+            days_arg = tok.get("days_arg")
+            if days_arg is not None:
+                parts.append(f"{fname}({col_arg}, {days_arg})")
+            elif fname.endswith("_ALL"):
                 parts.append(f"{fname}({col_arg})")
             else:
                 parts.append(f"{fname}(")

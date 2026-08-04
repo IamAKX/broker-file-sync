@@ -67,14 +67,19 @@ def evaluate_tick(
     sym_index: dict | None = None,
     agg_cache: dict | None = None,
     now: datetime | None = None,
+    day_history: dict | None = None,
 ) -> list[AlertEvent]:
     """Evaluate every enabled notification config against this tick's rows.
     ``strategies`` is the full active-strategy list (same shape as passed to
     strategy_engine.apply_strategies) — used to skip configs whose strategy
     is no longer active. ``configs`` is
-    strategy_alerts.config_store.load_configs()'s result. Returns events in
-    the order they were detected; callers deliver
-    them and persist alert history."""
+    strategy_alerts.config_store.load_configs()'s result. ``day_history``,
+    forwarded to every evaluate()/evaluate_condition() call, resolves _DAYS
+    historic aggregate functions in a trigger condition/metric/risk:reward
+    formula — see services.strategy_engine.evaluate()'s docstring; the
+    caller (screens/live_viewer.py) precomputes it on its own cadence, not
+    once per tick. Returns events in the order they were detected; callers
+    deliver them and persist alert history."""
     now = now or datetime.now()
     if agg_cache is None:
         agg_cache = {}
@@ -88,14 +93,15 @@ def evaluate_tick(
         if strategy is None:
             continue
         events.extend(
-            _evaluate_strategy(strategy, config, all_dicts, sym_index, agg_cache, now)
+            _evaluate_strategy(strategy, config, all_dicts, sym_index, agg_cache,
+                               now, day_history)
         )
     return events
 
 
 def _evaluate_strategy(
     strategy: dict, config: dict, all_dicts: list, sym_index: dict | None,
-    agg_cache: dict, now: datetime,
+    agg_cache: dict, now: datetime, day_history: dict | None = None,
 ) -> list[AlertEvent]:
     events: list[AlertEvent] = []
     condition_tokens = config.get("trigger_condition", [])
@@ -115,7 +121,8 @@ def _evaluate_strategy(
         key = state_store.signal_key(strategy_id, symbol)
         signal = open_signals.get(key)
         is_true = evaluate_condition(
-            condition_tokens, row, all_dicts, agg_cache=agg_cache, sym_index=sym_index
+            condition_tokens, row, all_dicts, agg_cache=agg_cache,
+            sym_index=sym_index, day_history=day_history,
         )
 
         if signal is None:
@@ -143,7 +150,7 @@ def _evaluate_strategy(
                 events.append(
                     _fire_entry(
                         strategy, config, row, all_dicts, sym_index, agg_cache,
-                        symbol, direction, now, key,
+                        symbol, direction, now, key, day_history,
                     )
                 )
             continue
@@ -151,7 +158,8 @@ def _evaluate_strategy(
         if signal.get("state") == "open":
             events.extend(
                 _update_open_signal(
-                    config, signal, row, all_dicts, sym_index, agg_cache, now, key
+                    config, signal, row, all_dicts, sym_index, agg_cache, now, key,
+                    day_history,
                 )
             )
 
@@ -160,13 +168,14 @@ def _evaluate_strategy(
 
 def _fire_entry(
     strategy: dict, config: dict, row: dict, all_dicts: list, sym_index, agg_cache,
-    symbol: str, direction: str, now: datetime, key: str,
+    symbol: str, direction: str, now: datetime, key: str, day_history: dict | None = None,
 ) -> AlertEvent:
     entry_price = _to_float(row.get(_PRICE_COLUMN))
     metrics_state: dict = {}
     for m in config.get("metrics", []):
         value = evaluate(
-            m.get("formula", []), row, all_dicts, agg_cache=agg_cache, sym_index=sym_index
+            m.get("formula", []), row, all_dicts, agg_cache=agg_cache,
+            sym_index=sym_index, day_history=day_history,
         )
         entry = {"name": m.get("name", ""), "role": m.get("role"), "value": _to_float(value)}
         if m.get("role") == ROLE_TARGET:
@@ -178,10 +187,12 @@ def _fire_entry(
     rr_cfg = config.get("risk_reward")
     if rr_cfg:
         numerator = _to_float(
-            evaluate(rr_cfg.get("numerator", []), row, all_dicts, agg_cache=agg_cache, sym_index=sym_index)
+            evaluate(rr_cfg.get("numerator", []), row, all_dicts, agg_cache=agg_cache,
+                    sym_index=sym_index, day_history=day_history)
         )
         denominator = _to_float(
-            evaluate(rr_cfg.get("denominator", []), row, all_dicts, agg_cache=agg_cache, sym_index=sym_index)
+            evaluate(rr_cfg.get("denominator", []), row, all_dicts, agg_cache=agg_cache,
+                    sym_index=sym_index, day_history=day_history)
         )
         ratio = (numerator / denominator) if (numerator is not None and denominator) else None
         risk_reward = {"numerator": numerator, "denominator": denominator, "ratio": ratio}
@@ -223,7 +234,7 @@ def _pct_move(entry_price, extreme) -> float | None:
 
 def _update_open_signal(
     config: dict, signal: dict, row: dict, all_dicts: list, sym_index, agg_cache,
-    now: datetime, key: str,
+    now: datetime, key: str, day_history: dict | None = None,
 ) -> list[AlertEvent]:
     events: list[AlertEvent] = []
     price = _to_float(row.get(_PRICE_COLUMN))
@@ -250,7 +261,8 @@ def _update_open_signal(
         if cfg_metric is None:
             continue
         m["value"] = _to_float(
-            evaluate(cfg_metric.get("formula", []), row, all_dicts, agg_cache=agg_cache, sym_index=sym_index)
+            evaluate(cfg_metric.get("formula", []), row, all_dicts, agg_cache=agg_cache,
+                    sym_index=sym_index, day_history=day_history)
         )
 
     if price is not None:

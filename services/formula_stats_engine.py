@@ -1,9 +1,21 @@
 """
-Recomputes a strategy's formula columns over historic LmvDailySnapshot days,
-aggregating per stock — powers the Formula Stats screen
-(screens/formula_stats.py). Fetching "which dates/values" lives in
-api/lmv_snapshot_api.get_range(); this module is pure logic (no Qt, no
-network calls) so it's directly unit-testable.
+Recomputes a list of formula columns over historic LmvDailySnapshot days,
+aggregating per stock. Two entry points:
+
+  - compute_stats(): powers the Data menu's Formula Stats screen
+    (screens/formula_stats.py) via components/formula_stats_panel.py — pick
+    a strategy and a day count, see Min/Max/Average/etc. for every column,
+    right-click a cell for the day-by-day values behind it.
+
+  - compute_day_history(): powers the AVG_DAYS/MIN_DAYS/etc. formula
+    functions (services/strategy_engine.py's "Historic (N days) aggregates")
+    — one aggregate value per stock per (column, N days) request, looked up
+    by evaluate() while rendering Live Master View. Callers (live_viewer.py)
+    call this once per strategy load/toggle/manual refresh, never per tick.
+
+Fetching "which dates/values" lives in api/lmv_snapshot_api.get_range();
+this module is pure logic (no Qt, no network calls) so it's directly
+unit-testable.
 """
 import statistics
 
@@ -46,10 +58,13 @@ AGGREGATES = {
 DEFAULT_AGGREGATES = ["Min", "Max", "Average", "Count"]
 
 
-def compute_stats(strategy: dict, range_response: dict) -> dict:
-    """Evaluate every column in strategy["columns"] for every stock on every
-    day in range_response["days"] (the shape returned by
-    api/lmv_snapshot_api.get_range), then aggregate per stock per column.
+def compute_stats(columns: list, range_response: dict) -> dict:
+    """Evaluate every formula in *columns* (a list of {"name", "formula"}
+    dicts — a strategy's saved columns, or any ad-hoc one-off formula built
+    just for this test, e.g. from the Expression Editor's "Test Last N
+    Days…" button) for every stock on every day in range_response["days"]
+    (the shape returned by api/lmv_snapshot_api.get_range), then aggregate
+    per stock per column.
 
     Returns:
         {symbol: {"display_name": str,
@@ -64,7 +79,6 @@ def compute_stats(strategy: dict, range_response: dict) -> dict:
     from every aggregate, so Count directly reports how many of the requested
     days actually had usable data.
     """
-    columns = strategy.get("columns", [])
     by_symbol: dict = {}
 
     for day in range_response.get("days", []):
@@ -107,3 +121,32 @@ def compute_stats(strategy: dict, range_response: dict) -> dict:
                 col_data[agg_name] = agg_fn(numeric_values) if numeric_values else None
 
     return by_symbol
+
+
+def compute_day_history(requests: list, range_fetcher) -> dict:
+    """Resolve every (col_name, days, formula_tokens) request — as built by
+    services.strategy_engine.collect_day_requests — into the lookup
+    evaluate() needs for _DAYS functions:
+
+        {(col_name, days): {symbol: {agg_name: float | None}}}
+
+    *range_fetcher* is api/lmv_snapshot_api.get_range (injected so this stays
+    network-free/unit-testable) — called once per DISTINCT ``days`` value
+    across every request, not once per request, since compute_stats can
+    already evaluate several columns against the same day range in one pass.
+    """
+    by_days: dict = {}
+    for col_name, days, formula in requests:
+        by_days.setdefault(days, []).append((col_name, formula))
+
+    out: dict = {}
+    for days, entries in by_days.items():
+        range_response = range_fetcher(days)
+        columns = [{"name": col_name, "formula": formula} for col_name, formula in entries]
+        computed = compute_stats(columns, range_response)
+        for col_name, _formula in entries:
+            out[(col_name, days)] = {
+                symbol: entry["columns"].get(col_name, {})
+                for symbol, entry in computed.items()
+            }
+    return out

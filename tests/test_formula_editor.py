@@ -232,6 +232,59 @@ def test_col_of_tokens_round_trip_through_dialog(qapp):
     assert dlg.get_tokens() == original
 
 
+# ── _DAYS historic aggregate functions: AVG_DAYS(column, days) ──────────────
+
+def test_parse_days_agg_captures_column_and_days_bracket_form():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("AVG_DAYS([High], 20)")
+    assert tokens == [{"type": "func", "value": "AVG_DAYS(", "col_arg": "High", "days_arg": 20}]
+
+
+def test_parse_days_agg_captures_column_and_days_bare_word_form():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("AVG_DAYS(High, 20)")
+    assert tokens == [{"type": "func", "value": "AVG_DAYS(", "col_arg": "High", "days_arg": 20}]
+
+
+def test_parse_days_agg_without_days_falls_back_to_bare_func_token():
+    """Missing the required ", <days>" arg — not a crash, just falls through
+    to normal tokenization (the column becomes a separate [Field] token) —
+    same graceful-degradation spirit as everywhere else in this parser."""
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("AVG_DAYS([High])")
+    assert tokens[0] == {"type": "func", "value": "AVG_DAYS("}
+    assert {"type": "col", "value": "High"} in tokens
+
+
+@pytest.mark.parametrize("fname", [
+    "MIN_DAYS", "MAX_DAYS", "SUM_DAYS", "COUNT_DAYS", "STDDEV_DAYS",
+    "MEDIAN_DAYS", "VARIANCE_DAYS", "RANGE_DAYS",
+])
+def test_parse_every_days_aggregate_function_name(fname):
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text(f"{fname}([Close], 5)")
+    assert tokens == [{"type": "func", "value": f"{fname}(", "col_arg": "Close", "days_arg": 5}]
+
+
+def test_days_agg_token_renders_back_to_two_arg_text():
+    from screens.formula_editor import _tokens_to_text
+    tokens = [{"type": "func", "value": "AVG_DAYS(", "col_arg": "High", "days_arg": 20}]
+    assert _tokens_to_text(tokens) == "AVG_DAYS(High, 20)"
+
+
+def test_days_agg_tokens_round_trip_through_dialog(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    original = [{"type": "func", "value": "AVG_DAYS(", "col_arg": "High", "days_arg": 20}]
+    dlg = ExpressionEditorDialog(original, ["High"], [], {"High": 100.0})
+    assert dlg.get_tokens() == original
+
+
+def test_function_catalogue_has_avg_days():
+    from screens.formula_editor import FUNCTION_CATALOGUE
+    names = [f["name"] for f in FUNCTION_CATALOGUE]
+    assert "AVG_DAYS" in names
+
+
 def test_row_catalogue_lists_distinct_scrip_names(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     all_data = [{"Scrip Name": "NIFTY", "Open": 100}, {"Scrip Name": "NIFTY", "Open": 100},
