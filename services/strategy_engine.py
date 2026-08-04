@@ -17,7 +17,12 @@ Supported:
              ACOS  ASIN  ATN  ATN2  COS  COSH  SIN  SINH  TAN  TANH
              ISNULL  ISNULLOREMPTY  INRANGE  DIGITS
              TODECIMAL  TODOUBLE  TOFLOAT  TOINT  TOLONG  TOSTR
-  Aggregate: SUM_ALL  MIN_ALL  MAX_ALL  AVG_ALL  COUNT_ALL
+  Aggregate: SUM_ALL  MIN_ALL  MAX_ALL  AVG_ALL  COUNT_ALL  (across all rows,
+             this tick)
+  Historic : SUM_DAYS  MIN_DAYS  MAX_DAYS  AVG_DAYS  COUNT_DAYS  STDDEV_DAYS
+             MEDIAN_DAYS  VARIANCE_DAYS  RANGE_DAYS  (per stock, over the last
+             N historic trading days — see "Historic (N days) aggregates"
+             below)
 
 DIGITS(value) returns how many digits are in the integer part of value (e.g.
 DIGITS(12123.77) = 5, DIGITS(2435.22) = 4) — combine with IIF to tier a
@@ -29,6 +34,21 @@ inlines a reusable formula saved via services.formula_variable_store — see
 _expand_var_tokens. Handy for exactly the DIGITS/IIF tier above: build it
 once, save it as a variable, then reference {ThresholdName} from every
 formula that needs it instead of retyping the nested IIF each time.
+
+── Historic (N days) aggregates ──────────────────────────────────────────────
+AVG_DAYS([High], 20) and friends (see _DAYS_AGG_BASE) are a column's own
+value aggregated over the last N historic trading days for the SAME stock,
+e.g. "20-day average High". The column referenced can be a raw sheet column
+or another of this strategy's own computed columns (any custom formula) —
+services.strategy_engine.collect_day_requests resolves which. Unlike _ALL
+aggregates, this can't be computed from row_data/all_data alone — it needs a
+historic snapshot fetch (see services.formula_stats_engine.compute_day_history),
+which is comparatively expensive, so callers precompute it once (on strategy
+load/toggle, or a manual refresh — never once per live tick) into a
+``day_history`` dict and pass it into evaluate()/evaluate_condition()/
+apply_strategies()/get_row_fmt_colors(). Without a day_history entry for a
+given (column, days), a _DAYS function evaluates to None — same "blank
+rather than crash" fallback as a column missing from a row.
 """
 
 import math
@@ -246,7 +266,15 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
         elif t == "func":
             # aggregate functions have _ALL suffix; map to a single computed number
             fname = v.rstrip("(").upper()
-            if fname.endswith("_ALL"):
+            if fname in _DAYS_AGG_BASE:
+                # No historic fetch happens at compile-test time (see the
+                # module docstring's "Historic (N days) aggregates" section)
+                # — a numeric placeholder lets the rest of the formula's
+                # arithmetic/type-check still run instead of raising. See
+                # compile_check's own _DAYS handling for the caveat this
+                # implies in the result it reports.
+                parts.append("1.0")
+            elif fname.endswith("_ALL"):
                 col_name = tok.get("col_arg", "")
                 nums = []
                 for rd in all_data:
@@ -305,6 +333,18 @@ def _compute_aggregate(base: str, col_name: str, all_data: list):
         return 0
 
 
+# func name -> the formula_stats_engine.AGGREGATES key it maps to. Values
+# are per-stock aggregates over the last N historic days (see the module
+# docstring's "Historic (N days) aggregates" section) rather than across this
+# tick's rows, so they're resolved through a caller-supplied ``day_history``
+# instead of ``all_data``.
+_DAYS_AGG_BASE = {
+    "MIN_DAYS": "Min", "MAX_DAYS": "Max", "AVG_DAYS": "Average",
+    "SUM_DAYS": "Sum", "COUNT_DAYS": "Count", "STDDEV_DAYS": "Std Dev",
+    "MEDIAN_DAYS": "Median", "VARIANCE_DAYS": "Variance", "RANGE_DAYS": "Range",
+}
+
+
 class _Compiled:
     """A formula's fixed structure, compiled once and reused across rows/ticks.
 
@@ -314,16 +354,20 @@ class _Compiled:
     resolved against a different row (looked up by stock symbol) instead.
     ``agg_specs`` is [(placeholder, base_op, col_name), ...] for _ALL
     aggregate functions, resolved once per tick rather than once per row
-    (they don't depend on the row being evaluated).
+    (they don't depend on the row being evaluated). ``day_specs`` is
+    [(placeholder, agg_key, col_name, days), ...] for _DAYS historic
+    aggregate functions, resolved from the row's own stock symbol against a
+    caller-supplied day_history (see the module docstring).
     """
-    __slots__ = ("code", "col_vars", "col_of_vars", "uses_self", "agg_specs")
+    __slots__ = ("code", "col_vars", "col_of_vars", "uses_self", "agg_specs", "day_specs")
 
-    def __init__(self, code, col_vars, col_of_vars, uses_self, agg_specs):
+    def __init__(self, code, col_vars, col_of_vars, uses_self, agg_specs, day_specs):
         self.code = code
         self.col_vars = col_vars
         self.col_of_vars = col_of_vars
         self.uses_self = uses_self
         self.agg_specs = agg_specs
+        self.day_specs = day_specs
 
 
 _compile_cache: dict = {}
@@ -342,7 +386,8 @@ def clear_compile_cache():
 
 
 def _formula_signature(tokens: list):
-    return tuple((tok.get("type"), tok.get("value"), tok.get("col_arg"), tok.get("of"))
+    return tuple((tok.get("type"), tok.get("value"), tok.get("col_arg"),
+                 tok.get("days_arg"), tok.get("of"))
                  for tok in tokens)
 
 
@@ -353,6 +398,7 @@ def _build_compiled(tokens: list):
     col_of_vars: list = []
     uses_self = False
     agg_specs = []
+    day_specs = []
 
     for tok in tokens:
         t = tok.get("type")
@@ -380,7 +426,14 @@ def _build_compiled(tokens: list):
 
         elif t == "func":
             fname = v.rstrip("(").upper()
-            if fname.endswith("_ALL"):
+            days_arg = tok.get("days_arg")
+            if fname in _DAYS_AGG_BASE and tok.get("col_arg") and days_arg is not None:
+                col_name = tok.get("col_arg", "")
+                agg_key = _DAYS_AGG_BASE[fname]
+                var = f"_d{len(day_specs)}"
+                day_specs.append((var, agg_key, col_name, int(days_arg)))
+                parts.append(var)
+            elif fname.endswith("_ALL"):
                 col_name = tok.get("col_arg", "")
                 base = fname[:-4]
                 var = f"_a{len(agg_specs)}"
@@ -396,7 +449,7 @@ def _build_compiled(tokens: list):
         code = compile(expr, "<formula>", "eval")  # noqa: S307
     except SyntaxError:
         return None
-    return _Compiled(code, col_vars, col_of_vars, uses_self, agg_specs)
+    return _Compiled(code, col_vars, col_of_vars, uses_self, agg_specs, day_specs)
 
 
 def _get_compiled(tokens: list):
@@ -408,7 +461,7 @@ def _get_compiled(tokens: list):
 
 def evaluate(tokens: list, row_data: dict, all_data: list,
              self_value=None, agg_cache: dict | None = None,
-             sym_index: dict | None = None):
+             sym_index: dict | None = None, day_history: dict | None = None):
     """Return numeric or string result, or None on error.
 
     ``agg_cache``, when provided, memoizes _ALL aggregate results by
@@ -420,6 +473,16 @@ def evaluate(tokens: list, row_data: dict, all_data: list,
     reused across every row in the caller's scope, so "[Col of Symbol]"
     tokens don't rebuild the index once per row. If omitted it's built
     on demand from all_data (only when the formula actually uses one).
+
+    ``day_history``, when provided, resolves _DAYS historic aggregate
+    functions: {(col_name, days): {symbol: {agg_key: value}}}, as built by
+    services.formula_stats_engine.compute_day_history. The row's own stock
+    symbol (row_data[SYMBOL_COLUMN]) picks which entry applies. Missing
+    entirely (None), or missing this (col_name, days)/symbol/agg_key, all
+    resolve to None for that function call — same "blank rather than crash"
+    fallback as everything else in this module — rather than pass day_history
+    at every call site, most callers get away with never populating it: a
+    formula with no _DAYS functions never looks it up.
     """
     if not tokens:
         return None
@@ -447,6 +510,18 @@ def evaluate(tokens: list, row_data: dict, all_data: list,
         else:
             val = _compute_aggregate(base, col_name, all_data)
         ns[var] = val
+    if compiled.day_specs:
+        # Keyed by the row's own stock symbol, exactly as stored in
+        # day_history (see compute_day_history — the historic snapshot's own
+        # "symbol" field, same identifier SYMBOL_COLUMN carries live).
+        symbol = row_data.get(SYMBOL_COLUMN)
+        for var, agg_key, col_name, days in compiled.day_specs:
+            val = None
+            if day_history is not None and symbol:
+                entry = day_history.get((col_name, days), {}).get(symbol)
+                if entry:
+                    val = entry.get(agg_key)
+            ns[var] = val
     try:
         return eval(compiled.code, ns)   # noqa: S307
     except Exception:
@@ -512,22 +587,108 @@ def _referenced_columns(tokens: list) -> list:
     return out
 
 
+def _uses_day_funcs(tokens: list) -> bool:
+    """True if any _DAYS historic aggregate function appears in *tokens*."""
+    return any(
+        tok.get("type") == "func"
+        and tok.get("value", "").rstrip("(").upper() in _DAYS_AGG_BASE
+        for tok in tokens
+    )
+
+
+def scan_day_funcs(tokens: list) -> list:
+    """[(col_name, days), ...] for every well-formed _DAYS function call in
+    *tokens* (col_arg and days_arg both present — see _build_compiled).
+    Used to figure out which historic data a formula needs (collect_day_requests)
+    and, for Live Master View, which (column, N) a clicked cell should drill
+    into (screens/live_viewer.py's _on_cell_clicked)."""
+    out = []
+    for tok in tokens:
+        if tok.get("type") != "func":
+            continue
+        fname = tok.get("value", "").rstrip("(").upper()
+        col_arg, days_arg = tok.get("col_arg"), tok.get("days_arg")
+        if fname in _DAYS_AGG_BASE and col_arg and days_arg is not None:
+            out.append((col_arg, int(days_arg)))
+    return out
+
+
+def collect_day_requests(strategies: list, notif_configs: dict | None = None) -> list:
+    """Distinct (col_name, days, formula_tokens) triples referenced by any
+    _DAYS function across every ACTIVE strategy's columns, row filter, and
+    conditional-formatting conditions, plus (if given) that strategy's
+    notification config's trigger condition, risk:reward formulas, and
+    metric formulas (services.strategy_alerts — a separate store, keyed by
+    strategy id, so it isn't reachable from *strategies* alone).
+
+    *col_name* resolves to that SAME strategy's own column's formula when it
+    names one of that strategy's columns — this is how "any custom formula
+    over the last N days" works: AVG_DAYS([MyComputedCol], 20) aggregates
+    MyComputedCol's own (arbitrary) formula, not a literal column named
+    "MyComputedCol". Anything else is assumed to be a raw sheet/historic
+    column and passed through as a bare column reference.
+
+    ``formula_tokens`` is what services.formula_stats_engine.compute_stats
+    should evaluate per historic day to answer this request.
+    """
+    notif_configs = notif_configs or {}
+    seen: set = set()
+    out = []
+    for strat in strategies:
+        if not strat.get("active"):
+            continue
+        cols_by_name = {c["name"]: c.get("formula", []) for c in strat.get("columns", [])}
+
+        token_sources = [c.get("formula", []) for c in strat.get("columns", [])]
+        token_sources.append(strat.get("row_filter", []))
+        for c in strat.get("columns", []):
+            for rule in c.get("fmt_rules", []):
+                token_sources.append(rule.get("condition", []))
+
+        notif = notif_configs.get(strat.get("id"))
+        if notif:
+            token_sources.append(notif.get("trigger_condition", []))
+            rr = notif.get("risk_reward") or {}
+            token_sources.append(rr.get("numerator", []))
+            token_sources.append(rr.get("denominator", []))
+            for metric in notif.get("metrics", []):
+                token_sources.append(metric.get("formula", []))
+
+        for src in token_sources:
+            for col_name, days in scan_day_funcs(src):
+                key = (col_name, days)
+                if key in seen:
+                    continue
+                seen.add(key)
+                formula = cols_by_name.get(col_name, [{"type": "col", "value": col_name}])
+                out.append((col_name, days, formula))
+    return out
+
+
 def evaluate_condition(tokens: list, row_data: dict, all_data: list,
                        self_value=None, agg_cache: dict | None = None,
-                       sym_index: dict | None = None) -> bool:
+                       sym_index: dict | None = None,
+                       day_history: dict | None = None) -> bool:
     """Return True if condition is met."""
-    result = evaluate(tokens, row_data, all_data, self_value, agg_cache, sym_index)
+    result = evaluate(tokens, row_data, all_data, self_value, agg_cache,
+                      sym_index, day_history)
     if result is None:
         return False
     return bool(result)
 
 
-def apply_strategies(strategies: list, headers: list,
-                     data: list[list]) -> tuple[list, list[list]]:
+def apply_strategies(strategies: list, headers: list, data: list[list],
+                     day_history: dict | None = None) -> tuple[list, list[list]]:
     """
     Append strategy columns to headers and data rows.
     Returns (new_headers, new_data).
     Only active strategies are applied.
+
+    ``day_history``, forwarded to every evaluate()/evaluate_condition() call,
+    resolves _DAYS historic aggregate functions — see evaluate()'s docstring.
+    Callers precompute it (services.formula_stats_engine.compute_day_history)
+    on their own cadence (e.g. strategy load/toggle, not every tick) rather
+    than this function fetching it itself.
     """
     active = [s for s in strategies if s.get("active")]
     if not active:
@@ -566,12 +727,14 @@ def apply_strategies(strategies: list, headers: list,
             values = []
             for col in strat.get("columns", []):
                 val = evaluate(col["formula"], row_dict, all_dicts,
-                               agg_cache=agg_cache, sym_index=sym_index)
+                               agg_cache=agg_cache, sym_index=sym_index,
+                               day_history=day_history)
                 enriched[col["name"]] = val
                 values.append(val)
             row_filter = strat.get("row_filter", [])
             passed = (not row_filter) or evaluate_condition(
-                row_filter, enriched, all_dicts, agg_cache=agg_cache, sym_index=sym_index)
+                row_filter, enriched, all_dicts, agg_cache=agg_cache,
+                sym_index=sym_index, day_history=day_history)
             per_strat.append((passed, values))
 
         # Drop rows excluded by every active filter (union of filters).
@@ -593,7 +756,8 @@ def apply_strategies(strategies: list, headers: list,
 
 def _match_fmt_rule(col_def: dict, value, row_dict: dict,
                     all_dicts: list, agg_cache: dict | None = None,
-                    sym_index: dict | None = None) -> dict | None:
+                    sym_index: dict | None = None,
+                    day_history: dict | None = None) -> dict | None:
     """Return the first fmt rule whose condition matches (THIS = value,
     this column's own computed value), else None. First match wins."""
     for rule in col_def.get("fmt_rules", []):
@@ -601,23 +765,26 @@ def _match_fmt_rule(col_def: dict, value, row_dict: dict,
             continue
         if evaluate_condition(rule["condition"], row_dict, all_dicts,
                               self_value=value, agg_cache=agg_cache,
-                              sym_index=sym_index):
+                              sym_index=sym_index, day_history=day_history):
             return rule
     return None
 
 
 def get_cell_color(col_def: dict, value, row_dict: dict,
                    all_dicts: list, agg_cache: dict | None = None,
-                   sym_index: dict | None = None) -> str | None:
+                   sym_index: dict | None = None,
+                   day_history: dict | None = None) -> str | None:
     """Return hex color if any fmt rule matches, else None."""
-    rule = _match_fmt_rule(col_def, value, row_dict, all_dicts, agg_cache, sym_index)
+    rule = _match_fmt_rule(col_def, value, row_dict, all_dicts, agg_cache,
+                           sym_index, day_history)
     return rule.get("color") if rule else None
 
 
 def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
                        row_dict: dict, all_dicts: list,
                        agg_cache: dict | None = None,
-                       sym_index: dict | None = None) -> dict:
+                       sym_index: dict | None = None,
+                       day_history: dict | None = None) -> dict:
     """One row's resolved {target_column_name: color} map, combining every
     active strategy column's conditional formatting.
 
@@ -635,7 +802,8 @@ def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
         idx = base_col_count + strat_idx
         if idx >= len(row):
             continue
-        rule = _match_fmt_rule(col_def, row[idx], row_dict, all_dicts, agg_cache, sym_index)
+        rule = _match_fmt_rule(col_def, row[idx], row_dict, all_dicts,
+                               agg_cache, sym_index, day_history)
         if rule is None:
             continue
         target = rule.get("target_column") or col_def.get("name")
@@ -714,5 +882,14 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
         return False, ("This formula didn't produce a result for the first "
                        "row — usually because one of the cells it uses is "
                        "empty. Check the data in that row of your sheet.")
+
+    if _uses_day_funcs(tokens):
+        # _tokens_to_expr stood in a numeric placeholder for every _DAYS
+        # function above (no historic fetch happens at edit time — see the
+        # module docstring), so *result* isn't the real value. Say so
+        # instead of implying it's live.
+        return True, (f"{result} (using a placeholder for the historic "
+                      f"N-day value(s) while editing — Save, then reload "
+                      f"Live Master View to see the real aggregate)")
 
     return True, str(result)

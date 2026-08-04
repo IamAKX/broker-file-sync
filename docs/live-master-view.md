@@ -76,10 +76,16 @@ Each broker exports Excel files in a different format. The file reader handles t
 
 ## Toolbar
 
-The LMV toolbar has five controls: **⊞ Filters**, **⚡ Strategies**, **⭳ Export**,
-a value-change highlight-color swatch, and a reset button (clears all filters,
-turns off all strategies). There is no separate "Columns" button — it's nested
-inside **⊞ Filters** (see below). A previous "Stop" button was removed as unused.
+The LMV toolbar has six controls: **⊞ Filters**, **⚡ Strategies**, **↻ N-Day
+Data**, **⭳ Export**, a value-change highlight-color swatch, and a reset
+button (clears all filters, turns off all strategies). There is no separate
+"Columns" button — it's nested inside **⊞ Filters** (see below). A previous
+"Stop" button was removed as unused.
+
+**↻ N-Day Data** manually re-fetches every `AVG_DAYS`/`MIN_DAYS`/etc. historic
+aggregate column (see Strategy Columns below) — those don't update on every
+live tick like the rest of the table, so this is how you pull a fresher value
+without toggling a strategy or changing the category filter.
 
 ## Filters Panel
 
@@ -109,6 +115,17 @@ If a strategy also has [Strategy Notifications](strategy-notifications.md)
 enabled, every LMV refresh also runs that strategy's trigger/lifecycle
 evaluation and can push System/Email alerts — this happens as part of the same
 render pass described below, so notifications only fire while LMV is open.
+
+A strategy column whose formula uses an `AVG_DAYS`/`MIN_DAYS`/etc. historic
+aggregate function (see [🧮 Strategy Builder → Historic (N days)
+Aggregates](strategy-builder.md#historic-n-days-aggregates)) doesn't
+recompute on every live tick like the rest — it needs a historic-snapshot
+fetch, so it (re)computes on load, on a strategy toggle, on a category
+change, or via the **↻ N-Day Data** toolbar button. **Click any cell in one
+of those columns** to see the individual day-by-day values behind it for
+that stock, pre-computed so the breakdown is right there without an extra
+click. A strategy column with an ordinary (non-historic) formula, or any
+native column, isn't clickable this way.
 
 ---
 

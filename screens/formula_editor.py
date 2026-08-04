@@ -78,12 +78,22 @@ FUNCTION_CATALOGUE = [
     {"name": "ToInt",    "signature": "ToInt(value)",        "description": "Convert to integer (truncates).", "token": {"type": "func", "value": "ToInt("}},
     {"name": "ToLong",   "signature": "ToLong(value)",       "description": "Convert to long integer.", "token": {"type": "func", "value": "ToLong("}},
     {"name": "ToStr",    "signature": "ToStr(value)",        "description": "Convert to string.", "token": {"type": "func", "value": "ToStr("}},
-    # Aggregate (across all rows)
+    # Aggregate (across all rows, this tick)
     {"name": "SUM_ALL",  "signature": "SUM_ALL(column)",     "description": "Sum of all row values for a column.", "token": {"type": "func", "value": "SUM_ALL("}},
     {"name": "MIN_ALL",  "signature": "MIN_ALL(column)",     "description": "Minimum across all rows.", "token": {"type": "func", "value": "MIN_ALL("}},
     {"name": "MAX_ALL",  "signature": "MAX_ALL(column)",     "description": "Maximum across all rows.", "token": {"type": "func", "value": "MAX_ALL("}},
     {"name": "AVG_ALL",  "signature": "AVG_ALL(column)",     "description": "Average across all rows.", "token": {"type": "func", "value": "AVG_ALL("}},
     {"name": "COUNT_ALL","signature": "COUNT_ALL(column)",   "description": "Count of non-empty values.", "token": {"type": "func", "value": "COUNT_ALL("}},
+    # Historic (per stock, over the last N trading days)
+    {"name": "AVG_DAYS",      "signature": "AVG_DAYS(column, days)",      "description": "Average of this stock's own column value over the last N historic trading days. The column can be a raw sheet column or another of this strategy's own columns (any custom formula). Refreshes on strategy load/toggle or a manual refresh — not live every tick.", "token": {"type": "func", "value": "AVG_DAYS("}},
+    {"name": "MIN_DAYS",      "signature": "MIN_DAYS(column, days)",      "description": "Minimum over the last N historic trading days, per stock.", "token": {"type": "func", "value": "MIN_DAYS("}},
+    {"name": "MAX_DAYS",      "signature": "MAX_DAYS(column, days)",      "description": "Maximum over the last N historic trading days, per stock.", "token": {"type": "func", "value": "MAX_DAYS("}},
+    {"name": "SUM_DAYS",      "signature": "SUM_DAYS(column, days)",      "description": "Sum over the last N historic trading days, per stock.", "token": {"type": "func", "value": "SUM_DAYS("}},
+    {"name": "COUNT_DAYS",    "signature": "COUNT_DAYS(column, days)",    "description": "Count of days with usable data in the last N historic trading days, per stock.", "token": {"type": "func", "value": "COUNT_DAYS("}},
+    {"name": "STDDEV_DAYS",   "signature": "STDDEV_DAYS(column, days)",   "description": "Standard deviation over the last N historic trading days, per stock.", "token": {"type": "func", "value": "STDDEV_DAYS("}},
+    {"name": "MEDIAN_DAYS",   "signature": "MEDIAN_DAYS(column, days)",   "description": "Median over the last N historic trading days, per stock.", "token": {"type": "func", "value": "MEDIAN_DAYS("}},
+    {"name": "VARIANCE_DAYS", "signature": "VARIANCE_DAYS(column, days)", "description": "Variance over the last N historic trading days, per stock.", "token": {"type": "func", "value": "VARIANCE_DAYS("}},
+    {"name": "RANGE_DAYS",    "signature": "RANGE_DAYS(column, days)",    "description": "Max minus Min over the last N historic trading days, per stock.", "token": {"type": "func", "value": "RANGE_DAYS("}},
 ]
 
 OPERATOR_CATALOGUE = [
@@ -209,6 +219,9 @@ def _token_insert_text(tok: dict) -> str:
     if kind == "func":
         fname = val.rstrip("(")
         col_arg = tok.get("col_arg", "")
+        days_arg = tok.get("days_arg")
+        if days_arg is not None:
+            return f"{fname}({col_arg}, {days_arg})"
         return f"{fname}({col_arg})" if col_arg else f"{fname}("
     if kind == "op" and val == ",":
         return ", "
@@ -230,6 +243,12 @@ def _tokens_to_text(tokens: list) -> str:
 # structured token list, so on Compile/Save we re-parse the current text.
 
 _AGG_FUNCS = {"sum_all", "min_all", "max_all", "avg_all", "count_all"}
+# Historic (N days) aggregates — same shape as _AGG_FUNCS but two args:
+# AVG_DAYS(column, days). See services/strategy_engine.py's _DAYS_AGG_BASE.
+_DAYS_AGG_FUNCS = {
+    "sum_days", "min_days", "max_days", "avg_days", "count_days",
+    "stddev_days", "median_days", "variance_days", "range_days",
+}
 _WORD_OPS = {"and": " and ", "or": " or ", "not": " not "}
 _WORD_CONSTS = {"true": "True", "false": "False", "none": "None"}
 
@@ -251,6 +270,13 @@ _TOKEN_RE = re.compile(r"""
 
 _AGG_ARG_RE = re.compile(
     r"""\s*(?:\[([^\]]*)\]|([A-Za-z_][A-Za-z0-9_]*)|"([^"]*)"|'([^']*)')\s*\)"""
+)
+
+# Same column-argument shapes as _AGG_ARG_RE, plus a required ", <days>"
+# before the closing paren — e.g. "[High], 20)" or "High, 20)".
+_DAYS_AGG_ARG_RE = re.compile(
+    r"""\s*(?:\[([^\]]*)\]|([A-Za-z_][A-Za-z0-9_]*)|"([^"]*)"|'([^']*)')"""
+    r"""\s*,\s*(\d+)\s*\)"""
 )
 
 # Splits "[Open of Nifty]" bracket content on the LAST " of " (greedy left
@@ -277,15 +303,24 @@ def _split_field_of(inner: str, known_headers=None):
 
 def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
     """For SUM_ALL(...)-style aggregates, try to read the single column
-    argument up to the matching ')'. Returns (pos_after_close_paren, col_name)
-    on success, else (start, None) so the caller falls back to normal tokens."""
-    if func_name_lower not in _AGG_FUNCS:
-        return start, None
-    m = _AGG_ARG_RE.match(text, start)
-    if not m:
-        return start, None
-    col = next(g for g in m.groups() if g is not None)
-    return m.end(), col
+    argument up to the matching ')'; for AVG_DAYS(...)-style historic
+    aggregates, the column argument plus a required ", <days>". Returns
+    (pos_after_close_paren, col_name, days_or_None) on success, else
+    (start, None, None) so the caller falls back to normal tokens."""
+    if func_name_lower in _AGG_FUNCS:
+        m = _AGG_ARG_RE.match(text, start)
+        if not m:
+            return start, None, None
+        col = next(g for g in m.groups() if g is not None)
+        return m.end(), col, None
+    if func_name_lower in _DAYS_AGG_FUNCS:
+        m = _DAYS_AGG_ARG_RE.match(text, start)
+        if not m:
+            return start, None, None
+        *col_groups, days = m.groups()
+        col = next(g for g in col_groups if g is not None)
+        return m.end(), col, int(days)
+    return start, None, None
 
 
 class FormulaParseError(ValueError):
@@ -406,9 +441,12 @@ def parse_expression_text(text: str, known_headers=None) -> list:
                 while look < n and text[look].isspace():
                     look += 1
                 if look < n and text[look] == "(":
-                    consumed_to, col_arg = _try_consume_aggregate_arg(text, look + 1, low)
+                    consumed_to, col_arg, days_arg = _try_consume_aggregate_arg(text, look + 1, low)
                     if col_arg is not None:
-                        tokens.append({"type": "func", "value": f"{val}(", "col_arg": col_arg})
+                        tok = {"type": "func", "value": f"{val}(", "col_arg": col_arg}
+                        if days_arg is not None:
+                            tok["days_arg"] = days_arg
+                        tokens.append(tok)
                         pos = consumed_to
                     else:
                         tokens.append({"type": "func", "value": f"{val}("})

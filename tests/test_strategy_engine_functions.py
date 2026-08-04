@@ -392,3 +392,188 @@ def test_apply_strategies_supports_col_of_formula():
     assert new_headers == ["Scrip Name", "LTP", "VsNifty"]
     assert new_data[0][2] == 1.0    # NIFTY vs itself
     assert new_data[1][2] == 0.5    # INFY (50) / NIFTY (100)
+
+
+# ── _DAYS historic aggregates ────────────────────────────────────────────────
+# Unlike _ALL, these can't be resolved from row_data/all_data alone — they
+# need a caller-supplied day_history (services.formula_stats_engine.
+# compute_day_history's shape). See the module docstring's "Historic (N
+# days) aggregates" section.
+
+def days_tok(fn, col, days):
+    return [{"type": "func", "value": f"{fn}(", "col_arg": col, "days_arg": days}]
+
+
+ROW_WITH_SYMBOL = {"Scrip Name": "INFY", "High": "100"}
+
+
+def test_avg_days_resolves_from_day_history():
+    day_history = {("High", 20): {"INFY": {"Average": 105.0}}}
+    result = evaluate(days_tok("AVG_DAYS", "High", 20), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                      day_history=day_history)
+    assert result == 105.0
+
+
+def test_days_agg_none_without_day_history():
+    result = evaluate(days_tok("AVG_DAYS", "High", 20), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL])
+    assert result is None
+
+
+def test_days_agg_none_when_symbol_missing_from_day_history():
+    day_history = {("High", 20): {"TCS": {"Average": 105.0}}}   # no INFY entry
+    result = evaluate(days_tok("AVG_DAYS", "High", 20), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                      day_history=day_history)
+    assert result is None
+
+
+def test_days_agg_distinguishes_by_both_column_and_days():
+    day_history = {
+        ("High", 20): {"INFY": {"Average": 105.0}},
+        ("High", 5):  {"INFY": {"Average": 99.0}},
+    }
+    assert evaluate(days_tok("AVG_DAYS", "High", 20), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                    day_history=day_history) == 105.0
+    assert evaluate(days_tok("AVG_DAYS", "High", 5), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                    day_history=day_history) == 99.0
+
+
+def test_min_max_sum_count_days_pick_the_right_aggregate_key():
+    day_history = {("High", 20): {"INFY": {
+        "Min": 90.0, "Max": 120.0, "Sum": 2100.0, "Count": 20,
+    }}}
+    assert evaluate(days_tok("MIN_DAYS", "High", 20), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                    day_history=day_history) == 90.0
+    assert evaluate(days_tok("MAX_DAYS", "High", 20), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                    day_history=day_history) == 120.0
+    assert evaluate(days_tok("SUM_DAYS", "High", 20), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                    day_history=day_history) == 2100.0
+    assert evaluate(days_tok("COUNT_DAYS", "High", 20), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                    day_history=day_history) == 20
+
+
+def test_days_agg_combines_with_other_operators():
+    day_history = {("High", 20): {"INFY": {"Average": 100.0}}}
+    tokens = days_tok("AVG_DAYS", "High", 20) + [tok_op("*"), tok_num(1.05)]
+    result = evaluate(tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL], day_history=day_history)
+    assert result == 105.0
+
+
+def test_apply_strategies_forwards_day_history_to_columns():
+    from services.strategy_engine import apply_strategies
+    strat = {
+        "id": "1", "active": True, "row_filter": [],
+        "columns": [{"name": "AvgHigh20", "formula": days_tok("AVG_DAYS", "High", 20)}],
+    }
+    headers = ["Scrip Name", "High"]
+    data = [["INFY", "100"]]
+    day_history = {("High", 20): {"INFY": {"Average": 111.0}}}
+    _, new_data = apply_strategies([strat], headers, data, day_history)
+    assert new_data[0][2] == 111.0
+
+
+# ── compile_check with a _DAYS function (no historic fetch at edit time) ────
+
+def test_compile_check_days_func_uses_placeholder_not_hard_failure():
+    """No day_history exists at edit time — evaluate() would legitimately
+    return None, but compile_check must not treat that as "formula produced
+    no result" (which would permanently block Save)."""
+    from services.strategy_engine import compile_check
+    tokens = days_tok("AVG_DAYS", "High", 20)
+    ok, msg = compile_check(tokens, {"High": "100"}, [{"High": "100"}])
+    assert ok is True
+    assert "historic" in msg.lower()
+
+
+def test_compile_check_days_func_mixed_with_arithmetic_still_compiles():
+    from services.strategy_engine import compile_check
+    tokens = days_tok("AVG_DAYS", "High", 20) + [tok_op("+"), tok_num(1)]
+    ok, msg = compile_check(tokens, {"High": "100"}, [{"High": "100"}])
+    assert ok is True
+
+
+def test_compile_check_days_func_unknown_column_still_reported():
+    from services.strategy_engine import compile_check
+    tokens = days_tok("AVG_DAYS", "TotallyMadeUp", 20)
+    ok, msg = compile_check(tokens, {"High": "100"}, [{"High": "100"}])
+    assert ok is False
+    assert "TotallyMadeUp" in msg
+
+
+# ── collect_day_requests / scan_day_funcs ────────────────────────────────────
+
+def test_scan_day_funcs_finds_column_and_days():
+    from services.strategy_engine import scan_day_funcs
+    tokens = days_tok("AVG_DAYS", "High", 20)
+    assert scan_day_funcs(tokens) == [("High", 20)]
+
+
+def test_scan_day_funcs_empty_for_ordinary_formula():
+    from services.strategy_engine import scan_day_funcs
+    assert scan_day_funcs([tok_col("High")]) == []
+
+
+def test_collect_day_requests_resolves_own_strategy_column_formula():
+    """AVG_DAYS([MyCol], 20) where MyCol is this SAME strategy's own column
+    must resolve to MyCol's actual formula, not a bare [MyCol] reference —
+    this is how "any custom formula over N days" works."""
+    from services.strategy_engine import collect_day_requests
+    inner_formula = [tok_col("High"), tok_op("-"), tok_col("Low")]
+    strategy = {
+        "id": "s1", "active": True,
+        "columns": [
+            {"name": "MyCol", "formula": inner_formula, "fmt_rules": []},
+            {"name": "AvgMyCol", "formula": days_tok("AVG_DAYS", "MyCol", 20), "fmt_rules": []},
+        ],
+        "row_filter": [],
+    }
+    requests = collect_day_requests([strategy])
+    assert requests == [("MyCol", 20, inner_formula)]
+
+
+def test_collect_day_requests_falls_back_to_raw_column():
+    from services.strategy_engine import collect_day_requests
+    strategy = {
+        "id": "s1", "active": True,
+        "columns": [{"name": "AvgHigh", "formula": days_tok("AVG_DAYS", "High", 20), "fmt_rules": []}],
+        "row_filter": [],
+    }
+    requests = collect_day_requests([strategy])
+    assert requests == [("High", 20, [tok_col("High")])]
+
+
+def test_collect_day_requests_skips_inactive_strategies():
+    from services.strategy_engine import collect_day_requests
+    strategy = {
+        "id": "s1", "active": False,
+        "columns": [{"name": "AvgHigh", "formula": days_tok("AVG_DAYS", "High", 20), "fmt_rules": []}],
+        "row_filter": [],
+    }
+    assert collect_day_requests([strategy]) == []
+
+
+def test_collect_day_requests_deduplicates_across_sources():
+    from services.strategy_engine import collect_day_requests
+    days_formula = days_tok("AVG_DAYS", "High", 20)
+    strategy = {
+        "id": "s1", "active": True,
+        "columns": [{"name": "AvgHigh", "formula": days_formula, "fmt_rules": [
+            {"condition": days_tok("AVG_DAYS", "High", 20) + [tok_op(">"), tok_num(0)], "color": "#fff"},
+        ]}],
+        "row_filter": days_tok("AVG_DAYS", "High", 20) + [tok_op(">"), tok_num(0)],
+    }
+    requests = collect_day_requests([strategy])
+    assert requests == [("High", 20, [tok_col("High")])]
+
+
+def test_collect_day_requests_scans_notification_config():
+    from services.strategy_engine import collect_day_requests
+    strategy = {"id": "s1", "active": True, "columns": [], "row_filter": []}
+    notif_configs = {
+        "s1": {
+            "trigger_condition": days_tok("AVG_DAYS", "High", 20) + [tok_op(">"), tok_num(0)],
+            "risk_reward": {"numerator": days_tok("MIN_DAYS", "Low", 10), "denominator": []},
+            "metrics": [{"formula": days_tok("MAX_DAYS", "Close", 15)}],
+        }
+    }
+    requests = collect_day_requests([strategy], notif_configs)
+    assert set((c, d) for c, d, _ in requests) == {("High", 20), ("Low", 10), ("Close", 15)}
