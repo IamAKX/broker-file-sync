@@ -118,7 +118,7 @@ def test_email_channel_sends_title_and_message_via_notifications_api():
 
     calls = []
     with patch.object(notifications_api, "send_email", lambda title, message: calls.append((title, message))):
-        EmailChannel().send(NotificationPayload(title="T", message="M"))
+        EmailChannel().send(NotificationPayload(title="T", message="M")).result(timeout=5)
 
     assert calls == [("T", "M")]
 
@@ -133,7 +133,8 @@ def test_email_channel_swallows_api_error_instead_of_raising():
         raise ApiError("boom", "unknown_error", 500)
 
     with patch.object(notifications_api, "send_email", _raise):
-        EmailChannel().send(NotificationPayload(title="T", message="M"))   # must not raise
+        # must not raise, even once the background send actually runs
+        EmailChannel().send(NotificationPayload(title="T", message="M")).result(timeout=5)
 
 
 def test_email_channel_swallows_network_error_instead_of_raising():
@@ -146,7 +147,30 @@ def test_email_channel_swallows_network_error_instead_of_raising():
         raise NetworkError("unreachable")
 
     with patch.object(notifications_api, "send_email", _raise):
-        EmailChannel().send(NotificationPayload(title="T", message="M"))   # must not raise
+        # must not raise, even once the background send actually runs
+        EmailChannel().send(NotificationPayload(title="T", message="M")).result(timeout=5)
+
+
+def test_email_channel_send_does_not_block_caller():
+    """The whole point of dispatching to a background pool: send() must
+    return immediately regardless of how slow the underlying network call
+    is — this is the fix for the app going "Not Responding" when several
+    strategy alerts fired (and so emailed) on the same Live Master View
+    tick, each serialized inline on the GUI thread."""
+    import time
+    from api import notifications_api
+    from services.notifications.channels.email import EmailChannel
+    from services.notifications.payload import NotificationPayload
+
+    def _slow_send(title, message):
+        time.sleep(0.3)
+
+    with patch.object(notifications_api, "send_email", _slow_send):
+        start = time.monotonic()
+        future = EmailChannel().send(NotificationPayload(title="T", message="M"))
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.1
+        future.result(timeout=5)   # let it finish before the test exits
 
 
 # ── Sound asset ──────────────────────────────────────────────────────────
@@ -187,7 +211,14 @@ def test_notification_service_dispatches_to_email_channel(qapp):
     calls = []
     with patch.object(notifications_api, "send_email", lambda title, message: calls.append((title, message))):
         service = NotificationService(tray)
-        service.notify("T", "M", level=NotificationLevel.SUCCESS)
+        results = service.notify("T", "M", level=NotificationLevel.SUCCESS)
+        # Wait for EmailChannel's background dispatch — still inside the
+        # patch, since the background thread runs notifications_api.send_email
+        # whenever it happens to get scheduled, not necessarily before the
+        # `with` block exits and un-patches it.
+        for r in results:
+            if r is not None:
+                r.result(timeout=5)
 
     assert calls == [("T", "M")]
 
@@ -234,7 +265,11 @@ def test_notification_service_none_channels_delivers_to_all(qapp):
     email_calls = []
     with patch.object(notifications_api, "send_email", lambda title, message: email_calls.append(1)):
         service = NotificationService(tray)
-        service.notify("T", "M")
+        results = service.notify("T", "M")
+        # Wait while still inside the patch — see the sibling test above.
+        for r in results:
+            if r is not None:
+                r.result(timeout=5)
 
     assert tray.messages
     assert email_calls == [1]

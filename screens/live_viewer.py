@@ -1434,6 +1434,19 @@ class LiveViewerWindow(QWidget):
         thread) since delivery itself — the OS tray, a sound effect — needs
         to be on the GUI thread anyway; see the plan this feature followed
         for why that trade-off was made deliberately for a first version.
+
+        Every event this tick is delivered as ONE notification per channel,
+        not one per event — a market-wide move can cross several strategies'
+        triggers on the same tick, and showing/sounding N separate alerts
+        back to back (each also a real network call for the Email channel —
+        see services/notifications/channels/email.py) is both a worse
+        experience and was, before that channel's send() moved to a
+        background thread, the actual cause of the app freezing solid.
+        Exactly one event still goes out exactly as before (nothing to
+        combine); System tray gets a compact per-kind summary (real,
+        OS-enforced space limits — services.strategy_alerts.messages caps
+        and marks "+N more" rather than let the OS truncate silently), Email
+        gets the full per-stock detail for every event, unabridged.
         """
         from services.strategy_alerts import config_store as alerts_config_store
         from services.strategy_alerts import state_store as alerts_state_store
@@ -1452,13 +1465,38 @@ class LiveViewerWindow(QWidget):
         if notifier is None:
             return
         from services import notification_channels
+        from services.notifications.channels.system import SystemChannel
 
         enabled_channels = notification_channels.enabled_channel_ids()
-        for event in events:
+        if not enabled_channels:
+            return
+
+        if len(events) == 1:
+            event = events[0]
             notifier.notify(
                 event.payload.get("title", event.strategy_name),
                 event.payload.get("message", ""),
                 channels=enabled_channels,
+            )
+            return
+
+        from services.strategy_alerts import messages as alert_messages
+
+        title = alert_messages.render_batch_title(events)
+        level = alert_messages.render_batch_level(events)
+
+        system_channels = enabled_channels & {SystemChannel.CHANNEL_ID}
+        if system_channels:
+            notifier.notify(
+                title, alert_messages.render_batch_tray_message(events),
+                level=level, channels=system_channels,
+            )
+
+        other_channels = enabled_channels - {SystemChannel.CHANNEL_ID}
+        if other_channels:
+            notifier.notify(
+                title, alert_messages.render_batch_email_message(events),
+                level=level, channels=other_channels,
             )
 
     def _populate_table(self, data: list[list], changed_keys=set(), precomputed_disp=None):
