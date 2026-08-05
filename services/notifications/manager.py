@@ -23,7 +23,7 @@ class NotificationService:
     def notify(self, title: str, message: str, action=None,
                level: NotificationLevel = NotificationLevel.INFO,
                timeout_ms: int = 10_000,
-               channels: set[str] | None = None) -> None:
+               channels: set[str] | None = None) -> list:
         """``channels``, when given, restricts delivery to the channel ids in
         that set (see each channel's CHANNEL_ID, e.g. "system"/"email") —
         used by strategy-alert delivery to respect the user's global
@@ -33,12 +33,20 @@ class NotificationService:
         background-job notifications, which aren't gated by those toggles).
         Requesting a channel id with no matching registered channel (e.g.
         "telegram", not yet implemented) is a harmless no-op.
+
+        Returns each dispatched channel's own send() result (e.g.
+        EmailChannel's concurrent.futures.Future for its background-dispatched
+        network call) — every existing caller ignores this, it's there for a
+        caller (tests, mainly) that wants to wait for delivery to actually
+        finish rather than just assume it did the instant notify() returns.
         """
         payload = NotificationPayload(
             title=title, message=message, action=action,
             level=level, timeout_ms=timeout_ms,
         )
+        results = []
         for channel in self._channels:
             if channels is not None and getattr(channel, "CHANNEL_ID", None) not in channels:
                 continue
-            channel.send(payload)
+            results.append(channel.send(payload))
+        return results
