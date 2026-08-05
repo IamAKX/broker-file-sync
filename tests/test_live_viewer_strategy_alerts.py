@@ -111,6 +111,56 @@ def test_disabled_config_produces_no_notification(lmv):
     assert lmv._controller._notifier.calls == []
 
 
+def test_multiple_events_on_one_tick_batch_into_one_notification_per_channel(lmv):
+    """Two stocks triggering on the same tick must not become two separate
+    notifications per channel — see services/strategy_alerts/messages.py's
+    render_batch_* and this method's own docstring for why (this was the
+    literal cause of the app going "Not Responding" before Email's send()
+    moved off the GUI thread, and is unpleasant even off-thread: N tray
+    toasts and N sounds back to back for one market move)."""
+    alerts_config_store.save_config("strat-1", _config())
+    lmv._controller = _FakeController()
+    rows = [_row(signal=1, symbol="INFY"), _row(signal=1, symbol="TCS")]
+
+    lmv._run_strategy_alert_checks([STRATEGY], rows, {}, {})   # tick 1: both go "pending"
+    lmv._run_strategy_alert_checks([STRATEGY], rows, {}, {})   # tick 2: both fire ENTRY
+
+    calls = lmv._controller._notifier.calls
+    # Default enabled channels are {"system", "email"} — one batched notify()
+    # call per channel group, not one per event (would have been 2 x 2 = 4).
+    assert len(calls) == 2
+    channel_sets = [c["channels"] for c in calls]
+    assert {"system"} in channel_sets
+    assert {"email"} in channel_sets
+
+    system_call = next(c for c in calls if c["channels"] == {"system"})
+    email_call = next(c for c in calls if c["channels"] == {"email"})
+
+    assert system_call["title"] == email_call["title"] == "2 Signals — 2 New Entries"
+    # System's body is the compact per-kind summary line — both symbols, no
+    # per-stock detail (that's what makes it fit the tray's space limits).
+    assert "INFY" in system_call["message"] and "TCS" in system_call["message"]
+    assert "Sector" not in system_call["message"]
+    # Email's body is the full, unabridged per-stock detail for both.
+    assert "INFY" in email_call["message"] and "TCS" in email_call["message"]
+    assert email_call["message"].count("Sector:") == 2
+
+
+def test_single_event_is_not_batched(lmv):
+    """Exactly one event still goes out via the plain single-event path —
+    same title/message as before batching existed, no "1 Signals —" framing."""
+    alerts_config_store.save_config("strat-1", _config())
+    lmv._controller = _FakeController()
+
+    lmv._run_strategy_alert_checks([STRATEGY], [_row(signal=1)], {}, {})
+    lmv._run_strategy_alert_checks([STRATEGY], [_row(signal=1)], {}, {})
+
+    calls = lmv._controller._notifier.calls
+    assert len(calls) == 1
+    assert "Signals —" not in calls[0]["title"]
+    assert calls[0]["channels"] == {"system", "email"}
+
+
 def test_events_flush_state_to_disk(lmv):
     alerts_config_store.save_config("strat-1", _config())
     lmv._controller = _FakeController()

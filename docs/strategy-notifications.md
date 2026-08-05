@@ -311,6 +311,32 @@ These toggles are global and specific to strategy alerts — they don't affect t
 separate background-job notifications (historic save, LMV check, etc.), which
 keep their own existing behavior.
 
+### Multiple signals on one tick
+
+If more than one stock triggers an alert on the same Live Master View tick —
+a market-wide move crossing several strategies' entry conditions at once, say
+— you get **one combined notification per channel**, not one per stock. Each
+channel gets the level of detail that fits it:
+
+- **System tray**: one toast, one sound, with a compact summary grouped by
+  what happened — e.g. `Entries: INFY @1520.50, TCS @3800.00` /
+  `Targets: WIPRO @410.00` / `Stop-Outs: RELIANCE @2400.00`. Past 6 stocks in
+  one group it switches to `..., +N more` rather than let the OS silently
+  truncate a longer line.
+- **Email**: one email with every triggered stock's **full** detail —
+  sector, entry price, every metric, risk:reward — stacked one after another
+  under its own heading, exactly as detailed as the single-stock email
+  always was.
+
+The title summarizes the whole batch, e.g. `4 Signals — 2 New Entries, 1
+Target Achieved, 1 Stopped Out`, and the notification's severity follows the
+most attention-worthy thing in it: a **Stopped Out** anywhere in the batch
+always wins (shown as a warning), otherwise a **Target Achieved** does,
+otherwise it's an ordinary entry notification.
+
+A single triggered stock is unaffected — it's delivered exactly as before,
+with no "1 Signal —" framing.
+
 ---
 
 ## 🗂 Live Alerts Screen
