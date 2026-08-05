@@ -19,6 +19,13 @@ entry, a target hit, a resolve) but merely marked dirty for passive
 running-high/low updates on every tick — callers doing per-tick updates
 should call flush() periodically (see screens/live_viewer.py's wiring) rather
 than relying on a transition to happen to save it.
+
+Also tracks a small "cooldown" set — (strategy_id, symbol) keys that just
+resolved and are waiting to see their trigger condition go false at least
+once before a new signal can start (see engine.py's _evaluate_strategy).
+Without it, a signal resolving while its trigger is STILL true (the common
+case) would immediately re-arm into a brand new pending→open→resolved cycle
+on the very next tick, for what is really one continuous price move.
 """
 
 import json
@@ -51,6 +58,15 @@ class _Store:
         self._loaded_for: str | None = None
         self._open_signals: dict = {}
         self._alert_history: list = []
+        # (strategy_id, symbol) keys that just resolved (target achieved or
+        # stopped out) and are waiting to see their trigger condition go
+        # false at least once before a new signal is allowed to start — see
+        # engine.py's _evaluate_strategy. Without this, a signal that
+        # resolves while its trigger is STILL true (the common case — e.g.
+        # price is still above the breakout level that got you in) would
+        # immediately start a brand new pending→open→resolved cycle on the
+        # very next tick, for what is really the same one continuous move.
+        self._cooldown: set = set()
         self._dirty = False
 
     def _ensure_loaded(self) -> None:
@@ -60,6 +76,7 @@ class _Store:
         self._flush_if_dirty()
         self._open_signals = {}
         self._alert_history = []
+        self._cooldown = set()
         if os.path.exists(path):
             try:
                 with open(path, "r", encoding="utf-8") as f:
@@ -67,6 +84,7 @@ class _Store:
                 if isinstance(data, dict):
                     self._open_signals = data.get("open_signals") or {}
                     self._alert_history = data.get("alert_history") or []
+                    self._cooldown = set(data.get("cooldown") or [])
             except Exception:
                 pass
         self._loaded_for = path
@@ -77,7 +95,11 @@ class _Store:
         try:
             with open(self._loaded_for, "w", encoding="utf-8") as f:
                 json.dump(
-                    {"open_signals": self._open_signals, "alert_history": self._alert_history},
+                    {
+                        "open_signals": self._open_signals,
+                        "alert_history": self._alert_history,
+                        "cooldown": sorted(self._cooldown),
+                    },
                     f, indent=2, ensure_ascii=False,
                 )
         except OSError:
@@ -114,10 +136,27 @@ class _Store:
         self._dirty = True
         self._flush_if_dirty()
 
+    def is_cooling_down(self, key: str) -> bool:
+        self._ensure_loaded()
+        return key in self._cooldown
+
+    def set_cooldown(self, key: str) -> None:
+        self._ensure_loaded()
+        if key not in self._cooldown:
+            self._cooldown.add(key)
+            self._dirty = True
+
+    def clear_cooldown(self, key: str) -> None:
+        self._ensure_loaded()
+        if key in self._cooldown:
+            self._cooldown.discard(key)
+            self._dirty = True
+
     def clear_all(self) -> None:
         self._ensure_loaded()
         self._open_signals = {}
         self._alert_history = []
+        self._cooldown = set()
         self._dirty = True
         self._flush_if_dirty()
 
@@ -129,8 +168,10 @@ class _Store:
         self._ensure_loaded()
         prefix = f"{strategy_id}::"
         remaining = {k: v for k, v in self._open_signals.items() if not k.startswith(prefix)}
-        if len(remaining) != len(self._open_signals):
+        remaining_cooldown = {k for k in self._cooldown if not k.startswith(prefix)}
+        if len(remaining) != len(self._open_signals) or len(remaining_cooldown) != len(self._cooldown):
             self._open_signals = remaining
+            self._cooldown = remaining_cooldown
             self._dirty = True
             self._flush_if_dirty()
 
@@ -163,6 +204,18 @@ def clear_open_signal(key: str, force_flush: bool = True) -> None:
 
 def append_alert_history(record: dict) -> None:
     _store.append_alert_history(record)
+
+
+def is_cooling_down(key: str) -> bool:
+    return _store.is_cooling_down(key)
+
+
+def set_cooldown(key: str) -> None:
+    _store.set_cooldown(key)
+
+
+def clear_cooldown(key: str) -> None:
+    _store.clear_cooldown(key)
 
 
 def clear_all() -> None:

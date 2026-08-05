@@ -55,3 +55,45 @@ def test_clear_all_resets_both_stores():
 
     assert state_store.get_open_signals() == {}
     assert state_store.get_alert_history() == []
+
+
+# ── Cooldown ──────────────────────────────────────────────────────────────────
+
+def test_not_cooling_down_by_default():
+    assert state_store.is_cooling_down("s1::INFY") is False
+
+
+def test_set_cooldown_marks_key_cooling_down():
+    state_store.set_cooldown("s1::INFY")
+    assert state_store.is_cooling_down("s1::INFY") is True
+    assert state_store.is_cooling_down("s1::TCS") is False   # unaffected
+
+
+def test_clear_cooldown_unmarks_key():
+    state_store.set_cooldown("s1::INFY")
+    state_store.clear_cooldown("s1::INFY")
+    assert state_store.is_cooling_down("s1::INFY") is False
+
+
+def test_cooldown_persists_to_disk():
+    state_store.set_cooldown("s1::INFY")
+    state_store.flush()
+
+    state_store.reset_for_user_switch()  # drop in-memory cache, force a reload from disk
+    assert state_store.is_cooling_down("s1::INFY") is True
+
+
+def test_clear_all_also_clears_cooldown():
+    state_store.set_cooldown("s1::INFY")
+    state_store.clear_all()
+    assert state_store.is_cooling_down("s1::INFY") is False
+
+
+def test_clear_strategy_also_clears_that_strategys_cooldown_only():
+    state_store.set_cooldown("strat-1::INFY")
+    state_store.set_cooldown("strat-2::TCS")
+
+    state_store.clear_strategy("strat-1")
+
+    assert state_store.is_cooling_down("strat-1::INFY") is False
+    assert state_store.is_cooling_down("strat-2::TCS") is True

@@ -270,3 +270,98 @@ def test_multiple_targets_hit_in_the_same_tick_both_notify():
     assert {e.payload["metric_name"] for e in events} == {"Target 1", "Target 2"}
     assert state_store.get_open_signals() == {}
     assert state_store.get_alert_history()[0]["resolution"] == "all_targets_achieved"
+
+
+# ── Cooldown after resolution ─────────────────────────────────────────────────
+# A signal resolving (target achieved or stopped out) while its trigger is
+# STILL true — very often exactly why it resolved, e.g. price is still above
+# the breakout level that triggered entry in the first place — must not
+# immediately start a brand new pending→open→resolved cycle for what is
+# really the same one continuous price move.
+
+def test_resolved_target_does_not_immediately_restart_while_condition_still_true():
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=95, target=110)}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)                 # pending
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1))  # entry
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=111, high=111)], now=T0 + timedelta(minutes=2),
+    )
+    assert events and events[0].kind == EVENT_TARGET
+    assert state_store.get_open_signals() == {}
+
+    # Trigger ("Signal" > 0) is still true — price hasn't dropped. Without
+    # the cooldown, this tick would start a brand new pending signal.
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=111, high=111)], now=T0 + timedelta(minutes=3),
+    )
+    assert events == []
+    assert state_store.get_open_signals() == {}
+
+
+def test_resolved_stop_out_does_not_immediately_restart_while_condition_still_true():
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=95, target=110)}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1))
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=94, low=94)], now=T0 + timedelta(minutes=2),
+    )
+    assert events and events[0].kind == EVENT_STOP_OUT
+
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=94, low=94)], now=T0 + timedelta(minutes=3),
+    )
+    assert events == []
+    assert state_store.get_open_signals() == {}
+
+
+def test_cooldown_clears_once_condition_goes_false_and_rearms_on_next_true():
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=95, target=110)}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1))
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=111, high=111)], now=T0 + timedelta(minutes=2),
+    )
+    assert events and events[0].kind == EVENT_TARGET
+
+    # Condition goes false — cooldown clears, but that alone doesn't start
+    # anything (nothing is true yet).
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=0, price=105)], now=T0 + timedelta(minutes=3),
+    )
+    assert events == []
+    assert state_store.get_open_signals() == {}
+
+    # A genuinely new true is a legitimate new signal — must fire normally.
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=4),
+    )
+    assert events == []   # debounce_minutes=0 still needs to see it true on a later tick
+    signals = state_store.get_open_signals()
+    assert len(signals) == 1
+    assert next(iter(signals.values()))["state"] == "pending"
+
+
+def test_cooldown_is_per_symbol_not_per_strategy():
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=95, target=110)}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100, symbol="INFY")], now=T0)
+    evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100, symbol="INFY")],
+        now=T0 + timedelta(minutes=1),
+    )
+    events = evaluate_tick(
+        [STRATEGY], configs,
+        [_row(signal=1, price=111, high=111, symbol="INFY")],
+        now=T0 + timedelta(minutes=2),
+    )
+    assert events and events[0].kind == EVENT_TARGET
+
+    # A different stock hitting the same strategy's trigger is unaffected —
+    # INFY's cooldown must not block TCS.
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100, symbol="TCS")],
+        now=T0 + timedelta(minutes=3),
+    )
+    assert events == []
+    signals = state_store.get_open_signals()
+    assert len(signals) == 1
+    assert next(iter(signals.values()))["symbol"] == "TCS"

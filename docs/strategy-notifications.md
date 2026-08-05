@@ -74,12 +74,29 @@ screen.
 resolved — moved into Live Alerts history — either:
     • every Target metric achieved (last one's alert already sent), or
     • a Stop Loss/Trailing Exit crossing stopped it out
+    │
+    ▼
+cooldown — waits for the trigger condition to go FALSE at least once
+    │  (very often it's still true right at resolution — e.g. price is
+    │   still above the breakout level that got you in)
+    ▼
+ no signal — fully rearmed, ready to start a fresh "pending" next time
+             the trigger condition goes true
 ```
 
 Key rules:
 - **Only one pending/open signal per strategy per stock at a time.** If the trigger
   fires again for a stock that's already pending or open under the same strategy,
   it's ignored until that signal resolves.
+- **A resolved signal won't restart while its trigger is still true.** Once a
+  signal resolves (Target Achieved or Stopped Out), that stock/strategy pair
+  waits to see the trigger condition go false at least once before a new
+  signal can start — otherwise a stock resolving while still comfortably
+  above (or below) its trigger level would immediately begin a brand new
+  pending→open→resolved cycle on the very next tick, firing repeat alerts
+  for what is really one continuous price move. This is invisible in the
+  UI — you'll just correctly *not* see a new alert until something actually
+  changes (the condition genuinely turns false, then true again).
 - **Debounce is wall-clock, not tick-count** — it doesn't matter how fast or slow
   the Live Master View is polling; "2 minutes" means 2 real minutes of the
   condition holding continuously. Any single tick where it reads false resets the

@@ -126,6 +126,14 @@ def _evaluate_strategy(
         )
 
         if signal is None:
+            if state_store.is_cooling_down(key):
+                # Resolved (target achieved / stopped out) last time we saw
+                # it, and the trigger hasn't gone false since — don't start
+                # a new signal for what's still the same continuous move.
+                # Once it finally does go false, this key is fully rearmed.
+                if not is_true:
+                    state_store.clear_cooldown(key)
+                continue
             if is_true:
                 state_store.set_open_signal(
                     key,
@@ -318,6 +326,11 @@ def _update_open_signal(
         signal["resolution"] = "stopped_out" if stopped_out else "all_targets_achieved"
         state_store.append_alert_history(signal)
         state_store.clear_open_signal(key)
+        # Don't let this symbol/strategy re-arm into a brand new signal
+        # while its trigger is still sitting true — very often exactly why
+        # it resolved in the first place (e.g. still above the breakout
+        # level that got it in). See state_store.py's cooldown docs.
+        state_store.set_cooldown(key)
     else:
         state_store.set_open_signal(key, signal, force_flush=bool(events))
 

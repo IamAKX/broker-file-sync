@@ -55,3 +55,15 @@ class EmailChannel(NotificationChannel):
             notifications_api.send_email(title, message)
         except (ApiError, NetworkError) as exc:
             error_logger.error("Email notification delivery failed: %s", exc)
+        except Exception as exc:   # noqa: BLE001
+            # Deliberately broader than the ApiError/NetworkError above.
+            # This runs on a background thread (see send()) with nothing
+            # downstream ever calling .result() on the Future in production
+            # — before send() was dispatched to a thread, ANY exception here
+            # propagated up to whatever caught it inline (e.g. live_viewer's
+            # per-tick guard), so it was at least visible somewhere. Now, an
+            # exception that isn't ApiError/NetworkError (a bug in this
+            # module, an unexpected response shape, anything) would
+            # otherwise vanish into the Future with zero trace of email
+            # having silently stopped working.
+            error_logger.exception("Email notification delivery failed unexpectedly: %s", exc)
