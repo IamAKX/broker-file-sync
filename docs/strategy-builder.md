@@ -29,54 +29,16 @@ The Strategy Builder lets you create custom calculated columns on top of the Liv
 
 ## Formula Builder
 
-Formulas are built visually using chips:
+Every formula in the app — a column's value, the Row Filter, a
+conditional-formatting condition, a Notification's trigger/metrics — is
+built in the same Expression Editor: a plain text box (type directly, or
+click a Field/Function/Operator/Row/Constant/Variable in the catalogue to
+insert it at the cursor), a **Compile & Test** button that validates against
+your actually-loaded sheet and highlights exactly what's wrong if it
+doesn't compile, and **Save**.
 
-```
-[ LTP ] [ - ] [ Prev Close ] [ / ] [ Prev Close ] [ * ] [ 100 ]
-```
-
-### Building a formula
-- **Click a column name pill** → adds a column reference token `[LTP]`
-- **Type a number** in the number box → click **Add** to insert it
-- **Click an operator button** → `+  −  ×  ÷  (  )`
-- **Click a function button** → inserts `MIN(`, `ABS(` etc.
-- **Click a chip** to remove it
-
----
-
-## Per-Row Functions
-
-These operate on values within a single row.
-
-| Function | Description | Example |
-|----------|-------------|---------|
-| `ABS` | Absolute value | `ABS( [Change] )` |
-| `ROUND` | Round to nearest integer | `ROUND( [LTP] )` |
-| `FLOOR` | Round down | `FLOOR( [LTP] )` |
-| `CEIL` | Round up | `CEIL( [LTP] )` |
-| `MIN` | Minimum of values | `MIN( [Bid] , [Ask] )` |
-| `MAX` | Maximum of values | `MAX( [High] , [Low] )` |
-| `SUM` | Sum of values | `SUM( [Qty] , [Lots] )` |
-| `IF` | Conditional value | `IF( [LTP] > 100 , 1 , 0 )` |
-
----
-
-## Aggregate Functions
-
-These operate **across all rows** in the table and return a single value used in every row's calculation.
-
-| Function | Description |
-|----------|-------------|
-| `SUM_ALL(col)` | Sum of all values in a column |
-| `MIN_ALL(col)` | Minimum value across all rows |
-| `MAX_ALL(col)` | Maximum value across all rows |
-| `AVG_ALL(col)` | Average value across all rows |
-| `COUNT_ALL(col)` | Count of non-empty rows in a column |
-
-**Example:** % contribution to total volume
-```
-[Volume] / SUM_ALL(Volume) * 100
-```
+**Full reference — every function, every section, with examples:**
+[📐 Formula Builder Reference](formula-builder.md).
 
 ---
 

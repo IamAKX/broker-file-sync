@@ -32,6 +32,7 @@
 | [🚀 Setup & Installation](docs/setup.md) | Python setup, dependencies, running the app |
 | [🏗️ Architecture](docs/architecture.md) | Project structure, MVC design, data flow |
 | [🧮 Strategy Builder](docs/strategy-builder.md) | Formula syntax, functions, conditional formatting |
+| [📐 Formula Builder Reference](docs/formula-builder.md) | Every function, every catalogue section, with examples |
 | [🔔 Strategy Notifications](docs/strategy-notifications.md) | Trade-signal alerts: trigger, debounce, metrics, lifecycle, channels |
 | [🔄 Live Master View](docs/live-master-view.md) | File watcher, merge logic, column filter |
 | [🎨 Theming & Fonts](docs/theming.md) | Theme tokens, font scale constants, customisation |
