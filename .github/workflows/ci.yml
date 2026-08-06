@@ -22,7 +22,7 @@ permissions:
 jobs:
   test:
     name: Run Tests
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
 
     steps:
       - uses: actions/checkout@v4
@@ -64,7 +64,7 @@ jobs:
 
   compute-version:
     name: Compute Next Version
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs: test
     if: github.event_name == 'workflow_dispatch'
     outputs:
@@ -89,7 +89,7 @@ jobs:
 
   build-windows:
     name: Build Windows EXE
-    runs-on: windows-latest
+    runs-on: blacksmith-4vcpu-windows-2025
     needs:
       - test
       - compute-version
@@ -151,7 +151,7 @@ jobs:
 
   build-macos:
     name: Build macOS App
-    runs-on: macos-latest
+    runs-on: blacksmith-6vcpu-macos-15
     needs:
       - test
       - compute-version
@@ -206,7 +206,7 @@ jobs:
 
   release:
     name: Create GitHub Release
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     needs:
       - build-windows
       - build-macos
