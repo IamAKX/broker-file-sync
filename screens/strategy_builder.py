@@ -1720,15 +1720,33 @@ class StrategyEditor(QWidget):
         )
         self._build()
 
+    def _field_names(self) -> list:
+        """The loaded LMV's real columns plus every Formula Builder (Data
+        menu) field — see services.formula_tokens.all_field_codes — that
+        isn't already one of them, for any formula/condition editor's Fields
+        list. Formula Builder fields only become real LMV columns once
+        External Import is configured and computing them, but are offered
+        here regardless so a strategy can reference one (e.g. a code just
+        added there) right away — unresolved, it evaluates to nothing, same
+        as any other momentarily-missing column, rather than being
+        unselectable. Re-reads the store fresh on every call (not cached at
+        construction) so a field added after this editor opened isn't
+        invisible to it.
+        """
+        from services.formula_tokens import all_field_codes
+        extra = [c for c in all_field_codes() if c not in self._lmv_headers]
+        return self._lmv_headers + extra
+
     def _combined_headers_and_values(self) -> tuple:
-        """This strategy's own column names + the loaded LMV's columns, plus
-        each own-column's computed value on the first row — for any formula/
-        condition editor that should be able to reference either kind of
-        column (the row filter editor, and every Notifications-section
-        formula/condition editor)."""
+        """This strategy's own column names + the loaded LMV's columns +
+        every Formula Builder field (see _field_names), plus each own-
+        column's computed value on the first row — for any formula/
+        condition editor that should be able to reference any of these (the
+        row filter editor, and every Notifications-section formula/condition
+        editor)."""
         from services.strategy_engine import evaluate
         strat_cols = self._strategy.get("columns", [])
-        all_headers = self._lmv_headers + [c["name"] for c in strat_cols]
+        all_headers = self._field_names() + [c["name"] for c in strat_cols]
         extra_values = {}
         for col in strat_cols:
             extra_values[col["name"]] = evaluate(
@@ -1879,7 +1897,7 @@ class StrategyEditor(QWidget):
 
     def _add_column(self):
         col = store.new_column(f"Col{len(self._strategy['columns']) + 1}")
-        dlg = ColumnEditorDialog(col, self._lmv_headers, self._theme,
+        dlg = ColumnEditorDialog(col, self._field_names(), self._theme,
                                  lmv_first_row=self._lmv_first_row,
                                  all_lmv_data=self._all_lmv_data, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -1906,7 +1924,7 @@ class StrategyEditor(QWidget):
 
     def _edit_column(self, idx: int):
         col = self._strategy["columns"][idx]
-        dlg = ColumnEditorDialog(col, self._lmv_headers, self._theme,
+        dlg = ColumnEditorDialog(col, self._field_names(), self._theme,
                                  lmv_first_row=self._lmv_first_row,
                                  all_lmv_data=self._all_lmv_data, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -2301,10 +2319,18 @@ class StrategyBuilderScreen(QWidget):
         self._refresh_list()
         self._open_editor(strat)
 
+    def _field_names(self) -> list:
+        """Same as StrategyEditor._field_names — the loaded LMV's real
+        columns plus every Formula Builder (Data menu) field not already
+        one of them, so a saved Variable can reference one too."""
+        from services.formula_tokens import all_field_codes
+        extra = [c for c in all_field_codes() if c not in self._lmv_headers]
+        return self._lmv_headers + extra
+
     def _open_variables_manager(self):
         from screens.formula_editor import VariablesManagerDialog
         dlg = VariablesManagerDialog(
-            self._lmv_headers, self._lmv_first_row, self._all_lmv_data,
+            self._field_names(), self._lmv_first_row, self._all_lmv_data,
             theme=self._theme, parent=self,
         )
         dlg.exec()

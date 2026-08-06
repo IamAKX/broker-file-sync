@@ -64,6 +64,42 @@ OPERATORS = ["+", "-", "*", "/"]
 STORE_KEY = "external_import_formulas"
 
 
+def all_field_codes() -> list[str]:
+    """Every formula "code" currently defined in the Formula Builder (Data
+    menu) — the 56 built-ins (services.formula_engine.FORMULA_CODES) plus
+    any custom ones the user has added/saved there, built-ins first,
+    deduped.
+
+    These only become real LMV columns once External Import is configured
+    and actually computing them (see services.external_import_source) — but
+    a caller offering a formula/expression editor's Fields list (e.g.
+    Strategy Builder's Column/row-filter/notification editors) can still
+    list every one of them ahead of that, so a strategy formula can
+    reference a Formula Builder field the moment it's created there instead
+    of only after External Import happens to be wired up and already
+    producing that column. An unresolved reference just evaluates to
+    nothing (row_data.get() returns None) — same "blank rather than crash"
+    behavior as any other momentarily-missing column — rather than being
+    unselectable/rejected as "unknown".
+
+    Always re-reads config_store (server-first, like every other store in
+    this app) rather than caching — callers should call this fresh each
+    time they build a Fields list, not once at startup, so a formula added
+    after that point isn't invisible (the exact staleness pitfall
+    LiveViewerWindow.set_strategies' docstring warns about for strategies).
+    """
+    from services import config_store, formula_engine
+
+    codes = list(formula_engine.FORMULA_CODES)
+    seen = set(codes)
+    for f in config_store.load_json(STORE_KEY, []):
+        code = (f.get("code") or "").strip()
+        if code and code not in seen:
+            seen.add(code)
+            codes.append(code)
+    return codes
+
+
 def tokens_to_display(tokens: list) -> str:
     parts = []
     for tok in tokens:

@@ -492,7 +492,18 @@ class ExpressionEditorDialog(QDialog):
         # Computed strategy-column values (name -> value) merged into the test
         # row so a row filter can be compiled against the columns it references.
         self._extra_row_values = dict(extra_row_values or {})
-        self._lmv_first_row = lmv_first_row or {}
+        # A copy, not the caller's own dict — self._lmv_headers can include
+        # Fields list entries the caller doesn't have a real value for yet
+        # (e.g. a Formula Builder field not currently produced by External
+        # Import — see StrategyEditor._field_names), backfilled to None
+        # below so compile_check's "unknown column" check (key presence,
+        # not value) doesn't reject a reference to one. Mutating the
+        # caller's own row dict in place would leak those None-valued keys
+        # into whatever else it's shared with (e.g. StrategyEditor's own
+        # column-value evaluation).
+        self._lmv_first_row = dict(lmv_first_row or {})
+        for h in self._lmv_headers:
+            self._lmv_first_row.setdefault(h, None)
         self._all_lmv_data  = all_lmv_data or ([lmv_first_row] if lmv_first_row else [])
         self._theme = theme
         self._mode  = mode
