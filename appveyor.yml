@@ -1,0 +1,53 @@
+version: '{build}'
+
+image: Visual Studio 2022
+
+# Not a Visual Studio project — MSBuild mode (AppVeyor's default) looks for a
+# .sln/.vcxproj and fails with "no Visual Studio project or solution files
+# were found". Defining build_script below switches AppVeyor to Script mode
+# automatically, same PyInstaller steps as .github/workflows/ci.yml's
+# build-windows job.
+build: off
+
+environment:
+  PYTHON: "C:\\Python311-x64"
+
+clone_depth: 1
+
+install:
+  - "%PYTHON%\\python.exe -m pip install --upgrade pip"
+  - "%PYTHON%\\python.exe -m pip install -r requirements.txt"
+  - "%PYTHON%\\python.exe -m pip install openpyxl xlrd pyinstaller pywin32"
+
+build_script:
+  - ps: |
+      & "$env:PYTHON\python.exe" -m PyInstaller --windowed --onedir --name "BrokerFileSync" `
+        --icon "assets\icons\app_logo.ico" `
+        --add-data "assets;assets" `
+        --add-data "screens;screens" `
+        --add-data "services;services" `
+        --add-data "components;components" `
+        --add-data "font_scale.py;." `
+        --collect-data openpyxl `
+        --collect-all win32com `
+        --collect-all pythoncom `
+        --hidden-import win32com `
+        --hidden-import win32com.client `
+        --hidden-import win32com.server `
+        --hidden-import pythoncom `
+        --hidden-import pywintypes `
+        --hidden-import win32api `
+        --hidden-import win32con `
+        --manifest "windows_dpi.manifest" `
+        main.py
+
+after_build:
+  - ps: Compress-Archive -Path dist\BrokerFileSync\* -DestinationPath dist\BrokerFileSync-windows.zip
+
+artifacts:
+  - path: dist\BrokerFileSync-windows.zip
+    name: BrokerFileSync-windows
+
+# No automatic deploy — download the zip from this build's "Artifacts" tab
+# on AppVeyor. Add a deploy: block later (e.g. GitHub Releases) if you want
+# that automated too.
