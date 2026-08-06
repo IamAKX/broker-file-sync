@@ -20,7 +20,16 @@ install:
   - "%PYTHON%\\python.exe -m pip install openpyxl xlrd pyinstaller pywin32"
 
 build_script:
+  # AppVeyor's PowerShell runner defaults $ErrorActionPreference to "Stop",
+  # which makes PowerShell treat ANY stderr write from a native .exe as a
+  # terminating NativeCommandError — PyInstaller logs its normal INFO/
+  # WARNING progress lines to stderr, so the very first one used to abort
+  # the step even though PyInstaller itself went on to finish the build
+  # successfully. "Continue" here restores normal behavior (stderr output
+  # is just output); $LASTEXITCODE below is the real, reliable pass/fail
+  # signal for a native command.
   - ps: |
+      $ErrorActionPreference = "Continue"
       & "$env:PYTHON\python.exe" -m PyInstaller --windowed --onedir --name "BrokerFileSync" `
         --icon "assets\icons\app_logo.ico" `
         --add-data "assets;assets" `
@@ -40,6 +49,10 @@ build_script:
         --hidden-import win32con `
         --manifest "windows_dpi.manifest" `
         main.py
+      if ($LASTEXITCODE -ne 0) {
+        throw "PyInstaller failed with exit code $LASTEXITCODE"
+      }
+      $ErrorActionPreference = "Stop"
 
 after_build:
   - ps: Compress-Archive -Path dist\BrokerFileSync\* -DestinationPath dist\BrokerFileSync-windows.zip
