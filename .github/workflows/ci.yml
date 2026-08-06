@@ -1,12 +1,5 @@
 name: CI — Test & Build (main)
 
-# Tests run on every push/PR to main (cheap, Linux). The Windows + macOS
-# builds and the release below only run on-demand (workflow_dispatch, the
-# "Run workflow" button in the Actions tab, or `gh workflow run ci.yml`) —
-# they used to run on every push to main too, which burns Actions minutes
-# fast on a free/personal plan (macOS runners cost 10x, Windows 2x, so a
-# handful of pushes exhausted the monthly quota and silently stopped every
-# later run, tests included, from even being queued).
 on:
   push:
     branches:
@@ -14,7 +7,6 @@ on:
   pull_request:
     branches:
       - main
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -22,7 +14,7 @@ permissions:
 jobs:
   test:
     name: Run Tests
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -64,9 +56,9 @@ jobs:
 
   compute-version:
     name: Compute Next Version
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs: test
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     outputs:
       version: ${{ steps.next.outputs.version }}
 
@@ -89,11 +81,11 @@ jobs:
 
   build-windows:
     name: Build Windows EXE
-    runs-on: blacksmith-4vcpu-windows-2025
+    runs-on: windows-latest
     needs:
       - test
       - compute-version
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v4
@@ -151,11 +143,11 @@ jobs:
 
   build-macos:
     name: Build macOS App
-    runs-on: blacksmith-6vcpu-macos-15
+    runs-on: macos-latest
     needs:
       - test
       - compute-version
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - uses: actions/checkout@v4
@@ -206,12 +198,12 @@ jobs:
 
   release:
     name: Create GitHub Release
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     needs:
       - build-windows
       - build-macos
       - compute-version
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     steps:
       - name: Download Windows Artifact
