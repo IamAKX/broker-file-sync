@@ -165,6 +165,18 @@ def _save_raw(data: list):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def clear_local_cache() -> None:
+    """Deletes strategies.json, the local read-cache behind load_all() —
+    used by File > Clear Cache (see app_window.py._clear_cache). Safe to
+    call any time: load_all() always tries the server first regardless of
+    whether this file exists, so removing it only matters for whatever a
+    stale/corrupted local copy would otherwise serve the next time the app
+    is offline. A no-op if the file isn't there.
+    """
+    if os.path.exists(_STORE_FILE):
+        os.remove(_STORE_FILE)
+
+
 def _backfill_defaults(strategies: list) -> list:
     for s in strategies:
         s.setdefault("category", "Daily")

@@ -51,6 +51,20 @@ def _save_raw(data: dict):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def clear_local_cache() -> None:
+    """Deletes config_data.json, the local read-cache behind every
+    save_json/load_json key here (Formula Builder formulas, Config Editor
+    tabs, LMV highlight colors, theme, ...) — used by File > Clear Cache
+    (see app_window.py._clear_cache). Safe to call any time: load_json()
+    always tries the server first regardless of whether this file exists,
+    so removing it only matters for whatever a stale/corrupted local copy
+    would otherwise serve the next time the app is offline. A no-op if the
+    file isn't there.
+    """
+    if os.path.exists(_STORE_FILE):
+        os.remove(_STORE_FILE)
+
+
 def save_json(key: str, value) -> None:
     """Persist any JSON-serializable value under *key*. The server is the
     source of truth; config_data.json is only a local read cache, updated

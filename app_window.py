@@ -32,6 +32,7 @@ class MainWindow(QMainWindow):
         self._topbar.export_strategies_requested.connect(self._export_all_strategies)
         self._topbar.import_strategies_requested.connect(self._import_all_strategies)
         self._topbar.manage_categories_requested.connect(self._open_manage_categories)
+        self._topbar.clear_cache_requested.connect(self._clear_cache)
         root.addWidget(self._topbar)
 
         body = QHBoxLayout()
@@ -284,6 +285,63 @@ class MainWindow(QMainWindow):
         strategy_builder = self._screens.get("strategy_builder")
         if strategy_builder is not None:
             strategy_builder.reload_strategies()
+
+    def _clear_cache(self):
+        """File > Clear Cache: deletes the local read-cache files that
+        mirror server data (services.config_store's config_data.json —
+        Formula Builder formulas, Config Editor tabs, highlight colors,
+        theme; services.strategy_store's strategies.json — Strategy
+        Builder strategies), then re-pulls everything fresh into every
+        currently open screen — the same reload reload_per_user_data() does
+        on login, plus an open Live Master View window, whose own strategy
+        list is a separate in-memory snapshot with the exact same
+        staleness issue (see screens.live_viewer.LiveViewerWindow.
+        set_strategies' docstring).
+
+        Both files are pure read-caches — load_json()/load_all() always try
+        the server first regardless of whether either file exists, so this
+        mainly matters for whatever a stale/corrupted local copy would
+        otherwise serve the next time the app is offline; deleting them
+        loses nothing server-side.
+
+        Deliberately leaves alone:
+          - auth_session.json (api.token_store) — the login session, not a
+            data cache; clearing it would silently log the user out.
+          - strategy_alert_state_<email>.json (services.strategy_alerts.
+            state_store) — local-only alert/cooldown history with no
+            server copy; deleting it would be real data loss, not a
+            cache refresh.
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        reply = QMessageBox.question(
+            self, "Clear Cache",
+            "This clears locally cached Strategy Builder and Formula "
+            "Builder/Config data, then re-fetches everything fresh from "
+            "the server. Your login session and notification alert "
+            "history are not affected. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        from services import config_store, strategy_store
+        try:
+            config_store.clear_local_cache()
+            strategy_store.clear_local_cache()
+        except OSError as exc:
+            QMessageBox.warning(self, "Clear Cache", f"Could not remove a cache file:\n\n{exc}")
+            return
+
+        self.reload_per_user_data()
+
+        data_import = self._screens.get("data_import")
+        viewer = getattr(data_import, "_live_viewer", None) if data_import is not None else None
+        if viewer is not None and not viewer.isHidden():
+            viewer._refresh_day_history_from_store()
+
+        QMessageBox.information(
+            self, "Clear Cache", "Cache cleared — data refreshed from the server.")
 
     def reload_per_user_data(self):
         """Re-pulls every eagerly-loaded, now-per-user store — called on
