@@ -90,14 +90,15 @@ def test_expression_editor_dialog_creates(qapp):
     assert dlg is not None
 
 
-def test_expression_editor_has_six_nav_items(qapp):
+def test_expression_editor_has_seven_nav_items(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     from PySide6.QtWidgets import QListWidget
     dlg = ExpressionEditorDialog([], ["LTP"], [], {})
     # The nav list is the leftmost QListWidget
     nav = dlg._nav_list
     texts = [nav.item(i).text() for i in range(nav.count())]
-    assert texts == ["Functions", "Operators", "Fields", "Rows", "Constants", "Variables"]
+    assert texts == ["Functions", "Historic Value", "Operators", "Fields",
+                     "Rows", "Constants", "Variables"]
 
 
 def test_expression_editor_get_tokens_empty(qapp):
@@ -164,7 +165,7 @@ def test_editor_search_filters_functions(qapp):
 def test_editor_field_catalogue_includes_lmv_headers(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     dlg = ExpressionEditorDialog([], ["LTP", "CLOSE", "OPEN"], [], {})
-    dlg._nav_list.setCurrentRow(2)  # Fields
+    dlg._nav_list.setCurrentRow(3)  # Fields
     items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
     assert "[LTP]" in items
     assert "[CLOSE]" in items
@@ -173,7 +174,7 @@ def test_editor_field_catalogue_includes_lmv_headers(qapp):
 def test_editor_constants_include_true_false(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     dlg = ExpressionEditorDialog([], [], [], {})
-    dlg._nav_list.setCurrentRow(4)  # Constants
+    dlg._nav_list.setCurrentRow(5)  # Constants
     items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
     assert "True" in items
     assert "False" in items
@@ -285,12 +286,175 @@ def test_function_catalogue_has_avg_days():
     assert "AVG_DAYS" in names
 
 
+# ── VALUE_DAYS_AGO(column, days) / VALUE_ON_DATE(column, date) point lookups
+
+def test_parse_value_days_ago_captures_column_and_days_bracket_form():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_DAYS_AGO([High], 2)")
+    assert tokens == [{"type": "func", "value": "VALUE_DAYS_AGO(", "col_arg": "High", "days_arg": 2}]
+
+
+def test_parse_value_days_ago_captures_column_and_days_bare_word_form():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_DAYS_AGO(High, 2)")
+    assert tokens == [{"type": "func", "value": "VALUE_DAYS_AGO(", "col_arg": "High", "days_arg": 2}]
+
+
+def test_parse_value_on_date_captures_column_and_date_bracket_form():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_ON_DATE([High], 2026-07-15)")
+    assert tokens == [{"type": "func", "value": "VALUE_ON_DATE(", "col_arg": "High", "date_arg": "2026-07-15"}]
+
+
+def test_parse_value_on_date_captures_column_and_date_bare_word_form():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_ON_DATE(High, 2026-07-15)")
+    assert tokens == [{"type": "func", "value": "VALUE_ON_DATE(", "col_arg": "High", "date_arg": "2026-07-15"}]
+
+
+def test_parse_value_on_date_without_date_falls_back_to_bare_func_token():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_ON_DATE([High])")
+    assert tokens[0] == {"type": "func", "value": "VALUE_ON_DATE("}
+    assert {"type": "col", "value": "High"} in tokens
+
+
+def test_value_days_ago_token_renders_back_to_two_arg_text():
+    from screens.formula_editor import _tokens_to_text
+    tokens = [{"type": "func", "value": "VALUE_DAYS_AGO(", "col_arg": "High", "days_arg": 2}]
+    assert _tokens_to_text(tokens) == "VALUE_DAYS_AGO(High, 2)"
+
+
+def test_value_on_date_token_renders_back_to_two_arg_text():
+    from screens.formula_editor import _tokens_to_text
+    tokens = [{"type": "func", "value": "VALUE_ON_DATE(", "col_arg": "High", "date_arg": "2026-07-15"}]
+    assert _tokens_to_text(tokens) == "VALUE_ON_DATE(High, 2026-07-15)"
+
+
+def test_point_lookup_tokens_round_trip_through_dialog(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    original = [{"type": "func", "value": "VALUE_ON_DATE(", "col_arg": "High",
+                "date_arg": "2026-07-15"}]
+    dlg = ExpressionEditorDialog(original, ["High"], [], {"High": 100.0})
+    assert dlg.get_tokens() == original
+
+
+def test_point_lookup_catalogue_has_both_functions():
+    from screens.formula_editor import POINT_LOOKUP_CATALOGUE
+    names = {f["name"] for f in POINT_LOOKUP_CATALOGUE}
+    assert names == {"VALUE_DAYS_AGO", "VALUE_ON_DATE"}
+    pickers = {f["name"]: f["token"]["needs_point_picker"] for f in POINT_LOOKUP_CATALOGUE}
+    assert pickers == {"VALUE_DAYS_AGO": "days_ago", "VALUE_ON_DATE": "on_date"}
+
+
+def test_historic_value_nav_section_lists_point_lookup_functions(qapp):
+    from screens.formula_editor import ExpressionEditorDialog, POINT_LOOKUP_CATALOGUE
+    dlg = ExpressionEditorDialog([], ["High"], [], {})
+    dlg._nav_list.setCurrentRow(1)  # Historic Value
+    items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
+    assert len(items) == len(POINT_LOOKUP_CATALOGUE)
+    assert "VALUE_DAYS_AGO" in items
+    assert "VALUE_ON_DATE" in items
+
+
+# ── _open_point_lookup_picker: column + (N-days-back / date) picker ────────
+
+def test_days_ago_picker_inserts_full_call_text(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QDialog
+
+    dlg = ExpressionEditorDialog([], ["High"], [], {"High": 100.0})
+
+    class _FakeColDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_column(self): return "High"
+
+    class _FakeNDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_n(self): return 2
+
+    import screens.formula_editor as mod
+    orig_col, orig_n = mod._ColumnPickerDialog, mod._DaysAgoPickerDialog
+    mod._ColumnPickerDialog = _FakeColDlg
+    mod._DaysAgoPickerDialog = _FakeNDlg
+    try:
+        dlg._open_point_lookup_picker("VALUE_DAYS_AGO", "days_ago")
+    finally:
+        mod._ColumnPickerDialog = orig_col
+        mod._DaysAgoPickerDialog = orig_n
+
+    assert dlg._preview_edit.toPlainText() == "VALUE_DAYS_AGO([High], 2)"
+
+
+def test_on_date_picker_inserts_full_call_text(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QDialog
+    from datetime import date
+
+    dlg = ExpressionEditorDialog([], ["High"], [], {"High": 100.0})
+
+    class _FakeColDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_column(self): return "High"
+
+    class _FakeDateDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_date(self): return date(2026, 7, 15)
+
+    import screens.formula_editor as mod
+    orig_col, orig_date = mod._ColumnPickerDialog, mod._OnDatePickerDialog
+    mod._ColumnPickerDialog = _FakeColDlg
+    mod._OnDatePickerDialog = _FakeDateDlg
+    try:
+        dlg._open_point_lookup_picker("VALUE_ON_DATE", "on_date")
+    finally:
+        mod._ColumnPickerDialog = orig_col
+        mod._OnDatePickerDialog = orig_date
+
+    assert dlg._preview_edit.toPlainText() == "VALUE_ON_DATE([High], 2026-07-15)"
+
+
+def test_point_lookup_picker_no_columns_shows_message_and_inserts_nothing(qapp, monkeypatch):
+    from screens.formula_editor import ExpressionEditorDialog
+    import screens.formula_editor as mod
+
+    dlg = ExpressionEditorDialog([], [], [], {})
+    monkeypatch.setattr(mod.QMessageBox, "information", lambda *a, **k: None)
+    dlg._open_point_lookup_picker("VALUE_DAYS_AGO", "days_ago")
+    assert dlg._preview_edit.toPlainText() == ""
+
+
+def test_point_lookup_picker_cancelled_column_step_inserts_nothing(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QDialog
+
+    dlg = ExpressionEditorDialog([], ["High"], [], {"High": 100.0})
+
+    class _FakeColDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Rejected
+
+    import screens.formula_editor as mod
+    orig_col = mod._ColumnPickerDialog
+    mod._ColumnPickerDialog = _FakeColDlg
+    try:
+        dlg._open_point_lookup_picker("VALUE_DAYS_AGO", "days_ago")
+    finally:
+        mod._ColumnPickerDialog = orig_col
+
+    assert dlg._preview_edit.toPlainText() == ""
+
+
 def test_row_catalogue_lists_distinct_scrip_names(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     all_data = [{"Scrip Name": "NIFTY", "Open": 100}, {"Scrip Name": "NIFTY", "Open": 100},
                 {"Scrip Name": "BANKNIFTY", "Open": 200}]
     dlg = ExpressionEditorDialog([], ["Open"], [], {}, all_lmv_data=all_data)
-    dlg._nav_list.setCurrentRow(3)  # Rows
+    dlg._nav_list.setCurrentRow(4)  # Rows
     items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
     assert sorted(items) == ["BANKNIFTY", "NIFTY"]
 
@@ -369,7 +533,7 @@ def test_variables_nav_tab_lists_saved_variable(qapp, var_store):
     v = var_store.new_variable("Threshold")
     var_store.save_variable(v)
     dlg = ExpressionEditorDialog([], ["Open"], [], {})
-    dlg._nav_list.setCurrentRow(5)  # Variables
+    dlg._nav_list.setCurrentRow(6)  # Variables
     items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
     assert "{Threshold}" in items
 

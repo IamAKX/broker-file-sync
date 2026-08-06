@@ -8,7 +8,7 @@ and screens/lmv_upload.py:
     trigger table uses), enabled toggle, last-run status, and a manual
     "Run Now".
   - "Browse by Date": a calendar with a dot under every day that has saved
-    data (see _AvailabilityCalendar, shared with historic_upload.py /
+    data (see components.availability_calendar.AvailabilityCalendar, shared with historic_upload.py /
     lmv_upload.py), to view or delete a day's capture.
 """
 
@@ -24,8 +24,8 @@ from PySide6.QtCore import Qt, QTimer
 
 from api import opening_range_api
 from api.exceptions import ApiError, NetworkError
+from components.availability_calendar import AvailabilityCalendar, themed_calendar_stylesheet
 from components.error_popup import show_api_error
-from screens.historic_upload import _AvailabilityCalendar, _themed_calendar_stylesheet
 from screens.historic_viewer import HistoricDataViewer
 from screens.notifications import ToggleSwitch, _TriggerTimeDialog
 from services import scheduled_jobs, trigger_config
@@ -225,9 +225,9 @@ class JobsScreen(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(14)
 
-        self._browse_calendar = _AvailabilityCalendar(t)
+        self._browse_calendar = AvailabilityCalendar(t)
         self._browse_calendar.setFont(font_scale.font(font_scale.SMALL, False))
-        self._browse_calendar.setStyleSheet(_themed_calendar_stylesheet(t))
+        self._browse_calendar.setStyleSheet(themed_calendar_stylesheet(t))
         self._browse_calendar.setMaximumWidth(420)
         self._browse_calendar.clicked.connect(self._on_browse_date_selected)
         self._browse_calendar.currentPageChanged.connect(self._on_browse_page_changed)
@@ -391,4 +391,4 @@ class JobsScreen(QWidget):
         self._style_run_now_btn()
         self._style_delete_btn()
         if hasattr(self, "_browse_calendar"):
-            self._browse_calendar.setStyleSheet(_themed_calendar_stylesheet(t))
+            self._browse_calendar.setStyleSheet(themed_calendar_stylesheet(t))

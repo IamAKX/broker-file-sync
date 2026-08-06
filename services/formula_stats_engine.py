@@ -7,16 +7,21 @@ aggregating per stock. Two entry points:
     a strategy and a day count, see Min/Max/Average/etc. for every column,
     right-click a cell for the day-by-day values behind it.
 
-  - compute_day_history(): powers the AVG_DAYS/MIN_DAYS/etc. formula
-    functions (services/strategy_engine.py's "Historic (N days) aggregates")
-    — one aggregate value per stock per (column, N days) request, looked up
-    by evaluate() while rendering Live Master View. Callers (live_viewer.py)
-    call this once per strategy load/toggle/manual refresh, never per tick.
+  - compute_day_history(): powers the AVG_DAYS/MIN_DAYS/... formula
+    functions and the VALUE_DAYS_AGO/VALUE_ON_DATE point lookups
+    (services/strategy_engine.py's "Historic (N days) aggregates" /
+    "Historic value (point lookup)") — one value per stock per (column,
+    window) request, looked up by evaluate() while rendering Live Master
+    View. Callers (live_viewer.py) call this once per strategy load/toggle/
+    manual refresh, never per tick.
 
 Fetching "which dates/values" lives in api/lmv_snapshot_api.get_range();
 this module is pure logic (no Qt, no network calls) so it's directly
-unit-testable.
+unit-testable. fetch_range_response() is what lets a single fixed date
+(VALUE_ON_DATE) reuse that same "N most recent days" endpoint (fetch enough
+days, filter client-side) instead of needing a dedicated date-lookup API.
 """
+from datetime import date
 import statistics
 
 from services.strategy_engine import SYMBOL_COLUMN, build_symbol_index, evaluate
@@ -119,33 +124,85 @@ def compute_stats(columns: list, range_response: dict) -> dict:
             numeric_values = [v for _, v in col_data["daily"] if isinstance(v, (int, float))]
             for agg_name, agg_fn in AGGREGATES.items():
                 col_data[agg_name] = agg_fn(numeric_values) if numeric_values else None
+            # Not one of the user-facing AGGREGATES checkboxes (Formula Stats
+            # screen ignores it) — "daily" is chronological ascending (see
+            # this function's own iteration over range_response["days"]), so
+            # the first entry is the OLDEST day actually fetched. This is
+            # what powers VALUE_DAYS_AGO/VALUE_ON_DATE (services.
+            # strategy_engine's "Historic value (point lookup)" functions):
+            # both fetch a window sized/dated so the oldest day IS the exact
+            # day they want, then read this key instead of aggregating.
+            numeric_daily = [(d, v) for d, v in col_data["daily"] if isinstance(v, (int, float))]
+            col_data["First"] = numeric_daily[0][1] if numeric_daily else None
 
     return by_symbol
 
 
-def compute_day_history(requests: list, range_fetcher) -> dict:
-    """Resolve every (col_name, days, formula_tokens) request — as built by
-    services.strategy_engine.collect_day_requests — into the lookup
-    evaluate() needs for _DAYS functions:
+def _days_needed_for_date(target: date) -> int:
+    """Calendar-day upper bound on how many *available* trade dates could
+    exist between target and today, inclusive. get_range(N) returns the N
+    most recent dates WITH data — requesting this many calendar days' worth
+    guarantees the response reaches back through target (weekends/holidays
+    just mean most of those N slots come back with no matching date, which
+    is fine, if target isn't in the future). Clamped to at least 1."""
+    return max((date.today() - target).days + 1, 1)
 
-        {(col_name, days): {symbol: {agg_name: float | None}}}
+
+def fetch_range_response(range_fetcher, window) -> dict:
+    """Resolve one *window* — a plain int (last N days) or a (date_from,
+    date_to) ISO-date-string tuple (a fixed range, date_from == date_to for
+    a single specific date — see VALUE_ON_DATE) — into the same
+    {"days": [...]} shape api/lmv_snapshot_api.get_range returns, so every
+    caller downstream (compute_stats via compute_day_history below, and
+    components/formula_stats_panel.py's click-through history popup) can
+    treat both window kinds identically.
+
+    An int just calls range_fetcher(window) directly, unchanged. A tuple
+    fetches enough days to cover date_from..today via the same
+    range_fetcher, then filters the response down to date_from <=
+    trade_date <= date_to — no separate "fetch a date range" API needed.
+    """
+    if isinstance(window, tuple):
+        date_from_str, date_to_str = window
+        days = _days_needed_for_date(date.fromisoformat(date_from_str))
+        response = range_fetcher(days)
+        filtered_days = [
+            d for d in response.get("days", [])
+            if date_from_str <= d.get("trade_date", "") <= date_to_str
+        ]
+        return {**response, "days": filtered_days}
+    return range_fetcher(window)
+
+
+def compute_day_history(requests: list, range_fetcher) -> dict:
+    """Resolve every (col_name, window, formula_tokens) request — as built
+    by services.strategy_engine.collect_day_requests — into the lookup
+    evaluate() needs for _DAYS functions and the VALUE_DAYS_AGO/VALUE_ON_DATE
+    point lookups:
+
+        {(col_name, window): {symbol: {agg_name: float | None}}}
+
+    ``window`` is an int (_DAYS family, and VALUE_DAYS_AGO — both "last N
+    days ending today") or a (date_from, date_to) tuple (VALUE_ON_DATE — a
+    single fixed date, date_from == date_to) — see fetch_range_response,
+    which resolves either into the same {"days": [...]} shape.
 
     *range_fetcher* is api/lmv_snapshot_api.get_range (injected so this stays
-    network-free/unit-testable) — called once per DISTINCT ``days`` value
+    network-free/unit-testable) — called once per DISTINCT ``window`` value
     across every request, not once per request, since compute_stats can
     already evaluate several columns against the same day range in one pass.
     """
-    by_days: dict = {}
-    for col_name, days, formula in requests:
-        by_days.setdefault(days, []).append((col_name, formula))
+    by_window: dict = {}
+    for col_name, window, formula in requests:
+        by_window.setdefault(window, []).append((col_name, formula))
 
     out: dict = {}
-    for days, entries in by_days.items():
-        range_response = range_fetcher(days)
+    for window, entries in by_window.items():
+        range_response = fetch_range_response(range_fetcher, window)
         columns = [{"name": col_name, "formula": formula} for col_name, formula in entries]
         computed = compute_stats(columns, range_response)
         for col_name, _formula in entries:
-            out[(col_name, days)] = {
+            out[(col_name, window)] = {
                 symbol: entry["columns"].get(col_name, {})
                 for symbol, entry in computed.items()
             }

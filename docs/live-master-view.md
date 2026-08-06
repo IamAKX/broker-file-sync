@@ -83,9 +83,10 @@ button (clears all filters, turns off all strategies). There is no separate
 "Stop" button was removed as unused.
 
 **↻ N-Day Data** manually re-fetches every `AVG_DAYS`/`MIN_DAYS`/etc. historic
-aggregate column (see Strategy Columns below) — those don't update on every
-live tick like the rest of the table, so this is how you pull a fresher value
-without toggling a strategy or changing the category filter.
+aggregate column and every `VALUE_DAYS_AGO`/`VALUE_ON_DATE` historic value
+column (see Strategy Columns below) — those don't update on every live tick
+like the rest of the table, so this is how you pull a fresher value without
+toggling a strategy or changing the category filter.
 
 ## Filters Panel
 
@@ -117,8 +118,11 @@ evaluation and can push System/Email alerts — this happens as part of the same
 render pass described below, so notifications only fire while LMV is open.
 
 A strategy column whose formula uses an `AVG_DAYS`/`MIN_DAYS`/etc. historic
-aggregate function (see [🧮 Strategy Builder → Historic (N days)
-Aggregates](strategy-builder.md#historic-n-days-aggregates)) doesn't
+aggregate function, or a `VALUE_DAYS_AGO`/`VALUE_ON_DATE` historic value
+function (see [🧮 Strategy Builder → Historic (N days)
+Aggregates](strategy-builder.md#historic-n-days-aggregates) and
+[Historic Value (Point
+Lookup)](strategy-builder.md#historic-value-point-lookup)) doesn't
 recompute on every live tick like the rest — it needs a historic-snapshot
 fetch, so it (re)computes on load, on a strategy toggle, on a category
 change, or via the **↻ N-Day Data** toolbar button. **Click any cell in one

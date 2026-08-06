@@ -29,6 +29,7 @@ Aggregates as a feature), see [🧮 Strategy Builder](strategy-builder.md).
   - [Type Conversion](#type-conversion)
   - [Aggregate — across all rows, this tick](#aggregate--across-all-rows-this-tick)
   - [Historic — over the last N days](#historic--over-the-last-n-days)
+  - [Historic Value — a single day's value](#historic-value--a-single-days-value)
 - [Variables — `{Name}`](#variables--name)
 - [Worked examples](#worked-examples)
 - [Common errors & gotchas](#common-errors--gotchas)
@@ -267,6 +268,31 @@ AVG_DAYS([MyComputedCol], 20)                  — 20-day average of another of 
                                                    own columns (any custom formula, since a
                                                    column can already be built from one)
 ```
+
+### Historic Value — a single day's value
+
+Not an aggregate — a *specific historic day's value*, one stock's own
+column. Its own **Historic Value** section in the editor's left nav, not
+folded into Functions. Clicking either function opens a column picker, then
+a "days back" number or a calendar date picker (dotted where saved data
+actually exists) — the full call gets inserted for you:
+
+| Function | Example |
+|---|---|
+| `VALUE_DAYS_AGO(column, days_ago)` | `VALUE_DAYS_AGO([High], 2)` — this stock's High 2 trading days before today (0 = today/most recent) |
+| `VALUE_ON_DATE(column, date)` | `VALUE_ON_DATE([High], 2026-07-15)` — this stock's High on that exact calendar date |
+
+```
+[Current] > VALUE_DAYS_AGO([High], 5)          — price above where High stood 5 trading days ago
+VALUE_ON_DATE([Low], 2026-07-15)               — the Low on one specific day
+```
+
+Same refresh cadence, Compile & Test placeholder caveat, and click-a-cell
+history popup as [Historic — over the last N
+days](#historic--over-the-last-n-days) above — see
+[🧮 Strategy Builder → Historic Value (Point
+Lookup)](strategy-builder.md#historic-value-point-lookup) for the full
+explanation.
 
 ---
 

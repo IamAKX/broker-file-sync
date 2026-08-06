@@ -34,104 +34,7 @@ _METRIC_COL_END = 12    # column M (inclusive)
 _SHAREKHAN_TO_RAW_COLUMN = {sk_col: raw for raw, sk_col in RAW_TO_SHAREKHAN_COLUMN.items()}
 
 
-def _themed_calendar_stylesheet(theme) -> str:
-    bg     = theme.get('card_bg')
-    txt    = theme.get('text_primary')
-    txt_s  = theme.get('text_secondary')
-    bd     = theme.get('border')
-    accent = theme.get('accent')
-    btn_bg = theme.get('button_bg')
-    return f"""
-        QCalendarWidget {{
-            background: {bg};
-            color: {txt};
-            border: 1px solid {bd};
-        }}
-        QCalendarWidget QWidget#qt_calendar_navigationbar {{
-            background: {btn_bg};
-            border-bottom: 1px solid {bd};
-        }}
-        QCalendarWidget QToolButton {{
-            color: {txt};
-            background: {btn_bg};
-            border: 1px solid {bd};
-            border-radius: 4px;
-            padding: 4px 8px;
-            min-width: 40px;
-        }}
-        QCalendarWidget QToolButton:hover {{
-            border-color: {accent};
-            color: {accent};
-        }}
-        QCalendarWidget QToolButton:pressed {{
-            background: {accent};
-            color: {bg};
-        }}
-        QCalendarWidget QSpinBox {{
-            background: {bg};
-            color: {txt};
-            border: 1px solid {bd};
-            border-radius: 4px;
-            padding: 2px 4px;
-        }}
-        QCalendarWidget QAbstractItemView {{
-            background: {bg};
-            color: {txt};
-            selection-background-color: {accent};
-            selection-color: {bg};
-            border: none;
-            outline: none;
-        }}
-        QCalendarWidget QAbstractItemView:enabled {{
-            color: {txt};
-        }}
-        QCalendarWidget QAbstractItemView:disabled {{
-            color: {txt_s};
-        }}
-        QCalendarWidget QWidget {{
-            alternate-background-color: {bg};
-        }}
-        QCalendarWidget QLabel {{
-            color: {txt};
-            background: transparent;
-        }}
-        QCalendarWidget QHeaderView {{
-            background: {btn_bg};
-        }}
-        QCalendarWidget QHeaderView::section {{
-            color: {txt_s};
-            background: {btn_bg};
-            border: none;
-        }}
-    """
-
-
-class _AvailabilityCalendar(QCalendarWidget):
-    """QCalendarWidget that draws a green dot under days with saved data."""
-
-    def __init__(self, theme, parent=None):
-        super().__init__(parent)
-        self._theme = theme
-        self._available_days: set = set()
-
-    def set_available_days(self, days: set):
-        self._available_days = days
-        self.updateCells()
-
-    def paintCell(self, painter, rect, date_obj):
-        super().paintCell(painter, rect, date_obj)
-        if (date_obj.year() == self.yearShown() and
-                date_obj.month() == self.monthShown() and
-                date_obj.day() in self._available_days):
-            painter.save()
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setBrush(QBrush(QColor(self._theme.get("accent"))))
-            painter.setPen(Qt.PenStyle.NoPen)
-            dot_r = 3
-            cx = rect.center().x()
-            cy = rect.bottom() - 8
-            painter.drawEllipse(cx - dot_r, cy - dot_r, dot_r * 2, dot_r * 2)
-            painter.restore()
+from components.availability_calendar import AvailabilityCalendar, themed_calendar_stylesheet
 
 
 class _HolidayCalendar(QCalendarWidget):
@@ -466,7 +369,7 @@ class HistoricUploadScreen(QWidget):
         cal.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         cal.setFont(font_scale.font(font_scale.SMALL, False))
         cal.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        cal.setStyleSheet(_themed_calendar_stylesheet(t))
+        cal.setStyleSheet(themed_calendar_stylesheet(t))
 
         qd = QDate(self._upload_date.year, self._upload_date.month, self._upload_date.day)
         cal.setSelectedDate(qd)
@@ -553,9 +456,9 @@ class HistoricUploadScreen(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(14)
 
-        self._browse_calendar = _AvailabilityCalendar(t)
+        self._browse_calendar = AvailabilityCalendar(t)
         self._browse_calendar.setFont(font_scale.font(font_scale.SMALL, False))
-        self._browse_calendar.setStyleSheet(_themed_calendar_stylesheet(t))
+        self._browse_calendar.setStyleSheet(themed_calendar_stylesheet(t))
         self._browse_calendar.setMaximumWidth(420)
         self._browse_calendar.clicked.connect(self._on_browse_date_selected)
         self._browse_calendar.currentPageChanged.connect(self._on_browse_page_changed)
@@ -743,7 +646,7 @@ class HistoricUploadScreen(QWidget):
             self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         if not self._browse_status_lbl.text():
             self._browse_status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
-        self._browse_calendar.setStyleSheet(_themed_calendar_stylesheet(t))
+        self._browse_calendar.setStyleSheet(themed_calendar_stylesheet(t))
         for viewer in self._viewers:
             if viewer.isVisible():
                 viewer.refresh_theme()

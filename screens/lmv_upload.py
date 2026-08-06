@@ -25,10 +25,11 @@ from config_defaults import SCRIPT_NAME_DATA, SECTOR_STOCK_DATA
 from services import config_store
 from api import historic_api, lmv_snapshot_api, holidays_api
 from api.exceptions import ApiError, NetworkError
+from components.availability_calendar import AvailabilityCalendar, themed_calendar_stylesheet
 from components.error_popup import show_api_error
 from screens.data_import import BrokerImportCard
 from screens.historic_upload import (
-    _AvailabilityCalendar, _HolidayCalendar, _themed_calendar_stylesheet,
+    _HolidayCalendar,
 )
 from screens.lmv_snapshot_viewer import LmvSnapshotViewer
 
@@ -160,7 +161,7 @@ class LmvUploadScreen(QWidget):
         cal.setWindowFlags(Qt.WindowType.Tool | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         cal.setFont(font_scale.font(font_scale.SMALL, False))
         cal.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-        cal.setStyleSheet(_themed_calendar_stylesheet(t))
+        cal.setStyleSheet(themed_calendar_stylesheet(t))
 
         qd = QDate(self._selected_date.year, self._selected_date.month, self._selected_date.day)
         cal.setSelectedDate(qd)
@@ -292,9 +293,9 @@ class LmvUploadScreen(QWidget):
         layout.setContentsMargins(16, 16, 16, 16)
         layout.setSpacing(14)
 
-        self._browse_calendar = _AvailabilityCalendar(t)
+        self._browse_calendar = AvailabilityCalendar(t)
         self._browse_calendar.setFont(font_scale.font(font_scale.SMALL, False))
-        self._browse_calendar.setStyleSheet(_themed_calendar_stylesheet(t))
+        self._browse_calendar.setStyleSheet(themed_calendar_stylesheet(t))
         self._browse_calendar.setMaximumWidth(420)
         self._browse_calendar.clicked.connect(self._on_browse_date_selected)
         self._browse_calendar.currentPageChanged.connect(self._on_browse_page_changed)
@@ -460,7 +461,7 @@ class LmvUploadScreen(QWidget):
         t = self._controller.theme
         self._update_date_btn_style()
         self._update_delete_day_btn_style()
-        self._browse_calendar.setStyleSheet(_themed_calendar_stylesheet(t))
+        self._browse_calendar.setStyleSheet(themed_calendar_stylesheet(t))
 
 
 def _pivot_snapshot_for_viewer(stocks: list) -> tuple:

@@ -123,6 +123,31 @@ away since the stock and column are already known from where you clicked. A
 strategy column with an ordinary (non-historic) formula isn't clickable this
 way.
 
+## Historic Value (Point Lookup)
+
+`VALUE_DAYS_AGO` and `VALUE_ON_DATE` are a different kind of historic
+function from the aggregates above — a **single historic value**, not a
+Min/Max/Average over a window. They live in their own **Historic Value**
+section in the Expression Editor's left nav (not folded into Functions),
+right next to it:
+
+```
+VALUE_DAYS_AGO([High], 2)          — this stock's High exactly 2 trading days
+                                       before today (0 = today/most recent)
+VALUE_ON_DATE([High], 2026-07-15)  — this stock's High on that exact date
+```
+
+Clicking either function opens a picker — pick a column, then either a
+"days back" number or a calendar date (dotted where saved snapshot data
+actually exists) — and the complete call is inserted for you, ready to use,
+rather than typing dates by hand.
+
+Same non-live refresh cadence as Historic (N days) above (load/toggle/
+category-change/**↻ N-Day Data**), same Compile & Test placeholder caveat,
+and the same click-a-cell popup in Live Master View — it's the identical
+underlying mechanism, just resolving to one specific day's value instead of
+an aggregate over several.
+
 ---
 
 ← [Back to README](../README)

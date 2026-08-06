@@ -3,6 +3,7 @@ so exercised directly against fixture range-response data shaped like
 api/lmv_snapshot_api.get_range()'s return value."""
 from services.formula_stats_engine import (
     AGGREGATES, DEFAULT_AGGREGATES, compute_day_history, compute_stats,
+    fetch_range_response,
 )
 
 
@@ -40,6 +41,30 @@ def test_compute_stats_evaluates_formula_per_day_and_aggregates():
     assert col["Average"] == 105.0
     assert col["Sum"] == 210.0
     assert col["Count"] == 2
+
+
+def test_compute_stats_first_key_is_oldest_numeric_daily_value():
+    """"First" isn't one of the AGGREGATES checkboxes (Formula Stats screen
+    ignores it) — it's what powers VALUE_DAYS_AGO/VALUE_ON_DATE (see
+    services.strategy_engine). "daily" is chronological ascending, so
+    "First" is the oldest day actually fetched."""
+    columns = _columns([tok_col("High")])
+    range_response = {
+        "days": [
+            _day("2026-01-05", [_stock("INFY", {"High": 100.0})]),
+            _day("2026-01-06", [_stock("INFY", {"High": 110.0})]),
+            _day("2026-01-07", [_stock("INFY", {"High": 120.0})]),
+        ]
+    }
+    result = compute_stats(columns, range_response)
+    assert result["INFY"]["columns"]["MyCol"]["First"] == 100.0
+
+
+def test_compute_stats_first_key_none_when_no_numeric_data():
+    columns = _columns([tok_col("Sector")])  # not in historic storage -> None
+    range_response = {"days": [_day("2026-01-05", [_stock("INFY", {})])]}
+    result = compute_stats(columns, range_response)
+    assert result["INFY"]["columns"]["MyCol"]["First"] is None
 
 
 def test_compute_stats_missing_column_is_none_and_excluded_from_aggregates():
@@ -166,6 +191,85 @@ def test_compute_day_history_resolves_custom_formula_source():
 
 def test_compute_day_history_empty_requests_returns_empty_dict():
     assert compute_day_history([], lambda days: {"days": []}) == {}
+
+
+# ── fetch_range_response / compute_day_history with a (date, date) window
+# (VALUE_ON_DATE — see services.strategy_engine's "Historic value (point
+# lookup)") ────────────────────────────────────────────────────────────────
+
+def test_fetch_range_response_int_window_calls_fetcher_directly():
+    calls = []
+
+    def fetcher(days):
+        calls.append(days)
+        return {"days": []}
+
+    fetch_range_response(fetcher, 20)
+    assert calls == [20]
+
+
+def test_fetch_range_response_single_date_window_filters_to_that_day():
+    range_response = {
+        "days": [
+            _day("2026-07-14", [_stock("INFY", {"High": 999.0})]),   # before
+            _day("2026-07-15", [_stock("INFY", {"High": 101.0})]),   # the date
+            _day("2026-07-16", [_stock("INFY", {"High": 999.0})]),   # after
+        ]
+    }
+    result = fetch_range_response(lambda days: range_response, ("2026-07-15", "2026-07-15"))
+    trade_dates = [d["trade_date"] for d in result["days"]]
+    assert trade_dates == ["2026-07-15"]
+
+
+def test_fetch_range_response_date_window_requests_enough_days():
+    from datetime import date
+    calls = []
+
+    def fetcher(days):
+        calls.append(days)
+        return {"days": []}
+
+    target = date.today().replace(day=1)
+    fetch_range_response(fetcher, (target.isoformat(), target.isoformat()))
+    expected_min = (date.today() - target).days + 1
+    assert calls == [expected_min]
+
+
+def test_compute_day_history_resolves_single_date_window_via_first_key():
+    range_response = {
+        "days": [
+            _day("2026-06-15", [_stock("INFY", {"High": 999.0})]),   # outside window
+            _day("2026-07-15", [_stock("INFY", {"High": 101.0})]),
+        ]
+    }
+    window = ("2026-07-15", "2026-07-15")
+    requests = [("High", window, [tok_col("High")])]
+    result = compute_day_history(requests, lambda days: range_response)
+
+    assert result[("High", window)]["INFY"]["First"] == 101.0
+
+
+def test_compute_day_history_groups_int_and_date_windows_separately():
+    """A request list mixing an int window (_DAYS/VALUE_DAYS_AGO) and a
+    (date, date) window (VALUE_ON_DATE) for the SAME column must resolve to
+    two distinct cache entries, not collide."""
+    calls = []
+
+    def fetcher(days):
+        calls.append(days)
+        if days == 3:
+            return {"days": [_day("2026-01-05", [_stock("INFY", {"High": 50.0})])]}
+        return {"days": [_day("2026-07-15", [_stock("INFY", {"High": 999.0})])]}
+
+    window = ("2026-07-15", "2026-07-15")
+    requests = [
+        ("High", 3, [tok_col("High")]),
+        ("High", window, [tok_col("High")]),
+    ]
+    result = compute_day_history(requests, fetcher)
+
+    assert result[("High", 3)]["INFY"]["First"] == 50.0
+    assert result[("High", window)]["INFY"]["First"] == 999.0
 
 
 # ── FormulaStatsScreen ───────────────────────────────────────────────────────

@@ -23,6 +23,9 @@ Supported:
              MEDIAN_DAYS  VARIANCE_DAYS  RANGE_DAYS  (per stock, over the last
              N historic trading days — see "Historic (N days) aggregates"
              below)
+  Point    : VALUE_DAYS_AGO  VALUE_ON_DATE  (per stock, a single historic
+             value — N trading days before today, or on one specific
+             calendar date — see "Historic value (point lookup)" below)
 
 DIGITS(value) returns how many digits are in the integer part of value (e.g.
 DIGITS(12123.77) = 5, DIGITS(2435.22) = 4) — combine with IIF to tier a
@@ -49,6 +52,19 @@ load/toggle, or a manual refresh — never once per live tick) into a
 apply_strategies()/get_row_fmt_colors(). Without a day_history entry for a
 given (column, days), a _DAYS function evaluates to None — same "blank
 rather than crash" fallback as a column missing from a row.
+
+── Historic value (point lookup) ──────────────────────────────────────────────
+VALUE_DAYS_AGO([High], 2) and VALUE_ON_DATE([High], "2026-07-15") are a
+column's own value on ONE specific historic day for the SAME stock — not an
+aggregate over a window, just that one day's value. VALUE_DAYS_AGO counts
+back N trading days from today (N=0 is today/the most recent day);
+VALUE_ON_DATE takes an exact calendar date instead. Both reuse the exact
+same day_history cache/plumbing as the _DAYS family above (see
+services.formula_stats_engine.compute_stats' "First" key) — VALUE_DAYS_AGO's
+window is an int (N+1, so the oldest day fetched is exactly N days back);
+VALUE_ON_DATE's window is a (date, date) tuple (a one-day range). Same non-
+live refresh cadence, same "blank rather than crash" fallback when missing
+from day_history, as _DAYS.
 """
 
 import math
@@ -266,13 +282,14 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
         elif t == "func":
             # aggregate functions have _ALL suffix; map to a single computed number
             fname = v.rstrip("(").upper()
-            if fname in _DAYS_AGG_BASE:
+            if fname in _DAYS_AGG_BASE or fname in _POINT_LOOKUP_FUNCS:
                 # No historic fetch happens at compile-test time (see the
-                # module docstring's "Historic (N days) aggregates" section)
-                # — a numeric placeholder lets the rest of the formula's
-                # arithmetic/type-check still run instead of raising. See
-                # compile_check's own _DAYS handling for the caveat this
-                # implies in the result it reports.
+                # module docstring's "Historic (N days) aggregates"/
+                # "Historic value (point lookup)" sections) — a numeric
+                # placeholder lets the rest of the formula's arithmetic/
+                # type-check still run instead of raising. See
+                # compile_check's own handling for the caveat this implies
+                # in the result it reports.
                 parts.append("1.0")
             elif fname.endswith("_ALL"):
                 col_name = tok.get("col_arg", "")
@@ -344,6 +361,12 @@ _DAYS_AGG_BASE = {
     "MEDIAN_DAYS": "Median", "VARIANCE_DAYS": "Variance", "RANGE_DAYS": "Range",
 }
 
+# Point lookups (one historic value, not an aggregate) — see this module's
+# "Historic value (point lookup)" docstring section. Both resolve via the
+# "First" key formula_stats_engine.compute_stats adds to every column
+# (oldest day in whatever window was fetched).
+_POINT_LOOKUP_FUNCS = {"VALUE_DAYS_AGO", "VALUE_ON_DATE"}
+
 
 class _Compiled:
     """A formula's fixed structure, compiled once and reused across rows/ticks.
@@ -386,8 +409,12 @@ def clear_compile_cache():
 
 
 def _formula_signature(tokens: list):
+    # date_arg matters here too — two VALUE_ON_DATE tokens differing only in
+    # their date would otherwise share a signature (same type, value,
+    # col_arg, days_arg=None, of=None) and incorrectly reuse each other's
+    # compiled day_specs/window from the cache.
     return tuple((tok.get("type"), tok.get("value"), tok.get("col_arg"),
-                 tok.get("days_arg"), tok.get("of"))
+                 tok.get("days_arg"), tok.get("of"), tok.get("date_arg"))
                  for tok in tokens)
 
 
@@ -427,11 +454,30 @@ def _build_compiled(tokens: list):
         elif t == "func":
             fname = v.rstrip("(").upper()
             days_arg = tok.get("days_arg")
+            date_arg = tok.get("date_arg")
             if fname in _DAYS_AGG_BASE and tok.get("col_arg") and days_arg is not None:
                 col_name = tok.get("col_arg", "")
                 agg_key = _DAYS_AGG_BASE[fname]
                 var = f"_d{len(day_specs)}"
                 day_specs.append((var, agg_key, col_name, int(days_arg)))
+                parts.append(var)
+            elif fname == "VALUE_DAYS_AGO" and tok.get("col_arg") and days_arg is not None:
+                # Same day_specs list/day_history cache as the _DAYS branch
+                # above — window = N+1 days so the OLDEST day in that fetch
+                # is exactly N days before today; "First" (not an aggregate
+                # key like "Average") picks it out — see this module's
+                # "Historic value (point lookup)" docstring.
+                col_name = tok.get("col_arg", "")
+                var = f"_d{len(day_specs)}"
+                day_specs.append((var, "First", col_name, int(days_arg) + 1))
+                parts.append(var)
+            elif fname == "VALUE_ON_DATE" and tok.get("col_arg") and date_arg:
+                # window is a (date, date) tuple — a one-day range — rather
+                # than an int; "First" is still correct since a one-day
+                # fetch has at most one entry to pick.
+                col_name = tok.get("col_arg", "")
+                var = f"_d{len(day_specs)}"
+                day_specs.append((var, "First", col_name, (date_arg, date_arg)))
                 parts.append(var)
             elif fname.endswith("_ALL"):
                 col_name = tok.get("col_arg", "")
@@ -475,14 +521,17 @@ def evaluate(tokens: list, row_data: dict, all_data: list,
     on demand from all_data (only when the formula actually uses one).
 
     ``day_history``, when provided, resolves _DAYS historic aggregate
-    functions: {(col_name, days): {symbol: {agg_key: value}}}, as built by
-    services.formula_stats_engine.compute_day_history. The row's own stock
-    symbol (row_data[SYMBOL_COLUMN]) picks which entry applies. Missing
-    entirely (None), or missing this (col_name, days)/symbol/agg_key, all
-    resolve to None for that function call — same "blank rather than crash"
-    fallback as everything else in this module — rather than pass day_history
-    at every call site, most callers get away with never populating it: a
-    formula with no _DAYS functions never looks it up.
+    functions and the VALUE_DAYS_AGO/VALUE_ON_DATE point lookups:
+    {(col_name, window): {symbol: {agg_key: value}}}, as built by
+    services.formula_stats_engine.compute_day_history — window is an int
+    (last N days) or a (date, date) tuple (one fixed date), as the token
+    itself determines. The row's own stock symbol (row_data[SYMBOL_COLUMN])
+    picks which entry applies. Missing entirely (None), or missing this
+    (col_name, window)/symbol/agg_key, all resolve to None for that function
+    call — same "blank rather than crash" fallback as everything else in
+    this module — rather than pass day_history at every call site, most
+    callers get away with never populating it: a formula with no _DAYS/
+    VALUE_DAYS_AGO/VALUE_ON_DATE functions never looks it up.
     """
     if not tokens:
         return None
@@ -514,11 +563,15 @@ def evaluate(tokens: list, row_data: dict, all_data: list,
         # Keyed by the row's own stock symbol, exactly as stored in
         # day_history (see compute_day_history — the historic snapshot's own
         # "symbol" field, same identifier SYMBOL_COLUMN carries live).
+        # ``window`` is either an int (last N days — the _DAYS family and
+        # VALUE_DAYS_AGO) or a (date, date) tuple (one fixed date —
+        # VALUE_ON_DATE) — both are valid dict keys, so this lookup needs no
+        # branching between the two.
         symbol = row_data.get(SYMBOL_COLUMN)
-        for var, agg_key, col_name, days in compiled.day_specs:
+        for var, agg_key, col_name, window in compiled.day_specs:
             val = None
             if day_history is not None and symbol:
-                entry = day_history.get((col_name, days), {}).get(symbol)
+                entry = day_history.get((col_name, window), {}).get(symbol)
                 if entry:
                     val = entry.get(agg_key)
             ns[var] = val
@@ -588,38 +641,51 @@ def _referenced_columns(tokens: list) -> list:
 
 
 def _uses_day_funcs(tokens: list) -> bool:
-    """True if any _DAYS historic aggregate function appears in *tokens*."""
+    """True if any _DAYS historic aggregate function, or VALUE_DAYS_AGO/
+    VALUE_ON_DATE point lookup, appears in *tokens*."""
     return any(
         tok.get("type") == "func"
-        and tok.get("value", "").rstrip("(").upper() in _DAYS_AGG_BASE
+        and tok.get("value", "").rstrip("(").upper() in (_DAYS_AGG_BASE.keys() | _POINT_LOOKUP_FUNCS)
         for tok in tokens
     )
 
 
 def scan_day_funcs(tokens: list) -> list:
-    """[(col_name, days), ...] for every well-formed _DAYS function call in
-    *tokens* (col_arg and days_arg both present — see _build_compiled).
-    Used to figure out which historic data a formula needs (collect_day_requests)
-    and, for Live Master View, which (column, N) a clicked cell should drill
-    into (screens/live_viewer.py's _on_cell_clicked)."""
+    """[(col_name, window), ...] for every well-formed _DAYS, VALUE_DAYS_AGO,
+    or VALUE_ON_DATE function call in *tokens* (col_arg + days_arg, or
+    col_arg + date_arg — see _build_compiled). window is an int for a
+    _DAYS/VALUE_DAYS_AGO call, or a (date, date) tuple for a VALUE_ON_DATE
+    call. Used to figure out which historic data a formula needs
+    (collect_day_requests) and, for Live Master View, which (column,
+    window) a clicked cell should drill into (screens/live_viewer.py's
+    _on_cell_clicked)."""
     out = []
     for tok in tokens:
         if tok.get("type") != "func":
             continue
         fname = tok.get("value", "").rstrip("(").upper()
-        col_arg, days_arg = tok.get("col_arg"), tok.get("days_arg")
+        col_arg = tok.get("col_arg")
+        days_arg = tok.get("days_arg")
+        date_arg = tok.get("date_arg")
         if fname in _DAYS_AGG_BASE and col_arg and days_arg is not None:
             out.append((col_arg, int(days_arg)))
+        elif fname == "VALUE_DAYS_AGO" and col_arg and days_arg is not None:
+            out.append((col_arg, int(days_arg) + 1))
+        elif fname == "VALUE_ON_DATE" and col_arg and date_arg:
+            out.append((col_arg, (date_arg, date_arg)))
     return out
 
 
 def collect_day_requests(strategies: list, notif_configs: dict | None = None) -> list:
-    """Distinct (col_name, days, formula_tokens) triples referenced by any
-    _DAYS function across every ACTIVE strategy's columns, row filter, and
-    conditional-formatting conditions, plus (if given) that strategy's
-    notification config's trigger condition, risk:reward formulas, and
-    metric formulas (services.strategy_alerts — a separate store, keyed by
-    strategy id, so it isn't reachable from *strategies* alone).
+    """Distinct (col_name, window, formula_tokens) triples referenced by any
+    _DAYS, VALUE_DAYS_AGO, or VALUE_ON_DATE function across every ACTIVE
+    strategy's columns, row filter, and conditional-formatting conditions,
+    plus (if given) that strategy's notification config's trigger
+    condition, risk:reward formulas, and metric formulas
+    (services.strategy_alerts — a separate store, keyed by strategy id, so
+    it isn't reachable from *strategies* alone). ``window`` is an int
+    (_DAYS/VALUE_DAYS_AGO: last N days) or a (date, date) tuple
+    (VALUE_ON_DATE: one fixed date) — see scan_day_funcs.
 
     *col_name* resolves to that SAME strategy's own column's formula when it
     names one of that strategy's columns — this is how "any custom formula
@@ -655,13 +721,13 @@ def collect_day_requests(strategies: list, notif_configs: dict | None = None) ->
                 token_sources.append(metric.get("formula", []))
 
         for src in token_sources:
-            for col_name, days in scan_day_funcs(src):
-                key = (col_name, days)
+            for col_name, window in scan_day_funcs(src):
+                key = (col_name, window)
                 if key in seen:
                     continue
                 seen.add(key)
                 formula = cols_by_name.get(col_name, [{"type": "col", "value": col_name}])
-                out.append((col_name, days, formula))
+                out.append((col_name, window, formula))
     return out
 
 
@@ -884,12 +950,12 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
                        "empty. Check the data in that row of your sheet.")
 
     if _uses_day_funcs(tokens):
-        # _tokens_to_expr stood in a numeric placeholder for every _DAYS
-        # function above (no historic fetch happens at edit time — see the
-        # module docstring), so *result* isn't the real value. Say so
-        # instead of implying it's live.
+        # _tokens_to_expr stood in a numeric placeholder for every _DAYS/
+        # VALUE_DAYS_AGO/VALUE_ON_DATE function above (no historic fetch
+        # happens at edit time — see the module docstring), so *result*
+        # isn't the real value. Say so instead of implying it's live.
         return True, (f"{result} (using a placeholder for the historic "
-                      f"N-day value(s) while editing — Save, then reload "
-                      f"Live Master View to see the real aggregate)")
+                      f"value(s) while editing — Save, then reload "
+                      f"Live Master View to see the real value)")
 
     return True, str(result)

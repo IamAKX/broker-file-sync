@@ -32,7 +32,9 @@ from PySide6.QtGui import QAction
 from api import lmv_snapshot_api
 from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
-from services.formula_stats_engine import AGGREGATES, DEFAULT_AGGREGATES, compute_stats
+from services.formula_stats_engine import (
+    AGGREGATES, DEFAULT_AGGREGATES, compute_stats, fetch_range_response,
+)
 
 MAX_DAYS = 90
 
@@ -81,14 +83,25 @@ class FormulaStatsPanel(QWidget):
     test. When *symbol_filter* is set, the results table (and day count) are
     still fully general, but only that one stock's row is ever shown —
     used for Live Master View's per-cell history popup, where the stock is
-    already known from the click."""
+    already known from the click.
+
+    *initial_date_range* (a (date_from, date_to) tuple), when given instead
+    of *initial_days*, fixes the window to that exact range — read-only, no
+    day-count spinbox — used for a VALUE_ON_DATE column's click-through
+    popup (screens.live_viewer._open_formula_history), where the "range" is
+    a single fixed date (date_from == date_to), not something to explore
+    interactively. At most one of the two should be passed;
+    *initial_date_range* wins if both are.
+    """
 
     def __init__(self, theme, columns: list, symbol_filter: str = None,
-                 initial_days: int = 20, parent=None):
+                 initial_days: int = 20, initial_date_range: tuple = None,
+                 parent=None):
         super().__init__(parent)
         self._theme = theme
         self._columns = list(columns)
         self._symbol_filter = symbol_filter
+        self._fixed_window = initial_date_range
         self._computed: dict = {}
         self._table_columns: list = []
         self._agg_checks: dict = {}
@@ -108,14 +121,22 @@ class FormulaStatsPanel(QWidget):
         controls = QHBoxLayout()
         controls.setSpacing(10)
 
-        days_lbl = QLabel("Days")
-        days_lbl.setFont(font_scale.font(font_scale.SMALL, False))
-        controls.addWidget(days_lbl)
-        self._days_spin = QSpinBox()
-        self._days_spin.setRange(1, MAX_DAYS)
-        self._days_spin.setValue(initial_days)
-        self._days_spin.setFont(font_scale.font(font_scale.SMALL, False))
-        controls.addWidget(self._days_spin)
+        if self._fixed_window is not None:
+            date_from, date_to = self._fixed_window
+            range_lbl = QLabel(
+                f"Date: {date_from}" if date_from == date_to
+                else f"Date range: {date_from} → {date_to}")
+            range_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+            controls.addWidget(range_lbl)
+        else:
+            days_lbl = QLabel("Days")
+            days_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+            controls.addWidget(days_lbl)
+            self._days_spin = QSpinBox()
+            self._days_spin.setRange(1, MAX_DAYS)
+            self._days_spin.setValue(initial_days)
+            self._days_spin.setFont(font_scale.font(font_scale.SMALL, False))
+            controls.addWidget(self._days_spin)
 
         self._compute_btn = QPushButton("Compute")
         self._compute_btn.setFixedHeight(32)
@@ -141,7 +162,8 @@ class FormulaStatsPanel(QWidget):
         agg_row.addStretch()
         layout.addLayout(agg_row)
 
-        self._status_lbl = QLabel("Choose a day count, then Compute.")
+        initial_status = "Click Compute." if self._fixed_window is not None else "Choose a day count, then Compute."
+        self._status_lbl = QLabel(initial_status)
         self._status_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         self._status_lbl.setStyleSheet(f"color: {_t(t,'text_secondary')};")
         layout.addWidget(self._status_lbl)
@@ -173,11 +195,15 @@ class FormulaStatsPanel(QWidget):
         if not self._columns:
             self._status_lbl.setText("No formula columns to analyze.")
             return
-        days = self._days_spin.value()
+        # An int (days spinbox) or the fixed (date_from, date_to) tuple —
+        # fetch_range_response resolves either into the same {"days": [...]}
+        # shape via lmv_snapshot_api.get_range, filtering client-side for
+        # the fixed-range case (see services.formula_stats_engine).
+        window = self._fixed_window if self._fixed_window is not None else self._days_spin.value()
         self._compute_btn.setEnabled(False)
         self._compute_btn.setText("Computing…")
         try:
-            range_response = lmv_snapshot_api.get_range(days)
+            range_response = fetch_range_response(lmv_snapshot_api.get_range, window)
         except (ApiError, NetworkError) as exc:
             self._compute_btn.setEnabled(True)
             self._compute_btn.setText("Compute")
@@ -249,7 +275,11 @@ class FormulaStatsPanel(QWidget):
             f"QMenu::item{{padding:6px 24px 6px 12px;border-radius:4px;}}"
             f"QMenu::item:selected{{background:{_t(t,'accent')};color:{_t(t,'background')};}}"
         )
-        action = QAction(f"View last {self._days_spin.value()} days — {col_name}", menu)
+        if self._fixed_window is not None:
+            window_desc = f"{self._fixed_window[0]} to {self._fixed_window[1]}"
+        else:
+            window_desc = f"last {self._days_spin.value()} days"
+        action = QAction(f"View {window_desc} — {col_name}", menu)
         action.triggered.connect(lambda: self.show_daily_popup(symbol, col_name))
         menu.addAction(action)
         menu.exec(self._table.viewport().mapToGlobal(pos))

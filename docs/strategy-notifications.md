@@ -140,12 +140,16 @@ reference:
 a trigger condition isn't "owned" by one column, so there's no single self-value
 for it to mean.
 
-A trigger condition can also use a historic aggregate function —
-`[Current] > AVG_DAYS([High], 20)` fires when price breaks above its own
-20-day average High. See [🧮 Strategy Builder → Historic (N days)
-Aggregates](strategy-builder.md#historic-n-days-aggregates) for the full
-function list and, importantly, how its refresh cadence differs from every
-other column (not live every tick).
+A trigger condition can also use a historic aggregate or point-lookup
+function — `[Current] > AVG_DAYS([High], 20)` fires when price breaks above
+its own 20-day average High, or `[Current] > VALUE_DAYS_AGO([High], 5)` for
+"above where High stood 5 trading days ago". See
+[🧮 Strategy Builder → Historic (N days)
+Aggregates](strategy-builder.md#historic-n-days-aggregates) and
+[Historic Value (Point
+Lookup)](strategy-builder.md#historic-value-point-lookup) for the full
+function lists and, importantly, how their refresh cadence differs from
+every other column (not live every tick).
 
 ---
 
@@ -211,11 +215,14 @@ A metric's formula can reference:
 - A fixed number (e.g. Stop Loss = a constant price)
 - Any LMV column (e.g. an ATR, Williams %R, or Fibonacci-level column you've
   already built via Formula Builder / this strategy's own columns)
-- A historic aggregate function, e.g. `AVG_DAYS([Low], 10)` as a trailing stop
-  loss — see [🧮 Strategy Builder → Historic (N days)
-  Aggregates](strategy-builder.md#historic-n-days-aggregates). Its caveat
-  applies here too: a `trailing_exit` metric re-evaluates every tick, but an
-  `AVG_DAYS(...)` inside it only actually changes when the historic data
+- A historic aggregate or point-lookup function, e.g. `AVG_DAYS([Low], 10)`
+  as a trailing stop loss, or `VALUE_DAYS_AGO([Low], 5)` for a fixed
+  reference point — see [🧮 Strategy Builder → Historic (N days)
+  Aggregates](strategy-builder.md#historic-n-days-aggregates) and
+  [Historic Value (Point
+  Lookup)](strategy-builder.md#historic-value-point-lookup). Their caveat
+  applies here too: a `trailing_exit` metric re-evaluates every tick, but
+  the historic value inside it only actually changes when the historic data
   itself refreshes (load/strategy-toggle/**↻ N-Day Data**) — it won't drift
   intraday the way a live-data trailing formula would.
 - Any combination via the same formula builder used elsewhere

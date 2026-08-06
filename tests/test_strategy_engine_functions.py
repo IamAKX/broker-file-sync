@@ -577,3 +577,105 @@ def test_collect_day_requests_scans_notification_config():
     }
     requests = collect_day_requests([strategy], notif_configs)
     assert set((c, d) for c, d, _ in requests) == {("High", 20), ("Low", 10), ("Close", 15)}
+
+
+# ── VALUE_DAYS_AGO / VALUE_ON_DATE point lookups ─────────────────────────────
+# Both reuse the exact same day_history cache/plumbing as the _DAYS family
+# above — VALUE_DAYS_AGO's window is an int (N+1, oldest day fetched is
+# exactly N days back), VALUE_ON_DATE's is a (date, date) tuple — resolved
+# via the "First" key (see services.formula_stats_engine.compute_stats)
+# rather than an aggregate key like "Average".
+
+def days_ago_tok(col, n):
+    return [{"type": "func", "value": "VALUE_DAYS_AGO(", "col_arg": col, "days_arg": n}]
+
+
+def on_date_tok(col, when):
+    return [{"type": "func", "value": "VALUE_ON_DATE(", "col_arg": col, "date_arg": when}]
+
+
+def test_value_days_ago_resolves_via_first_key_with_n_plus_1_window():
+    day_history = {("High", 3): {"INFY": {"First": 97.0}}}   # window = 2+1
+    result = evaluate(days_ago_tok("High", 2), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                      day_history=day_history)
+    assert result == 97.0
+
+
+def test_value_days_ago_zero_means_today():
+    day_history = {("High", 1): {"INFY": {"First": 105.0}}}   # window = 0+1
+    result = evaluate(days_ago_tok("High", 0), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                      day_history=day_history)
+    assert result == 105.0
+
+
+def test_value_on_date_resolves_via_first_key_with_single_date_window():
+    window = ("2026-07-15", "2026-07-15")
+    day_history = {("High", window): {"INFY": {"First": 101.5}}}
+    result = evaluate(on_date_tok("High", "2026-07-15"), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                      day_history=day_history)
+    assert result == 101.5
+
+
+def test_point_lookup_none_without_day_history():
+    assert evaluate(days_ago_tok("High", 2), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL]) is None
+    assert evaluate(on_date_tok("High", "2026-07-15"), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL]) is None
+
+
+def test_value_days_ago_and_days_aggregate_can_share_the_same_fetched_window():
+    """VALUE_DAYS_AGO(col, N) and AVG_DAYS(col, N+1) intentionally use the
+    SAME window (N+1, an int) — they can share one cache entry/fetch, just
+    resolved via different keys ("First" vs "Average")."""
+    day_history = {("High", 21): {"INFY": {"First": 90.0, "Average": 100.0}}}
+    assert evaluate(days_ago_tok("High", 20), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                    day_history=day_history) == 90.0
+    assert evaluate(days_tok("AVG_DAYS", "High", 21), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                    day_history=day_history) == 100.0
+
+
+def test_value_on_date_distinguishes_by_exact_date():
+    day_history = {
+        ("High", ("2026-07-15", "2026-07-15")): {"INFY": {"First": 101.0}},
+        ("High", ("2026-07-16", "2026-07-16")): {"INFY": {"First": 102.0}},
+    }
+    assert evaluate(on_date_tok("High", "2026-07-15"), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                    day_history=day_history) == 101.0
+    assert evaluate(on_date_tok("High", "2026-07-16"), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
+                    day_history=day_history) == 102.0
+
+
+def test_compile_check_point_lookup_funcs_use_placeholder_not_hard_failure():
+    from services.strategy_engine import compile_check
+    ok, msg = compile_check(days_ago_tok("High", 2), {"High": "100"}, [{"High": "100"}])
+    assert ok is True
+    assert "historic" in msg.lower()
+    ok, msg = compile_check(on_date_tok("High", "2026-07-15"), {"High": "100"}, [{"High": "100"}])
+    assert ok is True
+    assert "historic" in msg.lower()
+
+
+def test_scan_day_funcs_finds_value_days_ago_with_n_plus_1_window():
+    from services.strategy_engine import scan_day_funcs
+    assert scan_day_funcs(days_ago_tok("High", 2)) == [("High", 3)]
+
+
+def test_scan_day_funcs_finds_value_on_date_with_single_date_window():
+    from services.strategy_engine import scan_day_funcs
+    assert scan_day_funcs(on_date_tok("High", "2026-07-15")) == [
+        ("High", ("2026-07-15", "2026-07-15"))
+    ]
+
+
+def test_collect_day_requests_resolves_point_lookups_and_days_agg_together():
+    from services.strategy_engine import collect_day_requests
+    strategy = {
+        "id": "s1", "active": True,
+        "columns": [
+            {"name": "AvgHigh20", "formula": days_tok("AVG_DAYS", "High", 20), "fmt_rules": []},
+            {"name": "High2DaysAgo", "formula": days_ago_tok("High", 2), "fmt_rules": []},
+            {"name": "HighOnDate", "formula": on_date_tok("High", "2026-07-15"), "fmt_rules": []},
+        ],
+        "row_filter": [],
+    }
+    requests = collect_day_requests([strategy])
+    windows = {window for _, window, _ in requests}
+    assert windows == {20, 3, ("2026-07-15", "2026-07-15")}

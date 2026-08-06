@@ -1876,12 +1876,14 @@ class LiveViewerWindow(QWidget):
 
     def _on_cell_clicked(self, row: int, col: int):
         """Click a strategy column cell whose formula references a _DAYS
-        historic aggregate function (AVG_DAYS, MIN_DAYS, ...) to see that
-        stock's day-by-day values behind the first such reference — no
-        dedicated "day-aggregate column type" is needed since AVG_DAYS(...)
-        IS the column's own formula (services.strategy_engine's "Historic
-        (N days) aggregates"). Any other strategy column, or a native sheet
-        column, isn't clickable this way."""
+        historic aggregate function (AVG_DAYS, MIN_DAYS, ...) or a
+        VALUE_DAYS_AGO/VALUE_ON_DATE point lookup to see that stock's
+        historic value(s) behind the first such reference — no dedicated
+        "day-aggregate column type" is needed since AVG_DAYS(...)/
+        VALUE_DAYS_AGO(...) IS the column's own formula
+        (services.strategy_engine's "Historic (N days) aggregates"/
+        "Historic value (point lookup)"). Any other strategy column, or a
+        native sheet column, isn't clickable this way."""
         idx = col - self._base_col_count
         if idx < 0 or idx >= len(self._strat_col_defs):
             return
@@ -1891,7 +1893,7 @@ class LiveViewerWindow(QWidget):
         day_refs = scan_day_funcs(col_def.get("formula", []))
         if not day_refs:
             return
-        source_col, days = day_refs[0]
+        source_col, window = day_refs[0]
 
         scrip_col = self._headers.index("Scrip Name") if "Scrip Name" in self._headers else -1
         if scrip_col < 0:
@@ -1899,7 +1901,7 @@ class LiveViewerWindow(QWidget):
         symbol_item = self._table.item(row, scrip_col)
         if symbol_item is None or not symbol_item.text():
             return
-        self._open_formula_history(symbol_item.text(), source_col, days,
+        self._open_formula_history(symbol_item.text(), source_col, window,
                                    col_def.get("name", ""))
 
     def _resolve_day_source_formula(self, col_name: str) -> list:
@@ -1918,7 +1920,10 @@ class LiveViewerWindow(QWidget):
         return [{"type": "col", "value": col_name}]
 
     def _open_formula_history(self, symbol: str, source_col_name: str,
-                              days: int, display_name: str):
+                              window, display_name: str):
+        """*window* is an int (_DAYS/VALUE_DAYS_AGO: last N days) or a
+        (date, date) tuple (VALUE_ON_DATE: one fixed date) — see
+        _on_cell_clicked/scan_day_funcs."""
         from components.formula_stats_panel import FormulaStatsPanel, apply_dialog_bg
 
         t = self._theme
@@ -1931,9 +1936,11 @@ class LiveViewerWindow(QWidget):
         lay.setContentsMargins(16, 16, 16, 16)
         lay.setSpacing(10)
 
+        is_range = isinstance(window, tuple)
+        window_desc = (f"on {window[0]}" if is_range else f"last {window} day(s)")
         desc = QLabel(
-            f'Last {days} day(s) of "{source_col_name}" behind {display_name} '
-            f"for {symbol}, computed from saved historic data. Right-click "
+            f'"{source_col_name}" behind {display_name} for {symbol}, '
+            f"{window_desc}, computed from saved historic data. Right-click "
             f"the row for the day-by-day values."
         )
         desc.setWordWrap(True)
@@ -1941,9 +1948,12 @@ class LiveViewerWindow(QWidget):
         desc.setStyleSheet(f"color:{t.get('text_secondary') if t else '#8b949e'};")
         lay.addWidget(desc)
 
+        panel_kwargs = (
+            {"initial_date_range": window} if is_range else {"initial_days": window}
+        )
         panel = FormulaStatsPanel(
             t, columns=[{"name": source_col_name, "formula": formula}],
-            symbol_filter=symbol, initial_days=days, parent=dlg,
+            symbol_filter=symbol, parent=dlg, **panel_kwargs,
         )
         lay.addWidget(panel, 1)
         # Click-through convenience: the stock and column are already known

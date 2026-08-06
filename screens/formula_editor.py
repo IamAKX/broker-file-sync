@@ -1,4 +1,5 @@
 """Expression Editor — catalogues and dialog for building formula tokens."""
+import datetime as _dt
 import font_scale
 import os
 import re
@@ -8,7 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QSplitter, QWidget,
     QListWidget, QListWidgetItem, QLabel, QLineEdit, QPushButton,
-    QTextEdit, QFrame, QScrollArea, QSizePolicy, QMessageBox,
+    QTextEdit, QFrame, QScrollArea, QSizePolicy, QMessageBox, QSpinBox,
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont, QColor, QTextCursor, QTextCharFormat
@@ -94,6 +95,18 @@ FUNCTION_CATALOGUE = [
     {"name": "MEDIAN_DAYS",   "signature": "MEDIAN_DAYS(column, days)",   "description": "Median over the last N historic trading days, per stock.", "token": {"type": "func", "value": "MEDIAN_DAYS("}},
     {"name": "VARIANCE_DAYS", "signature": "VARIANCE_DAYS(column, days)", "description": "Variance over the last N historic trading days, per stock.", "token": {"type": "func", "value": "VARIANCE_DAYS("}},
     {"name": "RANGE_DAYS",    "signature": "RANGE_DAYS(column, days)",    "description": "Max minus Min over the last N historic trading days, per stock.", "token": {"type": "func", "value": "RANGE_DAYS("}},
+]
+
+# Historic value (point lookup) — a single historic value, not an aggregate.
+# Own left-nav section (not folded into Functions) so it's easy to find on
+# its own. Every entry's "needs_point_picker" tells _on_item_clicked to open
+# a column + (N-days-back / calendar-date) picker and insert the fully-built
+# call, rather than the plain "insert bare function name, user fills in the
+# rest" flow every other catalogue entry uses. See services.strategy_engine's
+# "Historic value (point lookup)" docstring section.
+POINT_LOOKUP_CATALOGUE = [
+    {"name": "VALUE_DAYS_AGO", "signature": "VALUE_DAYS_AGO(column, days_ago)", "description": "This stock's own column value exactly N trading days before today (0 = today/most recent). Not an aggregate — just that one day's value.", "token": {"type": "func", "value": "VALUE_DAYS_AGO(", "needs_point_picker": "days_ago"}},
+    {"name": "VALUE_ON_DATE",  "signature": "VALUE_ON_DATE(column, date)",      "description": "This stock's own column value on one specific calendar date you pick — e.g. the High on a particular day.", "token": {"type": "func", "value": "VALUE_ON_DATE(", "needs_point_picker": "on_date"}},
 ]
 
 OPERATOR_CATALOGUE = [
@@ -220,8 +233,11 @@ def _token_insert_text(tok: dict) -> str:
         fname = val.rstrip("(")
         col_arg = tok.get("col_arg", "")
         days_arg = tok.get("days_arg")
+        date_arg = tok.get("date_arg")
         if days_arg is not None:
             return f"{fname}({col_arg}, {days_arg})"
+        if date_arg:
+            return f"{fname}({col_arg}, {date_arg})"
         return f"{fname}({col_arg})" if col_arg else f"{fname}("
     if kind == "op" and val == ",":
         return ", "
@@ -249,6 +265,12 @@ _DAYS_AGG_FUNCS = {
     "sum_days", "min_days", "max_days", "avg_days", "count_days",
     "stddev_days", "median_days", "variance_days", "range_days",
 }
+# Historic value (point lookup) — VALUE_DAYS_AGO shares the days-arg text
+# shape with the _DAYS family above (column, N); VALUE_ON_DATE takes a
+# column + one calendar date instead. See services/strategy_engine.py's
+# "Historic value (point lookup)" docstring section.
+_POINT_DAYS_AGO_FUNCS = {"value_days_ago"}
+_ON_DATE_FUNCS = {"value_on_date"}
 _WORD_OPS = {"and": " and ", "or": " or ", "not": " not "}
 _WORD_CONSTS = {"true": "True", "false": "False", "none": "None"}
 
@@ -279,6 +301,13 @@ _DAYS_AGG_ARG_RE = re.compile(
     r"""\s*,\s*(\d+)\s*\)"""
 )
 
+# Same column-argument shapes as _AGG_ARG_RE, plus a required
+# ", <YYYY-MM-DD>" before the closing paren — e.g. "[High], 2026-07-15)".
+_ON_DATE_ARG_RE = re.compile(
+    r"""\s*(?:\[([^\]]*)\]|([A-Za-z_][A-Za-z0-9_]*)|"([^"]*)"|'([^']*)')"""
+    r"""\s*,\s*(\d{4}-\d{2}-\d{2})\s*\)"""
+)
+
 # Splits "[Open of Nifty]" bracket content on the LAST " of " (greedy left
 # group backtracks to the rightmost match), so "X of Y of Z" reads as
 # column "X of Y", stock "Z" — the stock name is what trails.
@@ -303,24 +332,34 @@ def _split_field_of(inner: str, known_headers=None):
 
 def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
     """For SUM_ALL(...)-style aggregates, try to read the single column
-    argument up to the matching ')'; for AVG_DAYS(...)-style historic
-    aggregates, the column argument plus a required ", <days>". Returns
-    (pos_after_close_paren, col_name, days_or_None) on success, else
-    (start, None, None) so the caller falls back to normal tokens."""
+    argument up to the matching ')'; for AVG_DAYS(...)/VALUE_DAYS_AGO(...)-
+    style functions, the column argument plus a required ", <days>"; for
+    VALUE_ON_DATE(...), the column argument plus a required
+    ", <YYYY-MM-DD>". Returns (pos_after_close_paren, col_name, extra) on
+    success — extra is a dict of additional token fields ({"days_arg": N}
+    or {"date_arg": "..."} or {}) — else (start, None, {}) so the caller
+    falls back to normal tokens."""
     if func_name_lower in _AGG_FUNCS:
         m = _AGG_ARG_RE.match(text, start)
         if not m:
-            return start, None, None
+            return start, None, {}
         col = next(g for g in m.groups() if g is not None)
-        return m.end(), col, None
-    if func_name_lower in _DAYS_AGG_FUNCS:
+        return m.end(), col, {}
+    if func_name_lower in _DAYS_AGG_FUNCS or func_name_lower in _POINT_DAYS_AGO_FUNCS:
         m = _DAYS_AGG_ARG_RE.match(text, start)
         if not m:
-            return start, None, None
+            return start, None, {}
         *col_groups, days = m.groups()
         col = next(g for g in col_groups if g is not None)
-        return m.end(), col, int(days)
-    return start, None, None
+        return m.end(), col, {"days_arg": int(days)}
+    if func_name_lower in _ON_DATE_FUNCS:
+        m = _ON_DATE_ARG_RE.match(text, start)
+        if not m:
+            return start, None, {}
+        *col_groups, when = m.groups()
+        col = next(g for g in col_groups if g is not None)
+        return m.end(), col, {"date_arg": when}
+    return start, None, {}
 
 
 class FormulaParseError(ValueError):
@@ -441,11 +480,9 @@ def parse_expression_text(text: str, known_headers=None) -> list:
                 while look < n and text[look].isspace():
                     look += 1
                 if look < n and text[look] == "(":
-                    consumed_to, col_arg, days_arg = _try_consume_aggregate_arg(text, look + 1, low)
+                    consumed_to, col_arg, extra = _try_consume_aggregate_arg(text, look + 1, low)
                     if col_arg is not None:
-                        tok = {"type": "func", "value": f"{val}(", "col_arg": col_arg}
-                        if days_arg is not None:
-                            tok["days_arg"] = days_arg
+                        tok = {"type": "func", "value": f"{val}(", "col_arg": col_arg, **extra}
                         tokens.append(tok)
                         pos = consumed_to
                     else:
@@ -468,6 +505,168 @@ def parse_expression_text(text: str, known_headers=None) -> list:
         elif kind == "comma":
             tokens.append({"type": "op", "value": ","})
     return tokens
+
+
+# ── Point-lookup pickers: column, then N-days-back or a calendar date ──────
+
+class _ColumnPickerDialog(QDialog):
+    """Small searchable list to pick one column — the Fields list can run to
+    100+ entries once Formula Builder fields are mixed in (see
+    services.formula_tokens.all_field_codes), so this needs a filter box."""
+
+    def __init__(self, columns: list, theme, parent=None):
+        super().__init__(parent)
+        self._theme = theme
+        self._columns = list(columns)
+        self._column = None
+        self.setWindowTitle("Pick a Column")
+        self.setFixedSize(320, 420)
+        bg, txt = _t(theme, "background"), _t(theme, "text_primary")
+        self.setStyleSheet(
+            f"QDialog{{background:{bg};color:{txt};}}QWidget{{background:{bg};color:{txt};}}"
+            f"QLabel{{background:transparent;}}"
+        )
+        self._build()
+
+    def _build(self):
+        lay = QVBoxLayout(self)
+        lay.setSpacing(8)
+        lay.setContentsMargins(14, 14, 14, 14)
+
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search columns…")
+        self._search.textChanged.connect(self._refresh_list)
+        lay.addWidget(self._search)
+
+        self._list = QListWidget()
+        self._list.setFrameShape(QFrame.Shape.NoFrame)
+        self._list.itemClicked.connect(self._on_pick)
+        lay.addWidget(self._list, 1)
+
+        self._refresh_list("")
+        self._search.setFocus()
+
+    def _refresh_list(self, query: str):
+        self._list.clear()
+        q = query.strip().lower()
+        for c in self._columns:
+            if q and q not in c.lower():
+                continue
+            self._list.addItem(c)
+
+    def _on_pick(self, item):
+        self._column = item.text()
+        self.accept()
+
+    def selected_column(self):
+        return self._column
+
+
+class _DaysAgoPickerDialog(QDialog):
+    """Step 2 of building VALUE_DAYS_AGO: how many trading days back from
+    today (0 = today/most recent)."""
+
+    def __init__(self, theme, parent=None):
+        super().__init__(parent)
+        self._theme = theme
+        self.setWindowTitle("VALUE_DAYS_AGO — Days Back")
+        self.setFixedWidth(300)
+        bg, txt = _t(theme, "background"), _t(theme, "text_primary")
+        self.setStyleSheet(
+            f"QDialog{{background:{bg};color:{txt};}}QWidget{{background:{bg};color:{txt};}}"
+            f"QLabel{{background:transparent;}}"
+        )
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+        lay.addWidget(QLabel("Trading days before today (0 = today/most recent):"))
+        self._spin = QSpinBox()
+        self._spin.setRange(0, 3650)
+        self._spin.setValue(1)
+        lay.addWidget(self._spin)
+        ok = QPushButton("OK")
+        ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok.clicked.connect(self.accept)
+        lay.addWidget(ok)
+
+    def selected_n(self) -> int:
+        return self._spin.value()
+
+
+class _OnDatePickerDialog(QDialog):
+    """Step 2 of building VALUE_ON_DATE: pick one calendar date. Uses the
+    same dotted-availability calendar as historic_upload.py's Browse tab
+    (components.availability_calendar) so the user can see which dates
+    actually have saved data before picking one."""
+
+    def __init__(self, theme, availability_fetcher, parent=None):
+        super().__init__(parent)
+        from components.availability_calendar import AvailabilityCalendar, themed_calendar_stylesheet
+        self._theme = theme
+        self._fetch_availability = availability_fetcher
+        self._date = _dt.date.today()
+        self.setWindowTitle("VALUE_ON_DATE — Pick a Date")
+        bg, txt = _t(theme, "background"), _t(theme, "text_primary")
+        self.setStyleSheet(
+            f"QDialog{{background:{bg};color:{txt};}}QWidget{{background:{bg};color:{txt};}}"
+            f"QLabel{{background:transparent;}}"
+        )
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+        lay.setContentsMargins(16, 16, 16, 16)
+
+        self._cal = AvailabilityCalendar(theme)
+        self._cal.setStyleSheet(themed_calendar_stylesheet(theme))
+        self._cal.clicked.connect(self._on_date_picked)
+        self._cal.currentPageChanged.connect(self._on_page_changed)
+        lay.addWidget(self._cal)
+
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet(f"color:{_t(theme, 'text_secondary')};")
+        lay.addWidget(self._status_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(cancel_btn)
+        ok_btn = QPushButton("OK")
+        ok_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok_btn.setStyleSheet(
+            f"QPushButton{{background:{_t(theme,'accent')};color:{_t(theme,'background')};"
+            f"border:none;border-radius:4px;padding:6px 16px;}}"
+        )
+        ok_btn.clicked.connect(self.accept)
+        btn_row.addWidget(ok_btn)
+        lay.addLayout(btn_row)
+
+        today = _dt.date.today()
+        self._refresh_availability(today.year, today.month)
+
+    def _on_date_picked(self, qdate):
+        self._date = _dt.date(qdate.year(), qdate.month(), qdate.day())
+
+    def _on_page_changed(self, year, month):
+        self._refresh_availability(year, month)
+
+    def _refresh_availability(self, year: int, month: int):
+        import calendar as _cal_mod
+        last_day = _cal_mod.monthrange(year, month)[1]
+        from api.exceptions import ApiError, NetworkError
+        try:
+            result = self._fetch_availability(_dt.date(year, month, 1), _dt.date(year, month, last_day))
+            days = {
+                _dt.date.fromisoformat(d["trade_date"]).day
+                for d in result.get("dates", []) if d.get("has_data")
+            }
+        except (ApiError, NetworkError, KeyError, ValueError, TypeError):
+            self._cal.set_available_days(set())
+            self._status_lbl.setText("Couldn't load data availability for this month.")
+            return
+        self._cal.set_available_days(days)
+
+    def selected_date(self) -> _dt.date:
+        return self._date
 
 
 # ── Expression Editor Dialog ──────────────────────────────────────────────────
@@ -594,7 +793,7 @@ class ExpressionEditorDialog(QDialog):
             f"QListWidget::item:selected{{background:{bd};color:{txt};"
             f"border-left:3px solid {acc};}}"
         )
-        for section in ["Functions", "Operators", "Fields", "Rows", "Constants", "Variables"]:
+        for section in ["Functions", "Historic Value", "Operators", "Fields", "Rows", "Constants", "Variables"]:
             self._nav_list.addItem(section)
         self._nav_list.currentRowChanged.connect(self._on_nav_changed)
         body_lay.addWidget(self._nav_list)
@@ -812,6 +1011,7 @@ class ExpressionEditorDialog(QDialog):
         all_headers = self._lmv_headers + self._strategy_col_headers
         catalogues = [
             FUNCTION_CATALOGUE,
+            POINT_LOOKUP_CATALOGUE,
             OPERATOR_CATALOGUE,
             FIELD_CATALOGUE_FROM_HEADERS(all_headers),
             ROW_CATALOGUE_FROM_DATA(self._all_lmv_data),
@@ -868,7 +1068,43 @@ class ExpressionEditorDialog(QDialog):
         if entry.get("row_symbol") is not None:
             self._add_row_symbol(entry["row_symbol"])
         elif entry.get("token") is not None:
-            self._add_token(entry["token"])
+            picker = entry["token"].get("needs_point_picker")
+            if picker:
+                self._open_point_lookup_picker(entry["token"]["value"].rstrip("("), picker)
+            else:
+                self._add_token(entry["token"])
+
+    def _open_point_lookup_picker(self, fname: str, picker: str):
+        """Column + (N-days-back or a calendar date) picker for a
+        POINT_LOOKUP_CATALOGUE entry — builds and inserts the complete
+        call in one shot, e.g. VALUE_DAYS_AGO([High], 2) or
+        VALUE_ON_DATE([High], 2026-07-15), instead of the plain "insert
+        bare function name, fill in the rest by hand" flow every other
+        catalogue entry uses. *picker* is "days_ago" or "on_date" (see
+        POINT_LOOKUP_CATALOGUE)."""
+        columns = self._lmv_headers + self._strategy_col_headers
+        if not columns:
+            QMessageBox.information(
+                self, "No columns available",
+                "Load an LMV sheet first so there's a column to look up.")
+            return
+
+        col_dlg = _ColumnPickerDialog(columns, self._theme, self)
+        if col_dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        column = col_dlg.selected_column()
+
+        if picker == "days_ago":
+            n_dlg = _DaysAgoPickerDialog(self._theme, self)
+            if n_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            self._insert_at_cursor(f"{fname}([{column}], {n_dlg.selected_n()})")
+        else:
+            from api import lmv_snapshot_api
+            date_dlg = _OnDatePickerDialog(self._theme, lmv_snapshot_api.get_availability, self)
+            if date_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            self._insert_at_cursor(f"{fname}([{column}], {date_dlg.selected_date().isoformat()})")
 
     # ── Token management ──────────────────────────────────────────────────────
     # The preview box holds the real, editable text; these just splice a
