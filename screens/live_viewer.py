@@ -147,6 +147,20 @@ class _LiveDataWorker(QObject):
 
     opening_range_ready = Signal()            # fresh OR.High/OR.Low data is available
 
+    # _refresh_day_history_from_store's worker-side result — day_history
+    # dict, plus the strategy list reloaded from the store (see
+    # refresh_day_history below). day_history's keys are (col_name, days)
+    # tuples — a plain Signal(dict) marshals cross-thread by converting to
+    # QVariantMap, which requires *string* keys and silently drops anything
+    # it can't convert (Shiboken prints "_pythonToCppCopy: Cannot
+    # copy-convert ... (dict) to C++" and the slot receives {} instead —
+    # no crash, just data loss, which is exactly what made "the column is
+    # empty" so hard to spot). Signal(object) sidesteps QVariant entirely
+    # and passes the real Python dict through unchanged — see
+    # _request_read/_request_recompute below for the same fix.
+    day_history_result = Signal(object, list)
+    day_history_failed = Signal(str, list)    # error message (already prefixed), strategies
+
     def __init__(self, reader, sector_map: dict, name_to_symbol: dict):
         super().__init__()
         self._reader         = reader
@@ -204,6 +218,75 @@ class _LiveDataWorker(QObject):
             self.recompute_failed.emit(f"Strategy error: {exc}"[:200])
             return
         self.recompute_result.emit(disp_headers, disp_data)
+
+    def refresh_day_history(self, strategies: list, notif_configs: dict,
+                            selected_category: str) -> None:
+        """Reloads strategy definitions from the store, then recomputes the
+        _DAYS historic-aggregate cache (see
+        LiveViewerWindow._refresh_day_history_from_store) — entirely on this
+        worker thread, since services.strategy_store.load_all() tries the
+        server first (a network call) on top of compute_day_history's own
+        historic-snapshot fetch. Keeping both off the GUI thread is what
+        lets this stay non-blocking regardless of how slow either call is.
+
+        Reloading from the store (rather than trusting *strategies*, LMV's
+        own in-memory copy) is what picks up a column/formula added or
+        edited in Strategy Builder since this window was opened or last
+        raised — see LiveViewerWindow.set_strategies' docstring: that copy
+        is only ever injected once and nothing else keeps it in sync. Each
+        reloaded strategy's "active" flag is overwritten with *strategies*'
+        own per-session value — disk's copy isn't authoritative for that
+        flag (LMV forces every strategy inactive on open regardless of what
+        was last saved — see app_window.py's _on_lmv_ready), so trusting
+        disk here would silently turn a strategy the user just toggled on
+        back off.
+
+        *strategies* is the window's full (unfiltered) list — *selected_category*
+        is applied only when deciding which _DAYS requests to fetch (mirroring
+        LiveViewerWindow._filtered_strategies()), not to what's returned, so a
+        strategy outside the current category filter keeps its real active
+        flag instead of being reported back as inactive.
+        """
+        from services import strategy_store
+        from services.strategy_engine import collect_day_requests
+        from services.formula_stats_engine import compute_day_history
+        from api import lmv_snapshot_api
+        from api.exceptions import ApiError, NetworkError
+
+        try:
+            try:
+                fresh = strategy_store.load_all()
+            except (ApiError, NetworkError):
+                # A store-refresh hiccup shouldn't block a day-history
+                # recompute for whatever strategies/columns were already
+                # known to this window.
+                merged = strategies
+            else:
+                active_by_id = {s["id"]: s.get("active", False) for s in strategies}
+                merged = [dict(s, active=active_by_id.get(s["id"], False))
+                         for s in fresh if s.get("active")]
+
+            in_view = [
+                s for s in merged
+                if selected_category == "All" or s.get("category", "Daily") == selected_category
+            ]
+            active = [s for s in in_view if s.get("active")]
+            requests = collect_day_requests(active, notif_configs)
+            if not requests:
+                self.day_history_result.emit({}, merged)
+                return
+            try:
+                day_history = compute_day_history(requests, lmv_snapshot_api.get_range)
+            except (ApiError, NetworkError) as exc:
+                self.day_history_failed.emit(f"N-day column refresh failed: {exc}"[:200], merged)
+                return
+            self.day_history_result.emit(day_history, merged)
+        except Exception as exc:
+            # Never let an unexpected error here kill the worker thread —
+            # do_read/recompute are equally defensive; keep the window
+            # usable (whatever day-history/strategies it already had) rather
+            # than dying silently.
+            self.day_history_failed.emit(f"N-day column refresh failed: {exc}"[:200], strategies)
 
     def do_read(self, force_slow: bool, settle_s: float, strategies: list,
                day_history: dict | None = None) -> None:
@@ -796,10 +879,21 @@ class LiveViewerWindow(QWidget):
     """
 
     # Emitted from the GUI thread to drive work on the worker thread.
-    _request_read      = Signal(bool, float, list, dict)  # force_slow, settle_seconds, strategies, day_history
-    _request_recompute = Signal(list, list, list, dict)   # headers, data, strategies, day_history
+    # The day_history/notif_configs args are declared `object`, not `dict` —
+    # day_history's keys are (col_name, days) tuples, and a plain
+    # Signal(dict) marshals cross-thread via QVariantMap, which requires
+    # string keys and silently converts anything else to {} instead of
+    # raising (Shiboken logs "_pythonToCppCopy: Cannot copy-convert ...
+    # (dict) to C++" to stderr, easy to miss) — the exact reason a _DAYS
+    # column could render empty with no visible error. `object` passes the
+    # real Python dict through unchanged. See day_history_result above.
+    _request_read      = Signal(bool, float, list, object)  # force_slow, settle_seconds, strategies, day_history
+    _request_recompute = Signal(list, list, list, object)   # headers, data, strategies, day_history
     _request_shutdown  = Signal()              # release COM on the worker thread
     _request_or_refresh = Signal()             # re-pull today's Opening Range snapshot
+    # strategies, notif_configs, selected_category — see
+    # _refresh_day_history_from_store / _LiveDataWorker.refresh_day_history
+    _request_day_history_from_store = Signal(list, object, str)
     data_updated       = Signal(list, list)    # headers, data — for downstream consumers
 
     def __init__(self, sharekhan_path: str, reliable_path: str,
@@ -840,6 +934,10 @@ class LiveViewerWindow(QWidget):
         # refresh is a historic-snapshot network fetch) — see
         # _refresh_day_history.
         self._day_history: dict = {}
+        # Guards _refresh_day_history_from_store the way self._refreshing
+        # guards _request_refresh — a store reload + historic-snapshot fetch
+        # in flight shouldn't queue a second one behind it.
+        self._day_history_refreshing = False
 
         # Column sort — a snapshot of row order (by "Scrip Name") captured
         # at the moment the user clicks a header, not a live re-sort every
@@ -964,14 +1062,16 @@ class LiveViewerWindow(QWidget):
         self._day_history_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._day_history_btn.setToolTip(
             "Re-fetch AVG_DAYS/MIN_DAYS/etc. historic aggregate columns — "
-            "these don't update on every live tick like other columns do."
+            "these don't update on every live tick like other columns do. "
+            "Also picks up any new/edited historic-aggregate column saved "
+            "in Strategy Builder since this window was opened."
         )
         self._day_history_btn.setStyleSheet(
             f"QPushButton {{ background: transparent; color: {text_s};"
             f"border: 1px solid {divclr}; border-radius: 4px; padding: 0 12px; }}"
             f"QPushButton:hover {{ border-color: {accent}; color: {accent}; }}"
         )
-        self._day_history_btn.clicked.connect(self._refresh_day_history)
+        self._day_history_btn.clicked.connect(self._refresh_day_history_from_store)
 
         self._export_btn = QPushButton("⭳  Export")
         self._export_btn.setFixedHeight(30)
@@ -1109,11 +1209,14 @@ class LiveViewerWindow(QWidget):
         self._request_recompute.connect(self._worker.recompute)
         self._request_shutdown.connect(self._worker.shutdown)
         self._request_or_refresh.connect(self._worker.refresh_opening_range)
+        self._request_day_history_from_store.connect(self._worker.refresh_day_history)
         self._worker.result.connect(self._on_data_ready)
         self._worker.failed.connect(self._on_read_failed)
         self._worker.recompute_result.connect(self._on_recompute_ready)
         self._worker.recompute_failed.connect(self._on_recompute_failed)
         self._worker.opening_range_ready.connect(self._on_opening_range_ready)
+        self._worker.day_history_result.connect(self._on_day_history_from_store_ready)
+        self._worker.day_history_failed.connect(self._on_day_history_from_store_failed)
         self._worker_thread.start()
 
         # Opening Range High/Low only changes once a day (the capture job
@@ -1226,10 +1329,13 @@ class LiveViewerWindow(QWidget):
             # already happened (see set_strategies below).
             self._initial_render_done = True
         # Deferred (not inline above) so the just-built table paints first —
-        # this is a historic-snapshot network fetch, and _DAYS columns are
-        # rare enough that most windows pay nothing here (collect_day_requests
-        # returns empty, _refresh_day_history is a no-op recompute).
-        QTimer.singleShot(0, self._refresh_day_history)
+        # this is a historic-snapshot network fetch (plus, on this path, a
+        # strategy-store reload — see _refresh_day_history_from_store), and
+        # _DAYS columns are rare enough that most windows pay nothing here
+        # (collect_day_requests returns empty, the worker call is a no-op
+        # recompute). Runs on the worker thread either way, so it never
+        # blocks this first paint.
+        QTimer.singleShot(0, self._refresh_day_history_from_store)
 
     def _inject_sector(self, headers: list, data: list) -> tuple:
         """Prepend a Sector column to headers and every data row."""
@@ -1274,12 +1380,20 @@ class LiveViewerWindow(QWidget):
         then re-render. A historic-snapshot network fetch per distinct N
         days referenced across active strategies' formulas (columns, row
         filter, fmt-rule conditions) and their notification configs (trigger
-        condition, risk:reward, metrics), so this runs on initial load, on a
-        strategy toggle, and via the manual "↻ N-Day Data" action — never on
-        every live tick, unlike everything else this window recomputes.
-        Synchronous (like the Data menu's own Formula Stats screen) rather
-        than routed through the worker thread — acceptable since it only
-        runs on those occasions, not per tick."""
+        condition, risk:reward, metrics), so this runs on a strategy toggle
+        and a category change — never on every live tick, unlike everything
+        else this window recomputes. Synchronous (like the Data menu's own
+        Formula Stats screen) rather than routed through the worker thread —
+        acceptable since it only runs on those occasions, not per tick.
+
+        Resolves requests against self._strategies as already known to this
+        window — it won't notice a _DAYS column added/edited in Strategy
+        Builder after the fact (self._strategies is a one-time snapshot, see
+        set_strategies' docstring). Initial load and the "↻ N-Day Data"
+        button use _refresh_day_history_from_store instead, which reloads
+        strategy definitions first so a newly-added request isn't invisible
+        to it.
+        """
         from services.strategy_engine import collect_day_requests
         from services.formula_stats_engine import compute_day_history
         from services.strategy_alerts import config_store as alerts_config_store
@@ -1305,6 +1419,67 @@ class LiveViewerWindow(QWidget):
             # blank out a previously-good one.
             self._status_lbl.setText(f"N-day column refresh failed: {exc}")
             return
+        self._recompute_display()
+
+    def _refresh_day_history_from_store(self):
+        """Like _refresh_day_history, but also reloads strategy definitions
+        from services.strategy_store first, entirely on the worker thread
+        (see _LiveDataWorker.refresh_day_history) — that reload is itself a
+        network call, on top of the historic-snapshot fetch, so both stay
+        off the GUI thread regardless of how slow either is.
+
+        This is what makes a new/edited AVG_DAYS/MIN_DAYS/etc. column show
+        up without closing and reopening Live Master View: self._strategies
+        is otherwise only ever injected once (set_strategies, called when
+        this window is first built) and nothing keeps it in sync with
+        Strategy Builder afterward — plain _refresh_day_history() above
+        can't see a request that isn't in that stale copy yet.
+
+        Used on initial load and by the "↻ N-Day Data" button only — not by
+        the strategy-toggle/category-change paths, which stay on the
+        cheaper _refresh_day_history() above so those more frequent
+        interactions don't gain an extra server round trip.
+        """
+        if self._worker is None:
+            # Shouldn't happen once the window is visible (the worker
+            # starts before this is ever scheduled) — fall back to the
+            # no-reload path rather than doing nothing.
+            self._refresh_day_history()
+            return
+        if self._day_history_refreshing:
+            return
+        self._day_history_refreshing = True
+        from services.strategy_alerts import config_store as alerts_config_store
+        notif_configs = alerts_config_store.load_configs()
+        # The full (unfiltered) list, not _filtered_strategies() — the
+        # worker applies self._selected_category itself just to decide which
+        # requests to fetch, but still needs every strategy's real "active"
+        # flag to merge against the fresh store copy, including ones outside
+        # the current category filter (see refresh_day_history's docstring).
+        # A snapshot, not a live reference — the worker thread must never
+        # touch GUI-thread-owned state concurrently (same rationale as
+        # _request_refresh/_recompute_display).
+        self._request_day_history_from_store.emit(
+            list(self._strategies), notif_configs, self._selected_category)
+
+    def _on_day_history_from_store_ready(self, day_history: dict, strategies: list):
+        self._day_history_refreshing = False
+        self._day_history = day_history
+        self._strategies = strategies
+        self._update_strat_btn_label()
+        self._recompute_display()
+
+    def _on_day_history_from_store_failed(self, msg: str, strategies: list):
+        self._day_history_refreshing = False
+        # Still apply the reloaded strategy definitions — a failure here is
+        # specifically the historic-snapshot fetch (see
+        # _LiveDataWorker.refresh_day_history), not the store reload, so a
+        # new/edited column's header/other-column values shouldn't be held
+        # back by it. self._day_history itself is left untouched, same
+        # "keep the previous cache on failure" rule as _refresh_day_history.
+        self._strategies = strategies
+        self._update_strat_btn_label()
+        self._status_lbl.setText(msg)
         self._recompute_display()
 
     def _recompute_display(self):
