@@ -895,6 +895,12 @@ class LiveViewerWindow(QWidget):
     # _refresh_day_history_from_store / _LiveDataWorker.refresh_day_history
     _request_day_history_from_store = Signal(list, object, str)
     data_updated       = Signal(list, list)    # headers, data — for downstream consumers
+    # self._day_history, whenever it's (re)computed — for downstream
+    # consumers (Strategy Builder's compile-test) that need the same
+    # _DAYS/VALUE_DAYS_AGO/VALUE_ON_DATE cache this window uses, instead of
+    # always seeing an empty one. See _refresh_day_history/
+    # _on_day_history_from_store_ready.
+    day_history_updated = Signal(object)
 
     def __init__(self, sharekhan_path: str, reliable_path: str,
                  nifty_paths, script_name_data: list,
@@ -1410,6 +1416,7 @@ class LiveViewerWindow(QWidget):
             # recompute, e.g. a strategy toggle, trigger their own).
             if self._day_history:
                 self._day_history = {}
+                self.day_history_updated.emit(self._day_history)
                 self._recompute_display()
             return
         try:
@@ -1419,6 +1426,7 @@ class LiveViewerWindow(QWidget):
             # blank out a previously-good one.
             self._status_lbl.setText(f"N-day column refresh failed: {exc}")
             return
+        self.day_history_updated.emit(self._day_history)
         self._recompute_display()
 
     def _refresh_day_history_from_store(self):
@@ -1465,6 +1473,7 @@ class LiveViewerWindow(QWidget):
     def _on_day_history_from_store_ready(self, day_history: dict, strategies: list):
         self._day_history_refreshing = False
         self._day_history = day_history
+        self.day_history_updated.emit(self._day_history)
         self._strategies = strategies
         self._update_strat_btn_label()
         self._recompute_display()

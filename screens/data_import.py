@@ -723,6 +723,7 @@ class DataImportScreen(QWidget):
     broker_source_active = Signal(str, bool, int)  # broker, active, rows (-1 = db-selected)
     lmv_headers_ready  = Signal(list)       # emitted when LMV loads headers
     lmv_data_ready     = Signal(list, list)  # headers, data rows (list[list])
+    lmv_day_history_ready = Signal(object)  # relays LiveViewerWindow.day_history_updated
     _REQUIRED_BROKERS = {"Sharekhan", "ReliableSoftware", "NiftyInvest",
                          "ExternalImport", "MarketProfile"}
 
@@ -977,6 +978,13 @@ class DataImportScreen(QWidget):
                 list(headers), [list(r) for r in data]
             )
         )
+        # ...and its N-Day (_DAYS) aggregate cache, so Strategy Builder's
+        # compile-test can resolve a column like MAX_DAYS([...], 10) instead
+        # of it always coming back an empty cell — see
+        # StrategyEditor._combined_headers_and_values.
+        self._live_viewer.day_history_updated.connect(self.lmv_day_history_ready.emit)
+        if self._live_viewer._day_history:
+            self.lmv_day_history_ready.emit(dict(self._live_viewer._day_history))
         # Notify the rest of the UI that the watcher is now active
         self._controller.watcher.started.emit()
 

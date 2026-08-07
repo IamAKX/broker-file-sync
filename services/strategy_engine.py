@@ -883,11 +883,14 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     Validate tokens against the actual loaded LMV sheet (never dummy data).
     Returns (True, result_str) on success, (False, error_message) on failure.
 
-    The first row of the real sheet is used as the test row. ``self_value`` is
-    the column's own computed value, used to resolve the THIS token in
-    conditional-format conditions. Errors are reported specifically: unknown
-    columns, syntax errors, or the actual Python exception raised while
-    evaluating the formula.
+    ``row_data``/``all_data`` are the caller-chosen test row and full sheet
+    (see screens.strategy_builder._pick_compile_test_row — callers avoid
+    handing this an index row like NIFTY, which is missing live-overlay
+    columns such as DAY TO/CWTO and would otherwise fail every formula that
+    touches them). ``self_value`` is the column's own computed value, used
+    to resolve the THIS token in conditional-format conditions. Errors are
+    reported specifically: unknown columns, syntax errors, or the actual
+    Python exception raised while evaluating the formula.
     """
     if not tokens:
         return False, "Formula is empty."

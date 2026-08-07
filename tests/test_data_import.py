@@ -287,7 +287,9 @@ def test_run_watcher_passes_nifty_file_list(screen, monkeypatch, tmp_path):
             captured["nifty_paths"] = nifty_paths
             self._headers = []
             self._data = []
+            self._day_history = {}
             self.data_updated = _FakeSignal()
+            self.day_history_updated = _FakeSignal()
         def show(self):
             pass
 

@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QColorDialog, QMessageBox, QApplication, QComboBox,
     QToolButton, QMenu, QSpinBox, QCheckBox
 )
-from PySide6.QtCore import Qt, Signal, QByteArray, QSize, QPointF
+from PySide6.QtCore import Qt, Signal, QByteArray, QSize, QPointF, QObject, QThread
 from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QPainter, QFontMetrics, QAction
 from PySide6.QtSvg import QSvgRenderer
 
@@ -159,6 +159,37 @@ _CATEGORY_COLOR_TOKENS = {
 
 def _category_color(theme, category: str) -> str:
     return _t(theme, _CATEGORY_COLOR_TOKENS.get(category, "text_secondary"))
+
+
+# Columns services.live_formula.apply_live_overlay only fills in for a row
+# that has live QUANTITY/AVGRATE/DIFFPCNT ticks — index rows (NIFTY,
+# BANKNIFTY, ...) never carry those, so these are structurally None there
+# even though the sheet has fully loaded. See _pick_compile_test_row below.
+_LIVE_OVERLAY_COLUMNS = (
+    "CWO", "CMO", "CWATP", "CMATP", "WEEK % CHANGE", "MONTH % CHANGE",
+    "DAY TO", "CWTO",
+)
+
+
+def _pick_compile_test_row(all_data: list) -> dict:
+    """Row used to Compile & Test formulas/conditions against real data.
+
+    Plain row 0 is often an index (NIFTY/BANKNIFTY/...), which structurally
+    has no live QUANTITY/AVGRATE/DIFFPCNT tick and so is missing DAY TO,
+    CWTO and the other _LIVE_OVERLAY_COLUMNS (see apply_live_overlay) — any
+    formula referencing one of those then fails Compile & Test with a
+    misleading "empty cell" error even though the formula and the sheet are
+    both fine. Prefer the first row that actually has those columns filled
+    in; fall back to row 0 (old behaviour) if none does, e.g. before live
+    data has started flowing.
+    """
+    if not all_data:
+        return {}
+    for row in all_data:
+        if all(row.get(c) is not None
+               for c in _LIVE_OVERLAY_COLUMNS if c in row):
+            return dict(row)
+    return dict(all_data[0])
 
 
 # ── formula → display string ───────────────────────────────────────────────
@@ -1704,6 +1735,28 @@ class NotificationSection(QWidget):
             preview_label.setText(_tokens_to_display(metric["formula"]) or "—")
 
 
+class _DayHistoryFetchWorker(QObject):
+    """Runs one collect_day_requests() → compute_day_history() round trip
+    (a network call, api.client._TIMEOUT_SECONDS ceiling) on a background
+    QThread — see StrategyEditor._fetch_own_day_history, the only caller.
+    A fresh instance per fetch; not reused."""
+    finished = Signal(object)  # {(col_name, window): {...}}, or {} on failure
+
+    def __init__(self, requests: list):
+        super().__init__()
+        self._requests = requests
+
+    def run(self):
+        from services.formula_stats_engine import compute_day_history
+        from api import lmv_snapshot_api
+        from api.exceptions import ApiError, NetworkError
+        try:
+            result = compute_day_history(self._requests, lmv_snapshot_api.get_range)
+        except (ApiError, NetworkError):
+            result = {}
+        self.finished.emit(result)
+
+
 class StrategyEditor(QWidget):
     saved = Signal(dict)
 
@@ -1714,6 +1767,17 @@ class StrategyEditor(QWidget):
         self._theme         = theme
         self._lmv_first_row: dict = {}
         self._all_lmv_data: list  = []
+        # N-Day (_DAYS/VALUE_DAYS_AGO/VALUE_ON_DATE) aggregate cache — see
+        # update_day_history and _combined_headers_and_values. Populated
+        # from Live Master View's "N-Day Data" refresh; empty until that's
+        # run at least once, in which case any strategy column built on a
+        # _DAYS function (e.g. "10 day Highest") compile-tests as an empty
+        # cell rather than its real value — same as a column referencing a
+        # real LMV field before the sheet is loaded.
+        self._day_history: dict = {}
+        # Live QThread objects started by _fetch_own_day_history, kept
+        # alive here until each finishes — see there for why.
+        self._day_history_threads: list = []
         self._notif_config = (
             alerts_config_store.load_config(self._strategy["id"])
             or alerts_models.new_notification_config()
@@ -1740,17 +1804,28 @@ class StrategyEditor(QWidget):
     def _combined_headers_and_values(self) -> tuple:
         """This strategy's own column names + the loaded LMV's columns +
         every Formula Builder field (see _field_names), plus each own-
-        column's computed value on the first row — for any formula/
-        condition editor that should be able to reference any of these (the
-        row filter editor, and every Notifications-section formula/condition
-        editor)."""
+        column's computed value on the compile-test row (self._lmv_first_row,
+        picked by _pick_compile_test_row — not necessarily literal row 0) —
+        for any formula/condition editor that should be able to reference
+        any of these (the row filter editor, and every Notifications-section
+        formula/condition editor).
+
+        Passes self._day_history through so a column built on MAX_DAYS/
+        AVG_DAYS/VALUE_DAYS_AGO/etc. gets its real computed value here too,
+        instead of silently coming back None (and then failing every
+        formula that references it downstream with a misleading "empty
+        cell" error) just because Strategy Builder — unlike Live Master
+        View — has no LMV sheet snapshot fetch of its own to resolve them
+        against. See update_day_history.
+        """
         from services.strategy_engine import evaluate
         strat_cols = self._strategy.get("columns", [])
         all_headers = self._field_names() + [c["name"] for c in strat_cols]
         extra_values = {}
         for col in strat_cols:
             extra_values[col["name"]] = evaluate(
-                col.get("formula", []), self._lmv_first_row, self._all_lmv_data
+                col.get("formula", []), self._lmv_first_row, self._all_lmv_data,
+                day_history=self._day_history,
             )
         return all_headers, extra_values
 
@@ -1895,6 +1970,67 @@ class StrategyEditor(QWidget):
 
         self._refresh_columns()
 
+    def _fetch_own_day_history(self):
+        """Proactively fetch the day_history this strategy's own _DAYS/
+        VALUE_DAYS_AGO/VALUE_ON_DATE formulas need (columns, row filter,
+        notification trigger/RR/metrics), so Compile & Test doesn't depend
+        on having manually hit Live Master View's "↻ N-Day Data" button
+        first (see _combined_headers_and_values / update_day_history).
+
+        Scoped to just this one strategy — collect_day_requests([self._
+        strategy], ...) — rather than every active strategy the way Live
+        Master View's own refresh is, so this stays a single small
+        snapshot-range fetch per editor-open/column-edit rather than a
+        sweep; skipped entirely (no network call at all, no thread spun up)
+        when this strategy has no such function anywhere.
+
+        Runs on a throwaway background QThread (see _DayHistoryFetchWorker)
+        rather than the GUI thread — a slow/unreachable server would
+        otherwise freeze the editor for up to api.client._TIMEOUT_SECONDS
+        every time it's opened. _on_day_history_fetched applies the result
+        back on the GUI thread once the worker's queued signal arrives.
+        """
+        from services.strategy_engine import collect_day_requests
+
+        notif_configs = {self._strategy["id"]: self._notif_config}
+        requests = collect_day_requests([dict(self._strategy, active=True)], notif_configs)
+        if not requests:
+            return
+
+        # Deliberately NOT parented to self: if this editor gets replaced
+        # (StrategyBuilderScreen._open_editor swaps in a different strategy)
+        # while a fetch is still in flight, Qt would otherwise try to
+        # forcibly tear down a still-running child QThread along with it —
+        # "QThread: Destroyed while thread is still running". Left
+        # unparented, it just finishes on its own a moment later; Qt already
+        # auto-disconnects worker.finished from self._on_day_history_fetched
+        # if self has been destroyed by then, so that callback simply
+        # becomes a no-op rather than touching a dead widget.
+        thread = QThread()
+        worker = _DayHistoryFetchWorker(requests)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_day_history_fetched)
+        # Self-cleaning: the thread quits itself once the fetch (success or
+        # failure) is done, and both QObjects delete themselves once that's
+        # processed.
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        # Keep a strong Python reference so a concurrent second fetch (open,
+        # then immediately add another column) doesn't get its thread
+        # garbage-collected out from under it — drop it once finished, via
+        # a plain closure rather than sender()/thread() lookups on objects
+        # that may already be mid-teardown by then.
+        self._day_history_threads.append(thread)
+        thread.finished.connect(lambda th=thread: self._day_history_threads.remove(th)
+                                if th in self._day_history_threads else None)
+        thread.start()
+
+    def _on_day_history_fetched(self, fetched: dict):
+        if fetched:
+            self._day_history = {**self._day_history, **fetched}
+
     def _add_column(self):
         col = store.new_column(f"Col{len(self._strategy['columns']) + 1}")
         dlg = ColumnEditorDialog(col, self._field_names(), self._theme,
@@ -1903,6 +2039,7 @@ class StrategyEditor(QWidget):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["columns"].append(dlg.result_col())
             self._refresh_columns()
+            self._fetch_own_day_history()
 
     def update_lmv_headers(self, headers: list):
         self._lmv_headers = list(headers)
@@ -1921,6 +2058,20 @@ class StrategyEditor(QWidget):
         self._lmv_first_row = first_row
         self._all_lmv_data  = all_data
         self._notif_section.update_lmv_data(first_row, all_data)
+
+    def update_day_history(self, day_history: dict):
+        """See self._day_history / _combined_headers_and_values. Mirrors
+        Live Master View's "N-Day Data" refresh so this editor's compile-test
+        values for _DAYS-based columns stay in sync with it.
+
+        Merges rather than replaces — Live Master View's push can arrive
+        after _fetch_own_day_history's own proactive fetch (e.g. a request
+        for a column just added here, one LMV's own active-strategies sweep
+        doesn't know about yet), and a wholesale replace would silently
+        drop that entry the next time LMV refreshes. LMV's own value wins
+        per-key on overlap since it reflects the fuller active-strategies
+        picture."""
+        self._day_history = {**self._day_history, **(day_history or {})}
 
     def _edit_column(self, idx: int):
         col = self._strategy["columns"][idx]
@@ -2088,6 +2239,7 @@ class StrategyBuilderScreen(QWidget):
         self._lmv_headers: list   = []
         self._lmv_first_row: dict = {}
         self._all_lmv_data: list  = []
+        self._day_history: dict   = {}
         self._active_editor       = None
         self._search_query        = ""
         # Empty == every category collapsed — the sidebar starts fully
@@ -2306,6 +2458,12 @@ class StrategyBuilderScreen(QWidget):
 
         editor = StrategyEditor(strategy, self._lmv_headers, self._theme, self)
         editor.update_lmv_data(self._lmv_first_row, self._all_lmv_data)
+        editor.update_day_history(self._day_history)
+        # After, not before — this merges on top of whatever Live Master
+        # View already pushed above, instead of a same-tick
+        # set_day_history() overwriting it (update_day_history replaces
+        # wholesale; it doesn't know this fetch has to win).
+        editor._fetch_own_day_history()
         editor.saved.connect(self._on_strategy_saved)
         self._editor_slot.addWidget(editor)
         self._active_editor = editor
@@ -2391,12 +2549,23 @@ class StrategyBuilderScreen(QWidget):
         """Store the loaded LMV sheet so formulas compile against real data."""
         self._lmv_headers   = list(headers)
         self._all_lmv_data  = [dict(zip(headers, row)) for row in data]
-        self._lmv_first_row = dict(self._all_lmv_data[0]) if self._all_lmv_data else {}
+        self._lmv_first_row = _pick_compile_test_row(self._all_lmv_data)
         self._update_lmv_warn()
         if self._active_editor is not None:
             self._active_editor.update_lmv_headers(self._lmv_headers)
             self._active_editor.update_lmv_data(self._lmv_first_row,
                                                 self._all_lmv_data)
+
+    def set_day_history(self, day_history: dict):
+        """Keep the N-Day (_DAYS/VALUE_DAYS_AGO/VALUE_ON_DATE) aggregate
+        cache in sync with Live Master View's "N-Day Data" refresh (see
+        app_window's wiring of LiveViewerWindow.day_history_updated). Without
+        this, a strategy column built on MAX_DAYS/AVG_DAYS/etc. (e.g. a
+        "10 day Highest") always compile-tests as an empty cell — see
+        StrategyEditor._combined_headers_and_values."""
+        self._day_history = day_history or {}
+        if self._active_editor is not None:
+            self._active_editor.update_day_history(self._day_history)
 
     def _update_lmv_warn(self):
         t = self._theme

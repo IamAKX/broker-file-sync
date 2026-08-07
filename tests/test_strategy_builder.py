@@ -64,6 +64,190 @@ def test_set_lmv_data_enables_compile_against_real_sheet(screen):
     assert msg == "100.0"
 
 
+def test_set_lmv_data_skips_index_row_missing_live_overlay_columns(screen):
+    # Bug: row 0 was always used as the compile-test row, but an index like
+    # NIFTY has no live QUANTITY/AVGRATE/DIFFPCNT tick and so is always
+    # missing DAY TO/CWTO/etc (see apply_live_overlay) — any formula
+    # touching one of those columns then failed Compile & Test with a
+    # misleading "empty cell" error even though real stock rows below it
+    # were fully populated. The first fully-populated row should be picked
+    # instead.
+    headers = ["Scrip Name", "DAY TO", "CWTO", "10 day Highest"]
+    data = [
+        ["NIFTY", None, None, "91.73"],
+        ["360ONE", "3.65", "1.2", "3.65"],
+    ]
+    screen.set_lmv_data(headers, data)
+    assert screen._lmv_first_row["Scrip Name"] == "360ONE"
+
+    from services.strategy_engine import compile_check
+    tokens = [
+        {"type": "col", "value": "DAY TO"},
+        {"type": "op", "value": ">"},
+        {"type": "col", "value": "10 day Highest"},
+    ]
+    ok, msg = compile_check(tokens, screen._lmv_first_row, screen._all_lmv_data)
+    assert ok, msg
+
+
+def test_set_lmv_data_falls_back_to_first_row_when_none_fully_populated(screen):
+    # Every row missing a live-overlay column (e.g. before live data starts
+    # flowing) — old row-0 behaviour is preserved rather than looping forever
+    # or picking nothing.
+    headers = ["Scrip Name", "DAY TO"]
+    data = [["NIFTY", None], ["BANKNIFTY", None]]
+    screen.set_lmv_data(headers, data)
+    assert screen._lmv_first_row["Scrip Name"] == "NIFTY"
+
+
+def _days_col(name, base_col, days_arg=10):
+    return {
+        "name": name, "fmt_rules": [],
+        "formula": [{"type": "func", "value": "MAX_DAYS(", "col_arg": base_col, "days_arg": days_arg}],
+    }
+
+
+def test_combined_headers_and_values_needs_day_history_for_days_columns(screen, monkeypatch):
+    # Bug: a strategy column built on a _DAYS aggregate (e.g. "10 day
+    # Highest" = MAX_DAYS([High], 10)) always compiled-tested as an empty
+    # cell in the Notifications/Expression editors, because
+    # StrategyEditor._combined_headers_and_values called evaluate() without
+    # day_history — Strategy Builder had no N-Day fetch of its own; it only
+    # got one via Live Master View's "N-Day Data" refresh. Any OTHER
+    # formula referencing that column (like a notification trigger
+    # condition) then failed to compile with "tried to do math with an
+    # empty cell", even with real LMV data loaded and the column showing a
+    # real value on the Live Master View sheet itself.
+    #
+    # _fetch_own_day_history's real background QThread is stubbed out here
+    # (see test_open_editor_starts_background_fetch_only_for_days_columns
+    # for that machinery itself) — this test is only about
+    # _combined_headers_and_values falling back correctly before any fetch
+    # has resolved, and about Live Master View's push still covering it.
+    import screens.strategy_builder as sb
+    from services import strategy_store as store
+
+    monkeypatch.setattr(sb.QThread, "start", lambda self: None)
+
+    headers = ["Scrip Name", "High"]
+    data = [["INFY", "100"]]
+    screen.set_lmv_data(headers, data)
+    strategy = store.new_strategy("Test")
+    strategy["columns"] = [_days_col("10 day Highest", "High")]
+
+    screen._open_editor(strategy)
+    editor = screen._active_editor
+    _, extra_values = editor._combined_headers_and_values()
+    assert extra_values["10 day Highest"] is None
+
+    # Live Master View's own refresh (pushed via set_day_history) still
+    # covers it as a fallback, independent of the proactive fetch.
+    day_history = {("High", 10): {"INFY": {"Max": 91.73}}}
+    screen.set_day_history(day_history)
+    _, extra_values = editor._combined_headers_and_values()
+    assert extra_values["10 day Highest"] == 91.73
+
+    from services.strategy_engine import compile_check
+    tokens = [
+        {"type": "col", "value": "High"},
+        {"type": "op", "value": "<"},
+        {"type": "col", "value": "10 day Highest"},
+    ]
+    test_row = dict(screen._lmv_first_row, **extra_values)
+    ok, msg = compile_check(tokens, test_row, screen._all_lmv_data)
+    assert ok, msg
+
+
+def test_open_editor_starts_background_fetch_only_for_days_columns(screen, monkeypatch):
+    # The fix (part 1): opening a strategy that uses a _DAYS function kicks
+    # off a proactive day_history fetch — scoped to just this strategy, not
+    # every active one the way Live Master View's own refresh is — so
+    # Compile & Test doesn't depend on a manual "↻ N-Day Data" click first.
+    # Runs on a background QThread (real QThread.start() isn't exercised
+    # here — this repo's convention, see test_update_dialog.py — just that
+    # StrategyEditor asks one to start, and only when actually needed).
+    import screens.strategy_builder as sb
+    from services import strategy_store as store
+
+    started = []
+    monkeypatch.setattr(sb.QThread, "start", lambda self: started.append(self))
+
+    plain = store.new_strategy("Plain")
+    plain["columns"] = [{"name": "Just High", "fmt_rules": [],
+                          "formula": [{"type": "col", "value": "High"}]}]
+    screen._open_editor(plain)
+    assert started == []  # no _DAYS function anywhere -> no thread, no network call
+
+    with_days = store.new_strategy("WithDays")
+    with_days["columns"] = [_days_col("10 day Highest", "High")]
+    screen._open_editor(with_days)
+    assert len(started) == 1
+
+
+def test_day_history_fetch_worker_resolves_and_reports_via_signal(monkeypatch):
+    # The fix (part 2): the worker that thread actually runs. Tested
+    # directly (not through QThread) per this repo's convention for QThread
+    # workers — see test_update_dialog.py's module docstring.
+    from api import lmv_snapshot_api
+    from screens.strategy_builder import _DayHistoryFetchWorker
+
+    def _fake_get_range(days):
+        assert days == 10
+        return {"days": [{"trade_date": "2026-08-06", "stocks": [
+            {"symbol": "INFY", "display_name": "INFY", "metrics": {"High": 91.73}},
+        ]}]}
+    monkeypatch.setattr(lmv_snapshot_api, "get_range", _fake_get_range)
+
+    requests = [("High", 10, [{"type": "col", "value": "High"}])]
+    worker = _DayHistoryFetchWorker(requests)
+    results = []
+    worker.finished.connect(results.append)
+    worker.run()
+
+    assert len(results) == 1
+    assert results[0][("High", 10)]["INFY"]["Max"] == 91.73
+
+
+def test_day_history_fetch_worker_reports_empty_dict_on_network_error(monkeypatch):
+    # A convenience pre-fetch failing (offline/timeout) must degrade to "no
+    # new data" rather than raise on the worker thread or crash the editor.
+    from api import lmv_snapshot_api
+    from api.exceptions import NetworkError
+    from screens.strategy_builder import _DayHistoryFetchWorker
+
+    def _unreachable(days):
+        raise NetworkError("offline")
+    monkeypatch.setattr(lmv_snapshot_api, "get_range", _unreachable)
+
+    worker = _DayHistoryFetchWorker([("High", 10, [{"type": "col", "value": "High"}])])
+    results = []
+    worker.finished.connect(results.append)
+    worker.run()
+
+    assert results == [{}]
+
+
+def test_on_day_history_fetched_merges_without_dropping_existing_keys(screen):
+    from services import strategy_store as store
+
+    strategy = store.new_strategy("Test")
+    screen._open_editor(strategy)
+    editor = screen._active_editor
+
+    editor._day_history = {("High", 10): {"INFY": {"Max": 91.73}}}
+    editor._on_day_history_fetched({("Low", 5): {"INFY": {"Min": 80.0}}})
+
+    assert editor._day_history == {
+        ("High", 10): {"INFY": {"Max": 91.73}},
+        ("Low", 5): {"INFY": {"Min": 80.0}},
+    }
+
+    # An empty result (the worker's failure-path shape) must never wipe out
+    # what was already cached.
+    editor._on_day_history_fetched({})
+    assert ("High", 10) in editor._day_history
+
+
 def test_new_strategy_has_category():
     from services.strategy_store import new_strategy
     s = new_strategy("Test")
