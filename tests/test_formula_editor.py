@@ -114,6 +114,63 @@ def test_editor_add_token_via_operator_updates_preview(qapp):
     assert "+" in dlg._preview_edit.toPlainText()
 
 
+# ── real_lmv_headers / historic field references (see compile_check's own
+# lmv_headers tests in test_strategy_engine_functions.py for the underlying
+# logic) — these cover the dialog's threading of it through.
+
+def test_real_lmv_headers_defaults_to_lmv_headers_when_omitted(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    dlg = ExpressionEditorDialog([], ["LTP", "Last5Day"], [], {})
+    assert dlg._real_lmv_headers == ["LTP", "Last5Day"]
+
+
+def test_real_lmv_headers_can_be_narrower_than_lmv_headers(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    dlg = ExpressionEditorDialog([], ["LTP", "Last5Day"], [],
+                                 {"LTP": 100.0}, real_lmv_headers=["LTP"])
+    assert dlg._real_lmv_headers == ["LTP"]
+
+
+def test_compile_and_test_succeeds_for_historic_field_when_real_lmv_headers_narrower(qapp, monkeypatch):
+    # Reproduces: [Last5Day]*1, where Last5Day is a Formula Builder field
+    # (MAX_OF([DAY TO], LAST_5_TRADING_DAYS)) offered in the Fields list
+    # but not one of the sheet's own loaded columns — used to always fail
+    # Compile & Test with "tried to do math with an empty cell" even though
+    # nothing about the formula was actually wrong.
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QMessageBox
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information",
+                        lambda *a, **k: shown.setdefault("msg", a[-1] if a else ""))
+    dlg = ExpressionEditorDialog(
+        [], ["Scrip Name", "Last5Day"], [], {"Scrip Name": "INFY", "Last5Day": None},
+        real_lmv_headers=["Scrip Name"],
+    )
+    dlg._preview_edit.setPlainText("[Last5Day]*1")
+    dlg._compile_and_test()
+    assert dlg._compiled_ok is True
+    assert "historic" in shown.get("msg", "").lower()
+
+
+def test_compile_and_test_still_fails_for_blank_real_lmv_column(qapp, monkeypatch):
+    # A genuinely-loaded LMV column that's blank for this row must still be
+    # reported as a real problem — real_lmv_headers only exempts fields
+    # outside that set.
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QMessageBox
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *a, **k: shown.setdefault("msg", a[-1] if a else ""))
+    dlg = ExpressionEditorDialog(
+        [], ["Scrip Name", "OR.High"], [], {"Scrip Name": "INFY", "OR.High": None},
+        real_lmv_headers=["Scrip Name", "OR.High"],
+    )
+    dlg._preview_edit.setPlainText("[OR.High]*1")
+    dlg._compile_and_test()
+    assert dlg._compiled_ok is False
+    assert "empty cell" in shown.get("msg", "").lower()
+
+
 def test_editor_backspace_removes_character_before_cursor(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     tokens = [{"type": "col", "value": "LTP"}]

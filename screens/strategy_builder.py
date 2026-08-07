@@ -739,6 +739,7 @@ class ColumnEditorDialog(QDialog):
             all_lmv_data=self._all_lmv_data,
             theme=self._theme,
             mode="value",
+            real_lmv_headers=list(self._lmv_first_row.keys()),
             parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
@@ -916,6 +917,7 @@ class ColumnEditorDialog(QDialog):
             theme=self._theme,
             mode="condition",
             self_value=self_value,
+            real_lmv_headers=list(self._lmv_first_row.keys()),
             parent=self,
         )
         if dlg.exec() == _QD.DialogCode.Accepted:
@@ -1607,7 +1609,8 @@ class NotificationSection(QWidget):
             lmv_headers=headers, strategy_col_headers=[],
             lmv_first_row=self._lmv_first_row, all_lmv_data=self._all_lmv_data,
             theme=self._theme, mode="condition", allow_self=False,
-            extra_row_values=extra_values, parent=self,
+            extra_row_values=extra_values,
+            real_lmv_headers=list(self._lmv_first_row.keys()), parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._config["trigger_condition"] = dlg.get_tokens()
@@ -1652,7 +1655,8 @@ class NotificationSection(QWidget):
             tokens=list(rr.get(key, [])),
             lmv_headers=headers, strategy_col_headers=[],
             lmv_first_row=self._lmv_first_row, all_lmv_data=self._all_lmv_data,
-            theme=self._theme, mode="value", extra_row_values=extra_values, parent=self,
+            theme=self._theme, mode="value", extra_row_values=extra_values,
+            real_lmv_headers=list(self._lmv_first_row.keys()), parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             rr[key] = dlg.get_tokens()
@@ -1728,7 +1732,8 @@ class NotificationSection(QWidget):
             tokens=list(metric.get("formula", [])),
             lmv_headers=headers, strategy_col_headers=[],
             lmv_first_row=self._lmv_first_row, all_lmv_data=self._all_lmv_data,
-            theme=self._theme, mode="value", extra_row_values=extra_values, parent=self,
+            theme=self._theme, mode="value", extra_row_values=extra_values,
+            real_lmv_headers=list(self._lmv_first_row.keys()), parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             metric["formula"] = dlg.get_tokens()
@@ -2175,6 +2180,7 @@ class StrategyEditor(QWidget):
             mode="condition",
             allow_self=False,
             extra_row_values=extra_values,
+            real_lmv_headers=list(self._lmv_first_row.keys()),
             parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:

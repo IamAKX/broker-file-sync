@@ -878,7 +878,7 @@ def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
 
 
 def compile_check(tokens: list, row_data: dict, all_data: list,
-                  self_value=None) -> tuple:
+                  self_value=None, lmv_headers: list | None = None) -> tuple:
     """
     Validate tokens against the actual loaded LMV sheet (never dummy data).
     Returns (True, result_str) on success, (False, error_message) on failure.
@@ -891,6 +891,16 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     to resolve the THIS token in conditional-format conditions. Errors are
     reported specifically: unknown columns, syntax errors, or the actual
     Python exception raised while evaluating the formula.
+
+    ``lmv_headers``, when given, is the set of columns genuinely on the
+    loaded LMV sheet right now (as opposed to every name offered in the
+    Fields list — a strategy's other columns, Formula Builder fields —
+    which also appear as keys in row_data, backfilled to None, so the
+    "unknown column" check above doesn't reject a reference to one). Any
+    referenced field NOT in lmv_headers that's still None gets a numeric
+    placeholder instead of being evaluated strictly — see the
+    used_placeholder block below. Omit it (None) to test every referenced
+    field strictly, historic or not — the old, stricter behaviour.
     """
     if not tokens:
         return False, "Formula is empty."
@@ -940,6 +950,27 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
                        f"check the spelling, spaces and capitalization, or "
                        f"pick it from the Fields list instead of typing it.")
 
+    # 4.5. A referenced field that isn't one of the sheet's own currently-
+    # loaded columns — another strategy column, a Formula Builder field
+    # like a historic MAX_OF/_DAYS lookup ("[Last5Day]" = MAX_OF([DAY TO],
+    # LAST_5_TRADING_DAYS)), etc. — can't be reliably resolved here: its
+    # real value depends on network/historic data this editor doesn't
+    # always have fetched (see StrategyEditor._fetch_own_day_history).
+    # Testing it strictly would mean a perfectly good formula can only ever
+    # compile-test successfully once that data happens to be cached — the
+    # exact "tried to do math with an empty cell" false negative this
+    # guards against. Stand in a numeric placeholder for any such field
+    # that's still blank; only genuinely-loaded LMV columns are held to a
+    # strict, real value from here on.
+    used_placeholder = False
+    if lmv_headers is not None:
+        substituted = dict(row_data)
+        for c in referenced:
+            if c not in lmv_headers and substituted.get(c) is None:
+                substituted[c] = 1.0
+                used_placeholder = True
+        row_data = substituted
+
     # 5. Evaluate against the real first row, surfacing the actual error.
     result, err = _evaluate_verbose(tokens, row_data, all_data, self_value)
     if err:
@@ -952,13 +983,14 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
                        "row — usually because one of the cells it uses is "
                        "empty. Check the data in that row of your sheet.")
 
-    if _uses_day_funcs(tokens):
+    if used_placeholder or _uses_day_funcs(tokens):
         # _tokens_to_expr stood in a numeric placeholder for every _DAYS/
-        # VALUE_DAYS_AGO/VALUE_ON_DATE function above (no historic fetch
-        # happens at edit time — see the module docstring), so *result*
-        # isn't the real value. Say so instead of implying it's live.
-        return True, (f"{result} (using a placeholder for the historic "
-                      f"value(s) while editing — Save, then reload "
+        # VALUE_DAYS_AGO/VALUE_ON_DATE function typed directly here, and/or
+        # step 4.5 above did the same for a referenced historic/derived
+        # field — either way *result* isn't the real value. Say so instead
+        # of implying it's live.
+        return True, (f"{result} (using a placeholder for the historic/"
+                      f"derived value(s) while editing — Save, then reload "
                       f"Live Master View to see the real value)")
 
     return True, str(result)

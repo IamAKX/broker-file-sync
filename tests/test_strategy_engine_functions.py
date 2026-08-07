@@ -499,6 +499,62 @@ def test_compile_check_days_func_unknown_column_still_reported():
     assert "TotallyMadeUp" in msg
 
 
+# ── compile_check's lmv_headers param (historic/derived column reference) ────
+# Reproduces: [Last5Day]*1 where [Last5Day] is a Formula Builder field whose
+# own formula is MAX_OF([DAY TO], LAST_5_TRADING_DAYS) — a plain "col"
+# reference to a field this editor never independently resolves, not a
+# _DAYS function typed directly (that case is already covered above).
+
+def test_compile_check_historic_field_reference_uses_placeholder_when_lmv_headers_given():
+    from services.strategy_engine import compile_check
+    tokens = [tok_col("Last5Day"), tok_op("*"), tok_num(1)]
+    # "Last5Day" is present as a key (Fields-list backfill) but None — its
+    # own MAX_OF(...) formula was never evaluated here.
+    row_data = {"Scrip Name": "INFY", "Last5Day": None}
+    ok, msg = compile_check(tokens, row_data, [row_data],
+                            lmv_headers=["Scrip Name"])
+    assert ok is True
+    assert "historic" in msg.lower()
+
+
+def test_compile_check_lmv_headers_none_keeps_old_strict_behaviour():
+    # Callers that don't pass lmv_headers (the default) get the pre-existing
+    # strict behaviour — every referenced column tested for real, no
+    # placeholder substitution.
+    from services.strategy_engine import compile_check
+    tokens = [tok_col("Last5Day"), tok_op("*"), tok_num(1)]
+    row_data = {"Scrip Name": "INFY", "Last5Day": None}
+    ok, msg = compile_check(tokens, row_data, [row_data])
+    assert ok is False
+
+
+def test_compile_check_genuinely_loaded_column_still_strict_when_blank():
+    # A real LMV column (in lmv_headers) that's genuinely blank for this
+    # row must still fail — only fields OUTSIDE lmv_headers get the
+    # placeholder treatment. Not every blank cell is a historic-data gap.
+    from services.strategy_engine import compile_check
+    tokens = [tok_col("OR.High"), tok_op("*"), tok_num(1)]
+    row_data = {"Scrip Name": "INFY", "OR.High": None}
+    ok, msg = compile_check(tokens, row_data, [row_data],
+                            lmv_headers=["Scrip Name", "OR.High"])
+    assert ok is False
+    assert "empty cell" in msg.lower()
+
+
+def test_compile_check_historic_field_uses_real_value_when_available():
+    # A referenced historic/derived field that DOES already have a real
+    # value (e.g. Strategy Builder's own proactive day_history fetch
+    # resolved it) is used as-is — the placeholder only stands in for a
+    # still-blank one.
+    from services.strategy_engine import compile_check
+    tokens = [tok_col("Last5Day"), tok_op("*"), tok_num(2)]
+    row_data = {"Scrip Name": "INFY", "Last5Day": 10.0}
+    ok, msg = compile_check(tokens, row_data, [row_data],
+                            lmv_headers=["Scrip Name"])
+    assert ok is True
+    assert msg == "20.0"
+
+
 # ── collect_day_requests / scan_day_funcs ────────────────────────────────────
 
 def test_scan_day_funcs_finds_column_and_days():

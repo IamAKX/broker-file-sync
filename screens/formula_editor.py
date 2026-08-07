@@ -683,11 +683,25 @@ class ExpressionEditorDialog(QDialog):
                  all_lmv_data: list = None,
                  theme=None, mode: str = "value", self_value=None,
                  allow_self: bool = None, extra_row_values: dict = None,
+                 real_lmv_headers: list = None,
                  parent=None):
         super().__init__(parent)
         self._initial_tokens = list(tokens)
         self._lmv_headers = list(lmv_headers)
         self._strategy_col_headers = list(strategy_col_headers)
+        # The sheet's OWN currently-loaded columns — a strict subset of
+        # self._lmv_headers above, which is really "every name offered in
+        # the Fields list" (Formula Builder fields, other strategy columns,
+        # ...). Passed separately so _compile_and_test can tell "this cell
+        # is blank" (a real data problem, held to a strict value) apart
+        # from "this field's value depends on historic/network data this
+        # editor doesn't always have fetched" (see compile_check's
+        # lmv_headers param) — falls back to lmv_headers (no distinction,
+        # the old stricter behaviour) for any caller that doesn't pass it.
+        self._real_lmv_headers = (
+            list(real_lmv_headers) if real_lmv_headers is not None
+            else list(lmv_headers)
+        )
         # Computed strategy-column values (name -> value) merged into the test
         # row so a row filter can be compiled against the columns it references.
         self._extra_row_values = dict(extra_row_values or {})
@@ -1278,8 +1292,9 @@ class ExpressionEditorDialog(QDialog):
         test_all = self._all_lmv_data
         if self._extra_row_values and test_all:
             test_all = [dict(test_all[0], **self._extra_row_values)] + list(test_all[1:])
-        ok, msg = compile_check(tokens, test_row,
-                                test_all, self_value=self._self_value)
+        ok, msg = compile_check(tokens, test_row, test_all,
+                                self_value=self._self_value,
+                                lmv_headers=self._real_lmv_headers)
         if ok:
             self._compiled_tokens = tokens
             self._compiled_ok = True
@@ -1484,7 +1499,8 @@ class VariablesManagerDialog(QDialog):
         dlg = ExpressionEditorDialog(
             [], self._lmv_headers, [], self._lmv_first_row,
             all_lmv_data=self._all_lmv_data, theme=self._theme,
-            mode="value", allow_self=False, parent=self,
+            mode="value", allow_self=False,
+            real_lmv_headers=list(self._lmv_first_row.keys()), parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()
@@ -1499,7 +1515,8 @@ class VariablesManagerDialog(QDialog):
         dlg = ExpressionEditorDialog(
             variable.get("formula", []), self._lmv_headers, [], self._lmv_first_row,
             all_lmv_data=self._all_lmv_data, theme=self._theme,
-            mode="value", allow_self=False, parent=self,
+            mode="value", allow_self=False,
+            real_lmv_headers=list(self._lmv_first_row.keys()), parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()
