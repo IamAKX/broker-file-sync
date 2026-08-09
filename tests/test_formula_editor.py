@@ -327,7 +327,19 @@ def test_parse_every_days_aggregate_function_name(fname):
 def test_days_agg_token_renders_back_to_two_arg_text():
     from screens.formula_editor import _tokens_to_text
     tokens = [{"type": "func", "value": "AVG_DAYS(", "col_arg": "High", "days_arg": 20}]
-    assert _tokens_to_text(tokens) == "AVG_DAYS(High, 20)"
+    assert _tokens_to_text(tokens) == "AVG_DAYS([High], 20)"
+
+
+def test_days_agg_token_with_spaced_column_name_renders_bracketed():
+    # Bug repro: MAX_DAYS([DAY TO], 10), saved then reopened for editing,
+    # used to redisplay as MAX_DAYS(DAY TO, 10) — missing brackets around a
+    # column name containing a space — which the parser then rejected,
+    # forcing the user to manually re-add them. col_arg must always render
+    # bracketed so it round-trips regardless of what characters the column
+    # name contains (spaces, dots, ...).
+    from screens.formula_editor import _tokens_to_text
+    tokens = [{"type": "func", "value": "MAX_DAYS(", "col_arg": "DAY TO", "days_arg": 10}]
+    assert _tokens_to_text(tokens) == "MAX_DAYS([DAY TO], 10)"
 
 
 def test_days_agg_tokens_round_trip_through_dialog(qapp):
@@ -335,6 +347,35 @@ def test_days_agg_tokens_round_trip_through_dialog(qapp):
     original = [{"type": "func", "value": "AVG_DAYS(", "col_arg": "High", "days_arg": 20}]
     dlg = ExpressionEditorDialog(original, ["High"], [], {"High": 100.0})
     assert dlg.get_tokens() == original
+
+
+def test_days_agg_tokens_with_spaced_column_round_trip_through_dialog(qapp):
+    # The actual reported bug: MAX_DAYS([DAY TO], 10), saved then reopened
+    # for editing. Before the fix, the preview box redisplayed it as
+    # MAX_DAYS(DAY TO, 10) (col_arg missing its brackets) — the parser
+    # can't tell "DAY TO" apart from two bare identifiers without them, so
+    # get_tokens() came back empty/wrong and the user had to manually
+    # retype the brackets before it would compile again.
+    from screens.formula_editor import ExpressionEditorDialog
+    original = [{"type": "func", "value": "MAX_DAYS(", "col_arg": "DAY TO", "days_arg": 10}]
+    dlg = ExpressionEditorDialog(original, ["DAY TO"], [], {"DAY TO": 12.3})
+    assert dlg._preview_edit.toPlainText() == "MAX_DAYS([DAY TO], 10)"
+    assert dlg.get_tokens() == original
+
+
+def test_compile_and_test_succeeds_immediately_on_reopened_spaced_column_formula(qapp, monkeypatch):
+    # Same repro as above, but through the actual Compile & Test button
+    # rather than get_tokens()'s own re-parse fallback — this is what the
+    # user hit: reopening a saved formula and clicking Compile & Test
+    # without touching the text at all used to fail.
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    original = [{"type": "func", "value": "MAX_DAYS(", "col_arg": "DAY TO", "days_arg": 10}]
+    dlg = ExpressionEditorDialog(original, ["DAY TO"], [], {"DAY TO": 12.3})
+    dlg._compile_and_test()
+    assert dlg._compiled_ok is True
 
 
 def test_function_catalogue_has_avg_days():
@@ -379,13 +420,13 @@ def test_parse_value_on_date_without_date_falls_back_to_bare_func_token():
 def test_value_days_ago_token_renders_back_to_two_arg_text():
     from screens.formula_editor import _tokens_to_text
     tokens = [{"type": "func", "value": "VALUE_DAYS_AGO(", "col_arg": "High", "days_arg": 2}]
-    assert _tokens_to_text(tokens) == "VALUE_DAYS_AGO(High, 2)"
+    assert _tokens_to_text(tokens) == "VALUE_DAYS_AGO([High], 2)"
 
 
 def test_value_on_date_token_renders_back_to_two_arg_text():
     from screens.formula_editor import _tokens_to_text
     tokens = [{"type": "func", "value": "VALUE_ON_DATE(", "col_arg": "High", "date_arg": "2026-07-15"}]
-    assert _tokens_to_text(tokens) == "VALUE_ON_DATE(High, 2026-07-15)"
+    assert _tokens_to_text(tokens) == "VALUE_ON_DATE([High], 2026-07-15)"
 
 
 def test_point_lookup_tokens_round_trip_through_dialog(qapp):

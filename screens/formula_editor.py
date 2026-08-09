@@ -234,11 +234,18 @@ def _token_insert_text(tok: dict) -> str:
         col_arg = tok.get("col_arg", "")
         days_arg = tok.get("days_arg")
         date_arg = tok.get("date_arg")
+        # col_arg must round-trip back through the parser (_DAYS_AGG_ARG_RE
+        # etc.) exactly as typed — its bare-identifier alternative stops at
+        # the first space/dot/etc., so a column name like "DAY TO" or
+        # "OR.High" only re-parses correctly wrapped in [...], same as any
+        # other field reference. Rendering it unbracketed here is what
+        # broke reopening a saved MAX_DAYS([DAY TO], 10) for editing: it
+        # displayed as MAX_DAYS(DAY TO, 10), which the parser then rejected.
         if days_arg is not None:
-            return f"{fname}({col_arg}, {days_arg})"
+            return f"{fname}([{col_arg}], {days_arg})"
         if date_arg:
-            return f"{fname}({col_arg}, {date_arg})"
-        return f"{fname}({col_arg})" if col_arg else f"{fname}("
+            return f"{fname}([{col_arg}], {date_arg})"
+        return f"{fname}([{col_arg}])" if col_arg else f"{fname}("
     if kind == "op" and val == ",":
         return ", "
     if kind == "op":

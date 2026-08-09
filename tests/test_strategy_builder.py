@@ -1210,3 +1210,39 @@ def test_fmt_rules_help_button_shows_popup(qapp, monkeypatch):
     dlg = ColumnEditorDialog(col, ["LTP"], None)
     dlg._show_fmt_rules_help()
     assert called.get("shown") is True
+
+
+# ── _tokens_to_display / TokenChip: col_arg must render bracketed ───────────
+# Same underlying bug as formula_editor._token_insert_text (see
+# tests/test_formula_editor.py's spaced-column round-trip tests) — these two
+# are display-only (never re-parsed), but should still show what the stored
+# formula actually is rather than something that looks like two bare words.
+
+def test_tokens_to_display_brackets_days_agg_col_arg():
+    from screens.strategy_builder import _tokens_to_display
+    tokens = [{"type": "func", "value": "MAX_DAYS(", "col_arg": "DAY TO", "days_arg": 10}]
+    assert _tokens_to_display(tokens) == "MAX_DAYS([DAY TO], 10)"
+
+
+def test_tokens_to_display_brackets_all_agg_col_arg():
+    from screens.strategy_builder import _tokens_to_display
+    tokens = [{"type": "func", "value": "SUM_ALL(", "col_arg": "DAY TO"}]
+    assert _tokens_to_display(tokens) == "SUM_ALL([DAY TO])"
+
+
+def test_tokens_to_display_brackets_value_on_date_col_arg():
+    # date_arg (VALUE_ON_DATE) previously wasn't handled by this function at
+    # all — col_arg silently disappeared from the preview entirely.
+    from screens.strategy_builder import _tokens_to_display
+    tokens = [{"type": "func", "value": "VALUE_ON_DATE(", "col_arg": "DAY TO",
+              "date_arg": "2026-07-15"}]
+    assert _tokens_to_display(tokens) == "VALUE_ON_DATE([DAY TO], 2026-07-15)"
+
+
+def test_token_chip_brackets_col_arg(qapp):
+    from screens.strategy_builder import TokenChip
+    from PySide6.QtWidgets import QLabel
+    tok = {"type": "func", "value": "MAX_DAYS(", "col_arg": "DAY TO", "days_arg": 10}
+    chip = TokenChip(tok, theme=None)
+    label = chip.findChild(QLabel)
+    assert label.text() == "MAX_DAYS([DAY TO], 10)"

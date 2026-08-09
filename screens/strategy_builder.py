@@ -207,10 +207,19 @@ def _tokens_to_display(tokens: list) -> str:
             fname = val.rstrip("(")
             col_arg = tok.get("col_arg", "")
             days_arg = tok.get("days_arg")
+            date_arg = tok.get("date_arg")
+            # col_arg needs [...] around it, same as a plain column
+            # reference — see formula_editor._token_insert_text, which had
+            # the same gap and is what actually broke round-tripping a
+            # saved formula back through the Expression Editor's parser.
+            # This function is display-only (never re-parsed), but should
+            # still show what the stored formula really is.
             if days_arg is not None:
-                parts.append(f"{fname}({col_arg}, {days_arg})")
-            elif fname.endswith("_ALL"):
-                parts.append(f"{fname}({col_arg})")
+                parts.append(f"{fname}([{col_arg}], {days_arg})")
+            elif date_arg:
+                parts.append(f"{fname}([{col_arg}], {date_arg})")
+            elif col_arg:
+                parts.append(f"{fname}([{col_arg}])")
             else:
                 parts.append(f"{fname}(")
         elif kind == "num":
@@ -258,7 +267,14 @@ class TokenChip(QFrame):
         if kind == "func":
             fname = text.rstrip("(")
             col_arg = tok.get("col_arg", "")
-            text = f"{fname}({col_arg})" if tok.get("col_arg") else text
+            days_arg = tok.get("days_arg")
+            date_arg = tok.get("date_arg")
+            if days_arg is not None:
+                text = f"{fname}([{col_arg}], {days_arg})"
+            elif date_arg:
+                text = f"{fname}([{col_arg}], {date_arg})"
+            elif col_arg:
+                text = f"{fname}([{col_arg}])"
 
         is_dark = (self._theme.current_mode == "dark") if self._theme else True
         palette = self._DARK_COLORS if is_dark else self._LIGHT_COLORS
