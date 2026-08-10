@@ -5,7 +5,7 @@ alert: when a condition you define holds true for long enough to rule out a fals
 breakout, you get an **entry alert** with computed Stop Loss / Target / Risk:Reward
 figures — then the app keeps watching that stock until the signal resolves (a
 Target hit, or a stop-out), sending a follow-up alert at each step, delivered by
-System tray, Email, or Telegram (once implemented), whichever you've enabled.
+System tray, Email, or Slack, whichever you've enabled.
 
 This is a different mechanism from conditional formatting: formatting rules just
 color a cell. Notifications track a stock's story over time — entry → target(s) →
@@ -39,8 +39,9 @@ screen.
     (the toggle switch on its card) — an inactive strategy is never evaluated,
     notifications included, regardless of what's configured inside it.
 12. Go to **Notifications** in the sidebar and confirm the channels you want
-    (System / Email) are switched on. Telegram is visible but not delivered yet
-    (see [Delivery Channels](#-delivery-channels)).
+    (System / Email / Slack) are switched on — Slack needs a Webhook URL set
+    via its **Configure** button first (see [Delivery
+    Channels](#-delivery-channels)).
 13. **Open Live Master View and start the watcher.** This part matters:
     notifications are only evaluated as part of LMV's live render loop — if LMV
     isn't open, nothing is being checked, no matter how long you wait.
@@ -273,7 +274,7 @@ hand.
 | — | — | Moves to Live Alerts as **Targets Achieved**, with High/Low since signal and % move recorded |
 
 **Exact notification text sent at each step** (Title / Message, as delivered to
-System tray and Email):
+System tray, Email, and Slack):
 
 ```
 [Entry, 03-Aug-2026 09:31 AM]
@@ -329,7 +330,7 @@ the **Notifications** screen (sidebar):
 |---|---|
 | System | Live — OS tray notification + alert sound |
 | Email | Live — sent to your registered account email via the backend |
-| Telegram | **Visible but not implemented yet** — enabling it is a harmless no-op; alerts simply won't be delivered there until the Telegram bot backend exists |
+| Slack | Live — posted directly to a Slack Incoming Webhook URL you paste into the Slack row's **Configure** dialog. Delivered client-direct (this app posts straight to the webhook, no backend involved), so it works with any Slack workspace where you've added an Incoming Webhook. Enabling the channel with no webhook configured is a harmless no-op. |
 
 These toggles are global and specific to strategy alerts — they don't affect the
 separate background-job notifications (historic save, LMV check, etc.), which

@@ -65,23 +65,24 @@ def test_trigger_table_has_four_rows(screen):
     assert screen._table.rowCount() == 4
 
 
-def test_system_and_email_default_checked_telegram_default_unchecked(screen):
+def test_system_and_email_default_checked_slack_default_unchecked(screen):
     from PySide6.QtWidgets import QCheckBox
     for row in range(screen._table.rowCount()):
         system_cb = screen._table.cellWidget(row, 2).findChild(QCheckBox)
-        telegram_cb = screen._table.cellWidget(row, 3).findChild(QCheckBox)
+        slack_cb = screen._table.cellWidget(row, 3).findChild(QCheckBox)
         email_cb = screen._table.cellWidget(row, 4).findChild(QCheckBox)
         assert system_cb.isChecked() is True
-        assert telegram_cb.isChecked() is False
+        assert slack_cb.isChecked() is False
         assert email_cb.isChecked() is True
 
 
 def test_system_and_email_channel_cards_enabled_by_default(screen):
     # System and Email are both live channels — their top-level toggles (and
-    # status dots) default on, unlike Telegram which has no backend yet.
+    # status dots) default on, unlike Slack which needs a webhook configured
+    # before it's worth turning on.
     assert screen._system_card.is_enabled() is True
     assert screen._email_card.is_enabled() is True
-    assert screen._telegram_card.is_enabled() is False
+    assert screen._slack_card.is_enabled() is False
     assert "Enabled" in screen._system_status_lbl.text()
 
 
@@ -212,8 +213,140 @@ def test_checkbox_toggle_persists(screen, isolated_store):
     from services import trigger_config
 
     cfg = screen._configs[0]
-    screen._on_checkbox_changed(cfg, "telegram", True)
+    screen._on_checkbox_changed(cfg, "slack", True)
 
     reloaded = trigger_config.load_trigger_configs()
     match = next(c for c in reloaded if c.id == cfg.id)
-    assert match.telegram_enabled is True
+    assert match.slack_enabled is True
+
+
+def test_slack_card_prefilled_with_saved_webhook_url(qapp, isolated_store):
+    from services import slack_config
+    slack_config.save_webhook_url("https://hooks.slack.com/services/T/B/X")
+
+    from app import AppController
+    from screens.notifications import NotificationsScreen
+    screen = NotificationsScreen(AppController(qapp))
+
+    assert screen._slack_card.get_value("Webhook URL") == "https://hooks.slack.com/services/T/B/X"
+
+
+def test_slack_config_saved_persists_webhook_url(screen, isolated_store):
+    from services import slack_config
+
+    screen._on_slack_config_saved({"Webhook URL": "https://hooks.slack.com/services/T/B/X"})
+
+    assert slack_config.load_webhook_url() == "https://hooks.slack.com/services/T/B/X"
+
+
+def test_test_notification_button_sends_to_configured_slack_webhook(screen, monkeypatch):
+    import screens.notifications as notifications_module
+    from PySide6.QtCore import QTimer
+
+    screen._slack_card._values["Webhook URL"] = "https://hooks.slack.com/services/T/B/X"
+
+    scheduled = []
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(lambda ms, cb: scheduled.append(cb)))
+    calls = []
+    monkeypatch.setattr(notifications_module, "send_to_webhook", lambda *a: calls.append(a))
+    monkeypatch.setattr(notifications_module.QMessageBox, "information", MagicMock())
+
+    screen._slack_card._send_btn.click()
+    assert len(scheduled) == 1
+    scheduled[0]()   # run the deferred send synchronously
+
+    assert calls == [(
+        "https://hooks.slack.com/services/T/B/X", "Test Notification",
+        "This is a test notification from Broker File Sync.",
+    )]
+
+
+def test_test_notification_button_warns_when_slack_webhook_blank(screen, monkeypatch):
+    import screens.notifications as notifications_module
+
+    screen._slack_card._values["Webhook URL"] = ""
+    warn = MagicMock()
+    monkeypatch.setattr(notifications_module.QMessageBox, "warning", warn)
+
+    screen._slack_card._send_btn.click()
+
+    warn.assert_called_once()
+
+
+def test_send_test_slack_shows_error_popup_on_failure(screen, monkeypatch):
+    import screens.notifications as notifications_module
+    import requests
+
+    def _raise(*a):
+        raise requests.RequestException("unreachable")
+
+    monkeypatch.setattr(notifications_module, "send_to_webhook", _raise)
+    popup = MagicMock()
+    monkeypatch.setattr(notifications_module, "show_api_error", popup)
+
+    screen._do_send_test_slack("https://hooks.slack.com/services/T/B/X")
+
+    popup.assert_called_once()
+
+
+# ── Slack Configure dialog (guided walkthrough) ─────────────────────────────
+
+def test_slack_config_dialog_rejects_malformed_webhook_url(qapp, isolated_store):
+    from app import AppController
+    from screens.notifications import _SlackConfigDialog
+
+    dlg = _SlackConfigDialog({}, AppController(qapp).theme)
+    dlg.accept = MagicMock()
+    dlg._input.setText("not-a-webhook-url")
+
+    dlg._try_accept()
+
+    # Widget-tree isVisible() only reflects reality once the dialog is
+    # actually shown (which .exec() would do, but these tests call
+    # _try_accept() directly to avoid opening a real modal) — check the
+    # message itself and that accept() was withheld instead.
+    assert dlg._error_lbl.text() != ""
+    dlg.accept.assert_not_called()
+
+
+def test_slack_config_dialog_accepts_valid_webhook_url(qapp, isolated_store):
+    from app import AppController
+    from screens.notifications import _SlackConfigDialog
+
+    dlg = _SlackConfigDialog({}, AppController(qapp).theme)
+    dlg.accept = MagicMock()
+    dlg._input.setText("https://hooks.slack.com/services/T/B/X")
+
+    dlg._try_accept()
+
+    assert dlg._error_lbl.text() == ""
+    dlg.accept.assert_called_once()
+    assert dlg.values() == {"Webhook URL": "https://hooks.slack.com/services/T/B/X"}
+
+
+def test_slack_config_dialog_allows_blank_to_clear_webhook(qapp, isolated_store):
+    from app import AppController
+    from screens.notifications import _SlackConfigDialog
+
+    dlg = _SlackConfigDialog({"Webhook URL": "https://hooks.slack.com/services/T/B/X"}, AppController(qapp).theme)
+    dlg.accept = MagicMock()
+    dlg._input.setText("")
+
+    dlg._try_accept()
+
+    assert dlg._error_lbl.text() == ""
+    dlg.accept.assert_called_once()
+
+
+def test_slack_config_dialog_prefilled_from_current_values(qapp, isolated_store):
+    from app import AppController
+    from screens.notifications import _SlackConfigDialog
+
+    dlg = _SlackConfigDialog({"Webhook URL": "https://hooks.slack.com/services/T/B/X"}, AppController(qapp).theme)
+
+    assert dlg._input.text() == "https://hooks.slack.com/services/T/B/X"
+
+
+def test_slack_card_uses_slack_config_dialog(screen):
+    from screens.notifications import _SlackConfigDialog
+    assert screen._slack_card._dialog_factory is _SlackConfigDialog

@@ -6,9 +6,8 @@ from services.notifications.payload import NotificationPayload
 class NotificationChannel(ABC):
     """One outbound delivery mechanism for a NotificationPayload.
 
-    Implementations: channels/system.py and channels/email.py (live),
-    channels/telegram.py (not implemented yet — staged for when its bot
-    backend exists).
+    Implementations: channels/system.py, channels/email.py, and
+    channels/slack.py (all live).
 
     Must never block the caller on network I/O — NotificationService.notify()
     (and this) runs on the GUI thread, often in a loop over several events at

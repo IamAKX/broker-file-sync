@@ -18,7 +18,7 @@ def test_load_defaults_when_unsaved(store):
     ]
     for c in configs:
         assert c.system_enabled is True
-        assert c.telegram_enabled is False
+        assert c.slack_enabled is False
         assert c.email_enabled is True
 
 
@@ -26,15 +26,15 @@ def test_save_then_load_roundtrip(store):
     from services import trigger_config
     configs = trigger_config.load_trigger_configs()
     configs[0].time = dtime(9, 15)
-    configs[0].telegram_enabled = True
+    configs[0].slack_enabled = True
     trigger_config.save_trigger_configs(configs)
 
     reloaded = trigger_config.load_trigger_configs()
     assert reloaded[0].time == dtime(9, 15)
-    assert reloaded[0].telegram_enabled is True
+    assert reloaded[0].slack_enabled is True
     # Untouched triggers keep their defaults
     assert reloaded[1].system_enabled is True
-    assert reloaded[1].telegram_enabled is False
+    assert reloaded[1].slack_enabled is False
 
 
 def test_last_fired_roundtrip(store):

@@ -42,7 +42,7 @@ account (login/signup) is required before `MainWindow` ever appears.
         │  FileReader · MasterGenerator · FileWatcher       │
         │  StrategyEngine · StrategyStore                   │
         │  strategy_alerts/ (trigger/debounce/lifecycle)    │
-        │  notifications/ (System/Email/Telegram delivery)  │
+        │  notifications/ (System/Email/Slack delivery)     │
         │  Scheduler + scheduled_jobs (tray-resident)        │
         │  formula_engine, formula_variable_store, ...       │
         └───────────────────────┬────────────────────────┘
@@ -139,7 +139,7 @@ The Strategy Notifications feature (see
 holds the trigger/debounce/lifecycle state machine (`engine.py`) and its config/
 state persistence; `notifications/` is the channel-agnostic delivery layer
 (`manager.py`'s `NotificationService`, plus `channels/system.py`, `email.py`,
-`telegram.py`). `services/scheduler.py` + `services/scheduled_jobs.py` are a
+`slack.py`). `services/scheduler.py` + `services/scheduled_jobs.py` are a
 separate, tray-resident background job runner (historic save, LMV check,
 availability check, opening-range capture) that also delivers through
 `NotificationService`.

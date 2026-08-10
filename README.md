@@ -118,7 +118,7 @@ broker-file-sync/
 │   │   └── models.py, messages.py
 │   ├── notifications/         # Delivery channels
 │   │   ├── manager.py             # NotificationService facade
-│   │   └── channels/              # system.py, email.py, telegram.py (stub)
+│   │   └── channels/              # system.py, email.py, slack.py
 │   ├── notification_channels.py, trigger_config.py    # channel/schedule config
 │   ├── scheduler.py, scheduled_jobs.py                # background jobs (tray-resident)
 │   ├── config_store.py, historic_lmv_merge.py, live_formula.py, live_merge.py,

@@ -7,7 +7,7 @@ from services.notifications.levels import NotificationLevel
 @dataclass
 class NotificationPayload:
     """What a channel needs to deliver one notification — channel-agnostic,
-    so System/Telegram/Email all consume the same shape."""
+    so System/Email/Slack all consume the same shape."""
     title: str
     message: str
     level: NotificationLevel = NotificationLevel.INFO

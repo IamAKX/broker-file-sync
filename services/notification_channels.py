@@ -1,6 +1,6 @@
 """
 Persistence for the global "which notification channels are enabled" toggles
-shown in screens/notifications.py (System/Email/Telegram). Previously these
+shown in screens/notifications.py (System/Email/Slack). Previously these
 toggles were purely cosmetic — nothing persisted them and nothing read them
 back (every notification always went to System+Email regardless of what the
 UI showed).
@@ -19,11 +19,11 @@ from services import config_store
 
 _CHANNELS_KEY = "notification_channels_enabled"
 
-_DEFAULTS = {"system": True, "email": True, "telegram": False}
+_DEFAULTS = {"system": True, "email": True, "slack": False}
 
 
 def load_enabled_channels() -> dict:
-    """Return {"system": bool, "email": bool, "telegram": bool}. Missing keys
+    """Return {"system": bool, "email": bool, "slack": bool}. Missing keys
     (e.g. a value saved before a new channel existed) fall back to that
     channel's default rather than reading as disabled."""
     saved = config_store.load_json(_CHANNELS_KEY, {})

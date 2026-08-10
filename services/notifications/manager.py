@@ -1,14 +1,14 @@
 """
 Facade the rest of the app calls into — services/scheduled_jobs.py and
 screens/notifications.py's "Test Notification" button both go through
-.notify() without knowing which channels are live. System and Email are both
-live; Telegram joins _channels once its backend exists (see
-channels/telegram.py).
+.notify() without knowing which channels are live. System, Email, and Slack
+are all live.
 """
 
 from PySide6.QtWidgets import QSystemTrayIcon
 
 from services.notifications.channels.email import EmailChannel
+from services.notifications.channels.slack import SlackChannel
 from services.notifications.channels.system import SystemChannel
 from services.notifications.levels import NotificationLevel
 from services.notifications.payload import NotificationPayload
@@ -18,21 +18,21 @@ from services.notifications.sound import AlertSound
 class NotificationService:
     def __init__(self, tray_icon: QSystemTrayIcon):
         sound = AlertSound()
-        self._channels = [SystemChannel(tray_icon, sound), EmailChannel()]
+        self._channels = [SystemChannel(tray_icon, sound), EmailChannel(), SlackChannel()]
 
     def notify(self, title: str, message: str, action=None,
                level: NotificationLevel = NotificationLevel.INFO,
                timeout_ms: int = 10_000,
                channels: set[str] | None = None) -> list:
         """``channels``, when given, restricts delivery to the channel ids in
-        that set (see each channel's CHANNEL_ID, e.g. "system"/"email") —
-        used by strategy-alert delivery to respect the user's global
-        System/Email/Telegram toggles (services/notification_channels.py).
+        that set (see each channel's CHANNEL_ID, e.g. "system"/"email"/"slack")
+        — used by strategy-alert delivery to respect the user's global
+        System/Email/Slack toggles (services/notification_channels.py).
         ``None`` (the default) delivers to every registered channel,
         preserving existing callers' behavior (e.g. services/scheduled_jobs.py's
         background-job notifications, which aren't gated by those toggles).
-        Requesting a channel id with no matching registered channel (e.g.
-        "telegram", not yet implemented) is a harmless no-op.
+        Requesting a channel id with no matching registered channel is a
+        harmless no-op.
 
         Returns each dispatched channel's own send() result (e.g.
         EmailChannel's concurrent.futures.Future for its background-dispatched
