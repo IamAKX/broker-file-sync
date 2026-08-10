@@ -26,6 +26,10 @@ Supported:
   Point    : VALUE_DAYS_AGO  VALUE_ON_DATE  (per stock, a single historic
              value — N trading days before today, or on one specific
              calendar date — see "Historic value (point lookup)" below)
+  Extreme  : VALUE_AT_MAX_DAYS  VALUE_AT_MIN_DAYS  (per stock, another
+             column's value on whichever of the last N historic trading days
+             a DRIVER column was at its highest/lowest — see "Historic value
+             at a window extreme" below)
 
 DIGITS(value) returns how many digits are in the integer part of value (e.g.
 DIGITS(12123.77) = 5, DIGITS(2435.22) = 4) — combine with IIF to tier a
@@ -65,6 +69,28 @@ window is an int (N+1, so the oldest day fetched is exactly N days back);
 VALUE_ON_DATE's window is a (date, date) tuple (a one-day range). Same non-
 live refresh cadence, same "blank rather than crash" fallback when missing
 from day_history, as _DAYS.
+
+── Historic value at a window extreme ──────────────────────────────────────────
+VALUE_AT_MAX_DAYS([High], [CWTO], 5) is "this stock's High on whichever of
+the last 5 historic trading days [CWTO] (the DRIVER column) was at its
+highest" — VALUE_AT_MIN_DAYS is the same for the lowest. Two columns, not
+one: the first is what gets returned, the second is what decides which day.
+Either can be a raw sheet column or another of this strategy's own columns
+(same "any custom formula" resolution collect_day_requests gives the _DAYS
+family above).
+
+Needs BOTH columns' own day_history entries over the SAME N-day window —
+collect_day_requests/scan_day_funcs request them as two ordinary _DAYS-style
+fetches (col_name, N) and (driver_col_name, N), so this adds no new fetching
+machinery, just a second request per call. Resolution reads each entry's
+"daily" list (services.formula_stats_engine.compute_stats' chronological
+[(trade_date, value), ...] — see that module's docstring) rather than one of
+the pre-reduced Min/Max/Average keys the _DAYS family uses: the driver
+column's daily list picks the winning date, then the value column's own
+daily list is read at that exact date. None if either day_history entry is
+missing, the driver has no numeric value on any day in the window, or the
+value column has none on the winning date specifically — same "blank rather
+than crash" fallback as everywhere else in this module.
 """
 
 import math
@@ -282,14 +308,14 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
         elif t == "func":
             # aggregate functions have _ALL suffix; map to a single computed number
             fname = v.rstrip("(").upper()
-            if fname in _DAYS_AGG_BASE or fname in _POINT_LOOKUP_FUNCS:
+            if fname in _DAYS_AGG_BASE or fname in _POINT_LOOKUP_FUNCS or fname in _VALUE_AT_EXTREME_FUNCS:
                 # No historic fetch happens at compile-test time (see the
                 # module docstring's "Historic (N days) aggregates"/
-                # "Historic value (point lookup)" sections) — a numeric
-                # placeholder lets the rest of the formula's arithmetic/
-                # type-check still run instead of raising. See
-                # compile_check's own handling for the caveat this implies
-                # in the result it reports.
+                # "Historic value (point lookup)"/"Historic value at a
+                # window extreme" sections) — a numeric placeholder lets the
+                # rest of the formula's arithmetic/type-check still run
+                # instead of raising. See compile_check's own handling for
+                # the caveat this implies in the result it reports.
                 parts.append("1.0")
             elif fname.endswith("_ALL"):
                 col_name = tok.get("col_arg", "")
@@ -367,6 +393,12 @@ _DAYS_AGG_BASE = {
 # (oldest day in whatever window was fetched).
 _POINT_LOOKUP_FUNCS = {"VALUE_DAYS_AGO", "VALUE_ON_DATE"}
 
+# Value-at-window-extreme lookups — see this module's "Historic value at a
+# window extreme" docstring section. True/False = whether the driver column
+# picks the day with the highest (VALUE_AT_MAX_DAYS) or lowest
+# (VALUE_AT_MIN_DAYS) value.
+_VALUE_AT_EXTREME_FUNCS = {"VALUE_AT_MAX_DAYS": True, "VALUE_AT_MIN_DAYS": False}
+
 
 class _Compiled:
     """A formula's fixed structure, compiled once and reused across rows/ticks.
@@ -380,17 +412,24 @@ class _Compiled:
     (they don't depend on the row being evaluated). ``day_specs`` is
     [(placeholder, agg_key, col_name, days), ...] for _DAYS historic
     aggregate functions, resolved from the row's own stock symbol against a
-    caller-supplied day_history (see the module docstring).
+    caller-supplied day_history (see the module docstring). ``extreme_specs``
+    is [(placeholder, col_name, driver_col_name, days, want_max), ...] for
+    VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS (see the module docstring's "Historic
+    value at a window extreme" section) — resolved the same way as
+    day_specs, against two day_history entries instead of one.
     """
-    __slots__ = ("code", "col_vars", "col_of_vars", "uses_self", "agg_specs", "day_specs")
+    __slots__ = ("code", "col_vars", "col_of_vars", "uses_self", "agg_specs",
+                "day_specs", "extreme_specs")
 
-    def __init__(self, code, col_vars, col_of_vars, uses_self, agg_specs, day_specs):
+    def __init__(self, code, col_vars, col_of_vars, uses_self, agg_specs, day_specs,
+                extreme_specs):
         self.code = code
         self.col_vars = col_vars
         self.col_of_vars = col_of_vars
         self.uses_self = uses_self
         self.agg_specs = agg_specs
         self.day_specs = day_specs
+        self.extreme_specs = extreme_specs
 
 
 _compile_cache: dict = {}
@@ -412,9 +451,12 @@ def _formula_signature(tokens: list):
     # date_arg matters here too — two VALUE_ON_DATE tokens differing only in
     # their date would otherwise share a signature (same type, value,
     # col_arg, days_arg=None, of=None) and incorrectly reuse each other's
-    # compiled day_specs/window from the cache.
+    # compiled day_specs/window from the cache. driver_col_arg likewise, for
+    # two VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS calls differing only in which
+    # column drives the day.
     return tuple((tok.get("type"), tok.get("value"), tok.get("col_arg"),
-                 tok.get("days_arg"), tok.get("of"), tok.get("date_arg"))
+                 tok.get("days_arg"), tok.get("of"), tok.get("date_arg"),
+                 tok.get("driver_col_arg"))
                  for tok in tokens)
 
 
@@ -426,6 +468,7 @@ def _build_compiled(tokens: list):
     uses_self = False
     agg_specs = []
     day_specs = []
+    extreme_specs = []
 
     for tok in tokens:
         t = tok.get("type")
@@ -479,6 +522,14 @@ def _build_compiled(tokens: list):
                 var = f"_d{len(day_specs)}"
                 day_specs.append((var, "First", col_name, (date_arg, date_arg)))
                 parts.append(var)
+            elif (fname in _VALUE_AT_EXTREME_FUNCS and tok.get("col_arg")
+                  and tok.get("driver_col_arg") and days_arg is not None):
+                col_name = tok.get("col_arg", "")
+                driver_col_name = tok.get("driver_col_arg", "")
+                want_max = _VALUE_AT_EXTREME_FUNCS[fname]
+                var = f"_e{len(extreme_specs)}"
+                extreme_specs.append((var, col_name, driver_col_name, int(days_arg), want_max))
+                parts.append(var)
             elif fname.endswith("_ALL"):
                 col_name = tok.get("col_arg", "")
                 base = fname[:-4]
@@ -495,7 +546,7 @@ def _build_compiled(tokens: list):
         code = compile(expr, "<formula>", "eval")  # noqa: S307
     except SyntaxError:
         return None
-    return _Compiled(code, col_vars, col_of_vars, uses_self, agg_specs, day_specs)
+    return _Compiled(code, col_vars, col_of_vars, uses_self, agg_specs, day_specs, extreme_specs)
 
 
 def _get_compiled(tokens: list):
@@ -503,6 +554,37 @@ def _get_compiled(tokens: list):
     if sig not in _compile_cache:
         _compile_cache[sig] = _build_compiled(tokens)
     return _compile_cache[sig]
+
+
+def _value_at_extreme(day_history, symbol, col_name: str, driver_col_name: str,
+                      days: int, want_max: bool):
+    """VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS resolution — see this module's
+    "Historic value at a window extreme" docstring section. None if
+    day_history/symbol is missing, either (col_name, days)/(driver_col_name,
+    days) entry is missing its "daily" list, the driver has no numeric value
+    on any day, or the value column has none on the winning date."""
+    if day_history is None or not symbol:
+        return None
+    driver_entry = day_history.get((driver_col_name, days), {}).get(symbol)
+    value_entry = day_history.get((col_name, days), {}).get(symbol)
+    if not driver_entry or not value_entry:
+        return None
+    driver_daily = driver_entry.get("daily") or []
+    value_daily = value_entry.get("daily") or []
+
+    best_date, best_val = None, None
+    for d, v in driver_daily:
+        if not isinstance(v, (int, float)):
+            continue
+        if best_val is None or (v > best_val if want_max else v < best_val):
+            best_val, best_date = v, d
+    if best_date is None:
+        return None
+
+    for d, v in value_daily:
+        if d == best_date:
+            return v
+    return None
 
 
 def evaluate(tokens: list, row_data: dict, all_data: list,
@@ -575,6 +657,19 @@ def evaluate(tokens: list, row_data: dict, all_data: list,
                 if entry:
                     val = entry.get(agg_key)
             ns[var] = val
+    if compiled.extreme_specs:
+        # VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS: unlike day_specs above, this
+        # reads each entry's own "daily" list (see
+        # services.formula_stats_engine.compute_stats) rather than a
+        # pre-reduced agg_key — the driver column's daily list picks the
+        # winning date, then the value column's own daily list is read at
+        # that exact date. Same symbol-keyed day_history dict as day_specs;
+        # just two entries (col_name, driver_col_name) at the same window
+        # instead of one.
+        symbol = row_data.get(SYMBOL_COLUMN)
+        for var, col_name, driver_col_name, days, want_max in compiled.extreme_specs:
+            ns[var] = _value_at_extreme(day_history, symbol, col_name, driver_col_name,
+                                        days, want_max)
     try:
         return eval(compiled.code, ns)   # noqa: S307
     except Exception:
@@ -624,13 +719,17 @@ def _friendly_exception(exc) -> str:
 
 
 def _referenced_columns(tokens: list) -> list:
-    """Distinct column names referenced by col tokens and aggregate col_args."""
+    """Distinct column names referenced by col tokens and aggregate col_args
+    (including driver_col_arg — VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS's second
+    column)."""
     cols = []
     for tok in tokens:
         if tok.get("type") == "col" and tok.get("value"):
             cols.append(tok["value"])
         if tok.get("col_arg"):
             cols.append(tok["col_arg"])
+        if tok.get("driver_col_arg"):
+            cols.append(tok["driver_col_arg"])
     # preserve order, drop dups
     seen, out = set(), []
     for c in cols:
@@ -641,21 +740,29 @@ def _referenced_columns(tokens: list) -> list:
 
 
 def _uses_day_funcs(tokens: list) -> bool:
-    """True if any _DAYS historic aggregate function, or VALUE_DAYS_AGO/
-    VALUE_ON_DATE point lookup, appears in *tokens*."""
+    """True if any _DAYS historic aggregate function, VALUE_DAYS_AGO/
+    VALUE_ON_DATE point lookup, or VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS
+    window-extreme lookup appears in *tokens*."""
     return any(
         tok.get("type") == "func"
-        and tok.get("value", "").rstrip("(").upper() in (_DAYS_AGG_BASE.keys() | _POINT_LOOKUP_FUNCS)
+        and tok.get("value", "").rstrip("(").upper() in (
+            _DAYS_AGG_BASE.keys() | _POINT_LOOKUP_FUNCS | _VALUE_AT_EXTREME_FUNCS.keys()
+        )
         for tok in tokens
     )
 
 
 def scan_day_funcs(tokens: list) -> list:
     """[(col_name, window), ...] for every well-formed _DAYS, VALUE_DAYS_AGO,
-    or VALUE_ON_DATE function call in *tokens* (col_arg + days_arg, or
-    col_arg + date_arg — see _build_compiled). window is an int for a
-    _DAYS/VALUE_DAYS_AGO call, or a (date, date) tuple for a VALUE_ON_DATE
-    call. Used to figure out which historic data a formula needs
+    VALUE_ON_DATE, or VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS function call in
+    *tokens* (col_arg + days_arg, or col_arg + date_arg — see
+    _build_compiled). window is an int for a _DAYS/VALUE_DAYS_AGO/
+    VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS call, or a (date, date) tuple for a
+    VALUE_ON_DATE call. A VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS call yields TWO
+    entries — (col_arg, days) and (driver_col_arg, days) — since both
+    columns need their own day_history entry over the same window (see
+    services.strategy_engine's "Historic value at a window extreme"
+    docstring). Used to figure out which historic data a formula needs
     (collect_day_requests) and, for Live Master View, which (column,
     window) a clicked cell should drill into (screens/live_viewer.py's
     _on_cell_clicked)."""
@@ -667,12 +774,17 @@ def scan_day_funcs(tokens: list) -> list:
         col_arg = tok.get("col_arg")
         days_arg = tok.get("days_arg")
         date_arg = tok.get("date_arg")
+        driver_col_arg = tok.get("driver_col_arg")
         if fname in _DAYS_AGG_BASE and col_arg and days_arg is not None:
             out.append((col_arg, int(days_arg)))
         elif fname == "VALUE_DAYS_AGO" and col_arg and days_arg is not None:
             out.append((col_arg, int(days_arg) + 1))
         elif fname == "VALUE_ON_DATE" and col_arg and date_arg:
             out.append((col_arg, (date_arg, date_arg)))
+        elif (fname in _VALUE_AT_EXTREME_FUNCS and col_arg and driver_col_arg
+              and days_arg is not None):
+            out.append((col_arg, int(days_arg)))
+            out.append((driver_col_arg, int(days_arg)))
     return out
 
 

@@ -100,13 +100,16 @@ FUNCTION_CATALOGUE = [
 # Historic value (point lookup) — a single historic value, not an aggregate.
 # Own left-nav section (not folded into Functions) so it's easy to find on
 # its own. Every entry's "needs_point_picker" tells _on_item_clicked to open
-# a column + (N-days-back / calendar-date) picker and insert the fully-built
-# call, rather than the plain "insert bare function name, user fills in the
-# rest" flow every other catalogue entry uses. See services.strategy_engine's
-# "Historic value (point lookup)" docstring section.
+# a column + (N-days-back / calendar-date / a 2nd column + N) picker and
+# insert the fully-built call, rather than the plain "insert bare function
+# name, user fills in the rest" flow every other catalogue entry uses. See
+# services.strategy_engine's "Historic value (point lookup)"/"Historic value
+# at a window extreme" docstring sections.
 POINT_LOOKUP_CATALOGUE = [
     {"name": "VALUE_DAYS_AGO", "signature": "VALUE_DAYS_AGO(column, days_ago)", "description": "This stock's own column value exactly N trading days before today (0 = today/most recent). Not an aggregate — just that one day's value.", "token": {"type": "func", "value": "VALUE_DAYS_AGO(", "needs_point_picker": "days_ago"}},
     {"name": "VALUE_ON_DATE",  "signature": "VALUE_ON_DATE(column, date)",      "description": "This stock's own column value on one specific calendar date you pick — e.g. the High on a particular day.", "token": {"type": "func", "value": "VALUE_ON_DATE(", "needs_point_picker": "on_date"}},
+    {"name": "VALUE_AT_MAX_DAYS", "signature": "VALUE_AT_MAX_DAYS(column, driver_column, days)", "description": "This stock's own column value on whichever of the last N historic trading days a second (driver) column was at its HIGHEST — e.g. High on the day CWTO peaked in the last 5 days. Either column can be a raw sheet column or another of this strategy's own columns.", "token": {"type": "func", "value": "VALUE_AT_MAX_DAYS(", "needs_point_picker": "extreme_days"}},
+    {"name": "VALUE_AT_MIN_DAYS", "signature": "VALUE_AT_MIN_DAYS(column, driver_column, days)", "description": "Same as VALUE_AT_MAX_DAYS, but for whichever day the driver column was at its LOWEST — e.g. Low on the day CWTO bottomed in the last 5 days.", "token": {"type": "func", "value": "VALUE_AT_MIN_DAYS(", "needs_point_picker": "extreme_days"}},
 ]
 
 OPERATOR_CATALOGUE = [
@@ -234,13 +237,17 @@ def _token_insert_text(tok: dict) -> str:
         col_arg = tok.get("col_arg", "")
         days_arg = tok.get("days_arg")
         date_arg = tok.get("date_arg")
-        # col_arg must round-trip back through the parser (_DAYS_AGG_ARG_RE
-        # etc.) exactly as typed — its bare-identifier alternative stops at
-        # the first space/dot/etc., so a column name like "DAY TO" or
-        # "OR.High" only re-parses correctly wrapped in [...], same as any
-        # other field reference. Rendering it unbracketed here is what
-        # broke reopening a saved MAX_DAYS([DAY TO], 10) for editing: it
-        # displayed as MAX_DAYS(DAY TO, 10), which the parser then rejected.
+        driver_col_arg = tok.get("driver_col_arg")
+        # col_arg (and driver_col_arg) must round-trip back through the
+        # parser (_DAYS_AGG_ARG_RE etc.) exactly as typed — its bare-
+        # identifier alternative stops at the first space/dot/etc., so a
+        # column name like "DAY TO" or "OR.High" only re-parses correctly
+        # wrapped in [...], same as any other field reference. Rendering it
+        # unbracketed here is what broke reopening a saved MAX_DAYS([DAY
+        # TO], 10) for editing: it displayed as MAX_DAYS(DAY TO, 10), which
+        # the parser then rejected.
+        if driver_col_arg is not None and days_arg is not None:
+            return f"{fname}([{col_arg}], [{driver_col_arg}], {days_arg})"
         if days_arg is not None:
             return f"{fname}([{col_arg}], {days_arg})"
         if date_arg:
@@ -278,6 +285,11 @@ _DAYS_AGG_FUNCS = {
 # "Historic value (point lookup)" docstring section.
 _POINT_DAYS_AGO_FUNCS = {"value_days_ago"}
 _ON_DATE_FUNCS = {"value_on_date"}
+# Historic value at a window extreme — TWO column args (the value to fetch,
+# then the driver column that decides which of the last N days wins) plus a
+# days count. See services/strategy_engine.py's "Historic value at a window
+# extreme" docstring section.
+_VALUE_AT_EXTREME_FUNCS = {"value_at_max_days", "value_at_min_days"}
 _WORD_OPS = {"and": " and ", "or": " or ", "not": " not "}
 _WORD_CONSTS = {"true": "True", "false": "False", "none": "None"}
 
@@ -315,6 +327,15 @@ _ON_DATE_ARG_RE = re.compile(
     r"""\s*,\s*(\d{4}-\d{2}-\d{2})\s*\)"""
 )
 
+# TWO column arguments (same shapes as _AGG_ARG_RE, each) plus a required
+# ", <days>" before the closing paren — e.g. "[High], [CWTO], 5)". Used by
+# VALUE_AT_MAX_DAYS(value_col, driver_col, days)/VALUE_AT_MIN_DAYS(...).
+_TWO_COL_DAYS_ARG_RE = re.compile(
+    r"""\s*(?:\[([^\]]*)\]|([A-Za-z_][A-Za-z0-9_]*)|"([^"]*)"|'([^']*)')"""
+    r"""\s*,\s*(?:\[([^\]]*)\]|([A-Za-z_][A-Za-z0-9_]*)|"([^"]*)"|'([^']*)')"""
+    r"""\s*,\s*(\d+)\s*\)"""
+)
+
 # Splits "[Open of Nifty]" bracket content on the LAST " of " (greedy left
 # group backtracks to the rightmost match), so "X of Y of Z" reads as
 # column "X of Y", stock "Z" — the stock name is what trails.
@@ -342,10 +363,12 @@ def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
     argument up to the matching ')'; for AVG_DAYS(...)/VALUE_DAYS_AGO(...)-
     style functions, the column argument plus a required ", <days>"; for
     VALUE_ON_DATE(...), the column argument plus a required
-    ", <YYYY-MM-DD>". Returns (pos_after_close_paren, col_name, extra) on
-    success — extra is a dict of additional token fields ({"days_arg": N}
-    or {"date_arg": "..."} or {}) — else (start, None, {}) so the caller
-    falls back to normal tokens."""
+    ", <YYYY-MM-DD>"; for VALUE_AT_MAX_DAYS(...)/VALUE_AT_MIN_DAYS(...), TWO
+    column arguments plus a required ", <days>". Returns (pos_after_close_
+    paren, col_name, extra) on success — extra is a dict of additional
+    token fields ({"days_arg": N} or {"date_arg": "..."} or
+    {"driver_col_arg": "...", "days_arg": N} or {}) — else (start, None, {})
+    so the caller falls back to normal tokens."""
     if func_name_lower in _AGG_FUNCS:
         m = _AGG_ARG_RE.match(text, start)
         if not m:
@@ -366,6 +389,14 @@ def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
         *col_groups, when = m.groups()
         col = next(g for g in col_groups if g is not None)
         return m.end(), col, {"date_arg": when}
+    if func_name_lower in _VALUE_AT_EXTREME_FUNCS:
+        m = _TWO_COL_DAYS_ARG_RE.match(text, start)
+        if not m:
+            return start, None, {}
+        *col_groups, days = m.groups()
+        col = next(g for g in col_groups[:4] if g is not None)
+        driver_col = next(g for g in col_groups[4:] if g is not None)
+        return m.end(), col, {"driver_col_arg": driver_col, "days_arg": int(days)}
     return start, None, {}
 
 
@@ -589,6 +620,38 @@ class _DaysAgoPickerDialog(QDialog):
         self._spin = QSpinBox()
         self._spin.setRange(0, 3650)
         self._spin.setValue(1)
+        lay.addWidget(self._spin)
+        ok = QPushButton("OK")
+        ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok.clicked.connect(self.accept)
+        lay.addWidget(ok)
+
+    def selected_n(self) -> int:
+        return self._spin.value()
+
+
+class _DaysCountPickerDialog(QDialog):
+    """Step 3 of building VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS: a plain
+    window size — "the last N trading days" — not "days ago" like
+    _DaysAgoPickerDialog above (N=0 would mean an empty window here, so the
+    minimum is 1)."""
+
+    def __init__(self, theme, parent=None):
+        super().__init__(parent)
+        self._theme = theme
+        self.setWindowTitle("Number of Trading Days")
+        self.setFixedWidth(300)
+        bg, txt = _t(theme, "background"), _t(theme, "text_primary")
+        self.setStyleSheet(
+            f"QDialog{{background:{bg};color:{txt};}}QWidget{{background:{bg};color:{txt};}}"
+            f"QLabel{{background:transparent;}}"
+        )
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+        lay.addWidget(QLabel("Look at the last N trading days:"))
+        self._spin = QSpinBox()
+        self._spin.setRange(1, 3650)
+        self._spin.setValue(5)
         lay.addWidget(self._spin)
         ok = QPushButton("OK")
         ok.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1096,13 +1159,13 @@ class ExpressionEditorDialog(QDialog):
                 self._add_token(entry["token"])
 
     def _open_point_lookup_picker(self, fname: str, picker: str):
-        """Column + (N-days-back or a calendar date) picker for a
-        POINT_LOOKUP_CATALOGUE entry — builds and inserts the complete
-        call in one shot, e.g. VALUE_DAYS_AGO([High], 2) or
-        VALUE_ON_DATE([High], 2026-07-15), instead of the plain "insert
-        bare function name, fill in the rest by hand" flow every other
-        catalogue entry uses. *picker* is "days_ago" or "on_date" (see
-        POINT_LOOKUP_CATALOGUE)."""
+        """Column + (N-days-back / a calendar date / a 2nd driver column +
+        N) picker for a POINT_LOOKUP_CATALOGUE entry — builds and inserts
+        the complete call in one shot, e.g. VALUE_DAYS_AGO([High], 2),
+        VALUE_ON_DATE([High], 2026-07-15), or VALUE_AT_MAX_DAYS([High],
+        [CWTO], 5), instead of the plain "insert bare function name, fill in
+        the rest by hand" flow every other catalogue entry uses. *picker* is
+        "days_ago", "on_date", or "extreme_days" (see POINT_LOOKUP_CATALOGUE)."""
         columns = self._lmv_headers + self._strategy_col_headers
         if not columns:
             QMessageBox.information(
@@ -1120,6 +1183,21 @@ class ExpressionEditorDialog(QDialog):
             if n_dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             self._insert_at_cursor(f"{fname}([{column}], {n_dlg.selected_n()})")
+        elif picker == "extreme_days":
+            # Same full column list for the driver — any raw sheet column or
+            # this/another strategy's own computed column is fair game (see
+            # services.strategy_engine's "Historic value at a window
+            # extreme" docstring: both columns resolve the same way).
+            driver_dlg = _ColumnPickerDialog(columns, self._theme, self)
+            driver_dlg.setWindowTitle("Pick the Driver Column (decides which day)")
+            if driver_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            driver_column = driver_dlg.selected_column()
+            n_dlg = _DaysCountPickerDialog(self._theme, self)
+            if n_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            self._insert_at_cursor(
+                f"{fname}([{column}], [{driver_column}], {n_dlg.selected_n()})")
         else:
             from api import lmv_snapshot_api
             date_dlg = _OnDatePickerDialog(self._theme, lmv_snapshot_api.get_availability, self)

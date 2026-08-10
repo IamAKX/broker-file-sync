@@ -440,9 +440,12 @@ def test_point_lookup_tokens_round_trip_through_dialog(qapp):
 def test_point_lookup_catalogue_has_both_functions():
     from screens.formula_editor import POINT_LOOKUP_CATALOGUE
     names = {f["name"] for f in POINT_LOOKUP_CATALOGUE}
-    assert names == {"VALUE_DAYS_AGO", "VALUE_ON_DATE"}
+    assert names == {"VALUE_DAYS_AGO", "VALUE_ON_DATE", "VALUE_AT_MAX_DAYS", "VALUE_AT_MIN_DAYS"}
     pickers = {f["name"]: f["token"]["needs_point_picker"] for f in POINT_LOOKUP_CATALOGUE}
-    assert pickers == {"VALUE_DAYS_AGO": "days_ago", "VALUE_ON_DATE": "on_date"}
+    assert pickers == {
+        "VALUE_DAYS_AGO": "days_ago", "VALUE_ON_DATE": "on_date",
+        "VALUE_AT_MAX_DAYS": "extreme_days", "VALUE_AT_MIN_DAYS": "extreme_days",
+    }
 
 
 def test_historic_value_nav_section_lists_point_lookup_functions(qapp):
@@ -453,6 +456,116 @@ def test_historic_value_nav_section_lists_point_lookup_functions(qapp):
     assert len(items) == len(POINT_LOOKUP_CATALOGUE)
     assert "VALUE_DAYS_AGO" in items
     assert "VALUE_ON_DATE" in items
+    assert "VALUE_AT_MAX_DAYS" in items
+    assert "VALUE_AT_MIN_DAYS" in items
+
+
+# ── VALUE_AT_MAX_DAYS(column, driver_column, days) / VALUE_AT_MIN_DAYS(...) ──
+
+def test_parse_value_at_max_days_captures_both_columns_and_days_bracket_form():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_AT_MAX_DAYS([High], [CWTO], 5)")
+    assert tokens == [{"type": "func", "value": "VALUE_AT_MAX_DAYS(",
+                       "col_arg": "High", "driver_col_arg": "CWTO", "days_arg": 5}]
+
+
+def test_parse_value_at_min_days_captures_both_columns_and_days_bare_word_form():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_AT_MIN_DAYS(Low, CWTO, 5)")
+    assert tokens == [{"type": "func", "value": "VALUE_AT_MIN_DAYS(",
+                       "col_arg": "Low", "driver_col_arg": "CWTO", "days_arg": 5}]
+
+
+def test_parse_value_at_max_days_mixed_bracket_and_bare_forms():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_AT_MAX_DAYS([DAY TO], CWTO, 5)")
+    assert tokens == [{"type": "func", "value": "VALUE_AT_MAX_DAYS(",
+                       "col_arg": "DAY TO", "driver_col_arg": "CWTO", "days_arg": 5}]
+
+
+def test_parse_value_at_max_days_without_driver_falls_back_to_bare_func_token():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_AT_MAX_DAYS([High])")
+    assert tokens[0] == {"type": "func", "value": "VALUE_AT_MAX_DAYS("}
+    assert {"type": "col", "value": "High"} in tokens
+
+
+def test_value_at_max_days_token_renders_back_to_three_arg_text():
+    from screens.formula_editor import _tokens_to_text
+    tokens = [{"type": "func", "value": "VALUE_AT_MAX_DAYS(", "col_arg": "High",
+               "driver_col_arg": "CWTO", "days_arg": 5}]
+    assert _tokens_to_text(tokens) == "VALUE_AT_MAX_DAYS([High], [CWTO], 5)"
+
+
+def test_value_at_extreme_tokens_round_trip_through_dialog(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    original = [{"type": "func", "value": "VALUE_AT_MAX_DAYS(", "col_arg": "High",
+                "driver_col_arg": "CWTO", "days_arg": 5}]
+    dlg = ExpressionEditorDialog(original, ["High", "CWTO"], [], {"High": 100.0, "CWTO": 0.01})
+    assert dlg.get_tokens() == original
+
+
+def test_extreme_days_picker_inserts_full_call_text(qapp):
+    """The value column and driver column pickers draw from the same full
+    column list (self._lmv_headers + self._strategy_col_headers) — any LMV
+    column or the strategy's own computed columns, not a restricted set."""
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QDialog
+
+    dlg = ExpressionEditorDialog([], ["High", "CWTO"], ["MyCol"], {"High": 100.0})
+
+    picks = iter(["High", "CWTO"])
+
+    class _FakeColDlg:
+        def __init__(self, *a, **k): pass
+        def setWindowTitle(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_column(self): return next(picks)
+
+    class _FakeNDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_n(self): return 5
+
+    import screens.formula_editor as mod
+    orig_col, orig_n = mod._ColumnPickerDialog, mod._DaysCountPickerDialog
+    mod._ColumnPickerDialog = _FakeColDlg
+    mod._DaysCountPickerDialog = _FakeNDlg
+    try:
+        dlg._open_point_lookup_picker("VALUE_AT_MAX_DAYS", "extreme_days")
+    finally:
+        mod._ColumnPickerDialog = orig_col
+        mod._DaysCountPickerDialog = orig_n
+
+    assert dlg._preview_edit.toPlainText() == "VALUE_AT_MAX_DAYS([High], [CWTO], 5)"
+
+
+def test_extreme_days_picker_cancelled_driver_step_inserts_nothing(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QDialog
+
+    dlg = ExpressionEditorDialog([], ["High", "CWTO"], [], {"High": 100.0})
+
+    calls = {"n": 0}
+
+    class _FakeColDlg:
+        def __init__(self, *a, **k): pass
+        def setWindowTitle(self, *a, **k): pass
+        def exec(self):
+            calls["n"] += 1
+            # First call (value column) accepts, second (driver) cancels.
+            return QDialog.DialogCode.Accepted if calls["n"] == 1 else QDialog.DialogCode.Rejected
+        def selected_column(self): return "High"
+
+    import screens.formula_editor as mod
+    orig_col = mod._ColumnPickerDialog
+    mod._ColumnPickerDialog = _FakeColDlg
+    try:
+        dlg._open_point_lookup_picker("VALUE_AT_MAX_DAYS", "extreme_days")
+    finally:
+        mod._ColumnPickerDialog = orig_col
+
+    assert dlg._preview_edit.toPlainText() == ""
 
 
 # ── _open_point_lookup_picker: column + (N-days-back / date) picker ────────

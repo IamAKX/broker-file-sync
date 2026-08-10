@@ -125,28 +125,41 @@ way.
 
 ## Historic Value (Point Lookup)
 
-`VALUE_DAYS_AGO` and `VALUE_ON_DATE` are a different kind of historic
-function from the aggregates above — a **single historic value**, not a
-Min/Max/Average over a window. They live in their own **Historic Value**
-section in the Expression Editor's left nav (not folded into Functions),
-right next to it:
+`VALUE_DAYS_AGO`, `VALUE_ON_DATE`, `VALUE_AT_MAX_DAYS`, and
+`VALUE_AT_MIN_DAYS` are a different kind of historic function from the
+aggregates above — a **single historic value**, not a Min/Max/Average over a
+window. They live in their own **Historic Value** section in the Expression
+Editor's left nav (not folded into Functions), right next to it:
 
 ```
 VALUE_DAYS_AGO([High], 2)          — this stock's High exactly 2 trading days
                                        before today (0 = today/most recent)
 VALUE_ON_DATE([High], 2026-07-15)  — this stock's High on that exact date
+VALUE_AT_MAX_DAYS([High], [CWTO], 5) — High on whichever of the last 5
+                                       trading days [CWTO] was at its highest
+VALUE_AT_MIN_DAYS([Low], [CWTO], 5)  — same, for whichever day [CWTO] was at
+                                       its lowest
 ```
 
-Clicking either function opens a picker — pick a column, then either a
-"days back" number or a calendar date (dotted where saved snapshot data
-actually exists) — and the complete call is inserted for you, ready to use,
-rather than typing dates by hand.
+Clicking any of these opens a picker — pick a column, then either a "days
+back" number, a calendar date (dotted where saved snapshot data actually
+exists), or (for `VALUE_AT_MAX_DAYS`/`VALUE_AT_MIN_DAYS`) a second **driver**
+column plus a day count — and the complete call is inserted for you, ready
+to use, rather than typing it by hand.
+
+`VALUE_AT_MAX_DAYS`/`VALUE_AT_MIN_DAYS` take two columns: the first is what
+gets returned, the second (the driver) is what decides which of the last N
+trading days wins. Either can be a raw sheet column or another of this
+strategy's own columns (any custom formula), same as `AVG_DAYS`/etc. above —
+both column pickers offer the full Fields list, not a restricted set.
 
 Same non-live refresh cadence as Historic (N days) above (load/toggle/
 category-change/**↻ N-Day Data**), same Compile & Test placeholder caveat,
-and the same click-a-cell popup in Live Master View — it's the identical
-underlying mechanism, just resolving to one specific day's value instead of
-an aggregate over several.
+and the same click-a-cell popup in Live Master View (for
+`VALUE_AT_MAX_DAYS`/`VALUE_AT_MIN_DAYS`, the popup drills into the *value*
+column's own history, not the driver's) — it's the identical underlying
+mechanism, just resolving to one specific day's value instead of an
+aggregate over several.
 
 ---
 

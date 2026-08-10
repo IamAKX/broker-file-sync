@@ -735,3 +735,147 @@ def test_collect_day_requests_resolves_point_lookups_and_days_agg_together():
     requests = collect_day_requests([strategy])
     windows = {window for _, window, _ in requests}
     assert windows == {20, 3, ("2026-07-15", "2026-07-15")}
+
+
+# ── VALUE_AT_MAX_DAYS / VALUE_AT_MIN_DAYS (value-at-window-extreme) ─────────
+# Two columns, not one: col_arg is what gets returned, driver_col_arg is what
+# decides which of the last N historic days wins. Both need their own
+# day_history entry over the SAME window — resolved via each entry's "daily"
+# list (services.formula_stats_engine.compute_stats), not a pre-reduced
+# agg_key like the _DAYS family above.
+
+def extreme_tok(fn, col, driver_col, days):
+    return [{"type": "func", "value": f"{fn}(", "col_arg": col,
+             "driver_col_arg": driver_col, "days_arg": days}]
+
+
+def test_value_at_max_days_returns_value_col_on_drivers_peak_day():
+    day_history = {
+        ("CWTO", 5): {"INFY": {"daily": [
+            ("2026-06-08", 0.005), ("2026-06-09", 0.001),
+            ("2026-06-10", 0.015), ("2026-06-11", 0.001), ("2026-06-12", 0.00125),
+        ]}},
+        ("High", 5): {"INFY": {"daily": [
+            ("2026-06-08", 1001), ("2026-06-09", 1002),
+            ("2026-06-10", 1003), ("2026-06-11", 1004), ("2026-06-12", 1005),
+        ]}},
+    }
+    tokens = extreme_tok("VALUE_AT_MAX_DAYS", "High", "CWTO", 5)
+    result = evaluate(tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL], day_history=day_history)
+    assert result == 1003  # CWTO peaked on 2026-06-10 -> that day's High
+
+
+def test_value_at_min_days_returns_value_col_on_drivers_trough_day():
+    day_history = {
+        ("CWTO", 5): {"INFY": {"daily": [
+            ("2026-06-08", 0.005), ("2026-06-09", 0.001),
+            ("2026-06-10", 0.015), ("2026-06-11", 0.001), ("2026-06-12", 0.00125),
+        ]}},
+        ("Low", 5): {"INFY": {"daily": [
+            ("2026-06-08", 501), ("2026-06-09", 502),
+            ("2026-06-10", 503), ("2026-06-11", 504), ("2026-06-12", 505),
+        ]}},
+    }
+    tokens = extreme_tok("VALUE_AT_MIN_DAYS", "Low", "CWTO", 5)
+    result = evaluate(tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL], day_history=day_history)
+    # CWTO troughs on 2026-06-09 (first of the two 0.001 ties) -> that day's Low
+    assert result == 502
+
+
+def test_value_at_extreme_none_without_day_history():
+    tokens = extreme_tok("VALUE_AT_MAX_DAYS", "High", "CWTO", 5)
+    assert evaluate(tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL]) is None
+
+
+def test_value_at_extreme_none_when_driver_entry_missing():
+    day_history = {("High", 5): {"INFY": {"daily": [("2026-06-08", 1001)]}}}
+    tokens = extreme_tok("VALUE_AT_MAX_DAYS", "High", "CWTO", 5)
+    assert evaluate(tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL], day_history=day_history) is None
+
+
+def test_value_at_extreme_none_when_value_entry_missing():
+    day_history = {("CWTO", 5): {"INFY": {"daily": [("2026-06-08", 0.005)]}}}
+    tokens = extreme_tok("VALUE_AT_MAX_DAYS", "High", "CWTO", 5)
+    assert evaluate(tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL], day_history=day_history) is None
+
+
+def test_value_at_extreme_none_when_value_col_missing_on_winning_date():
+    day_history = {
+        ("CWTO", 5): {"INFY": {"daily": [("2026-06-08", 0.005), ("2026-06-09", 0.02)]}},
+        ("High", 5): {"INFY": {"daily": [("2026-06-08", 1001)]}},  # no 06-09 entry
+    }
+    tokens = extreme_tok("VALUE_AT_MAX_DAYS", "High", "CWTO", 5)
+    assert evaluate(tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL], day_history=day_history) is None
+
+
+def test_value_at_extreme_ignores_non_numeric_driver_days():
+    day_history = {
+        ("CWTO", 5): {"INFY": {"daily": [("2026-06-08", None), ("2026-06-09", 0.02)]}},
+        ("High", 5): {"INFY": {"daily": [("2026-06-08", 1001), ("2026-06-09", 1002)]}},
+    }
+    tokens = extreme_tok("VALUE_AT_MAX_DAYS", "High", "CWTO", 5)
+    result = evaluate(tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL], day_history=day_history)
+    assert result == 1002
+
+
+def test_value_at_extreme_can_use_driver_as_own_strategys_computed_column():
+    """Both columns can be raw sheet columns or another of THIS strategy's
+    own computed columns — same resolution collect_day_requests gives the
+    plain _DAYS family."""
+    from services.strategy_engine import collect_day_requests
+    inner_formula = [tok_col("High"), tok_op("-"), tok_col("Low")]
+    strategy = {
+        "id": "s1", "active": True,
+        "columns": [
+            {"name": "Spread", "formula": inner_formula, "fmt_rules": []},
+            {"name": "HighAtMaxSpread",
+             "formula": extreme_tok("VALUE_AT_MAX_DAYS", "High", "Spread", 5),
+             "fmt_rules": []},
+        ],
+        "row_filter": [],
+    }
+    requests = collect_day_requests([strategy])
+    resolved = {(col, days): formula for col, days, formula in requests}
+    assert resolved[("Spread", 5)] == inner_formula
+    assert resolved[("High", 5)] == [tok_col("High")]
+
+
+def test_compile_check_value_at_extreme_uses_placeholder_not_hard_failure():
+    from services.strategy_engine import compile_check
+    tokens = extreme_tok("VALUE_AT_MAX_DAYS", "High", "CWTO", 5)
+    row_data = {"High": "100", "CWTO": "0.01"}
+    ok, msg = compile_check(tokens, row_data, [row_data])
+    assert ok is True
+    assert "historic" in msg.lower()
+
+
+def test_compile_check_value_at_extreme_unknown_driver_column_reported():
+    from services.strategy_engine import compile_check
+    tokens = extreme_tok("VALUE_AT_MAX_DAYS", "High", "TotallyMadeUp", 5)
+    row_data = {"High": "100"}
+    ok, msg = compile_check(tokens, row_data, [row_data])
+    assert ok is False
+    assert "TotallyMadeUp" in msg
+
+
+def test_scan_day_funcs_finds_both_columns_for_value_at_extreme():
+    from services.strategy_engine import scan_day_funcs
+    tokens = extreme_tok("VALUE_AT_MAX_DAYS", "High", "CWTO", 5)
+    assert scan_day_funcs(tokens) == [("High", 5), ("CWTO", 5)]
+    tokens = extreme_tok("VALUE_AT_MIN_DAYS", "Low", "CWTO", 5)
+    assert scan_day_funcs(tokens) == [("Low", 5), ("CWTO", 5)]
+
+
+def test_collect_day_requests_resolves_both_value_at_extreme_columns():
+    from services.strategy_engine import collect_day_requests
+    strategy = {
+        "id": "s1", "active": True,
+        "columns": [
+            {"name": "HighAtMaxCWTO",
+             "formula": extreme_tok("VALUE_AT_MAX_DAYS", "High", "CWTO", 5),
+             "fmt_rules": []},
+        ],
+        "row_filter": [],
+    }
+    requests = collect_day_requests([strategy])
+    assert {(c, d) for c, d, _ in requests} == {("High", 5), ("CWTO", 5)}

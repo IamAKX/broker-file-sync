@@ -273,19 +273,29 @@ AVG_DAYS([MyComputedCol], 20)                  — 20-day average of another of 
 
 Not an aggregate — a *specific historic day's value*, one stock's own
 column. Its own **Historic Value** section in the editor's left nav, not
-folded into Functions. Clicking either function opens a column picker, then
-a "days back" number or a calendar date picker (dotted where saved data
-actually exists) — the full call gets inserted for you:
+folded into Functions. Clicking any of these opens a guided picker (column,
+then a "days back" number / a calendar date / a second driver column plus a
+day count) — the full call gets inserted for you:
 
 | Function | Example |
 |---|---|
 | `VALUE_DAYS_AGO(column, days_ago)` | `VALUE_DAYS_AGO([High], 2)` — this stock's High 2 trading days before today (0 = today/most recent) |
 | `VALUE_ON_DATE(column, date)` | `VALUE_ON_DATE([High], 2026-07-15)` — this stock's High on that exact calendar date |
+| `VALUE_AT_MAX_DAYS(column, driver_column, days)` | `VALUE_AT_MAX_DAYS([High], [CWTO], 5)` — this stock's High on whichever of the last 5 trading days [CWTO] was at its **highest** |
+| `VALUE_AT_MIN_DAYS(column, driver_column, days)` | `VALUE_AT_MIN_DAYS([Low], [CWTO], 5)` — same, for whichever day [CWTO] was at its **lowest** |
 
 ```
 [Current] > VALUE_DAYS_AGO([High], 5)          — price above where High stood 5 trading days ago
 VALUE_ON_DATE([Low], 2026-07-15)               — the Low on one specific day
+VALUE_AT_MAX_DAYS([High], [CWTO], 5)           — High on the day CWTO peaked in the last 5 days
 ```
+
+`VALUE_AT_MAX_DAYS`/`VALUE_AT_MIN_DAYS` take **two** columns, not one: the
+first is what gets returned, the second (the *driver*) is what decides which
+day wins. Either can be a raw sheet column or another of this strategy's own
+columns (any custom formula) — same resolution the plain `_DAYS` family
+above gets. The picker asks for both, in order: the column to fetch, then
+the driver column, then the day count.
 
 Same refresh cadence, Compile & Test placeholder caveat, and click-a-cell
 history popup as [Historic — over the last N
@@ -348,6 +358,11 @@ IIf(Digits([Open]) >= 5, 0.998, IIf(Digits([Open]) >= 4, 0.919, 0.85))
 **20-day breakout**
 ```
 [Current] > AVG_DAYS([High], 20)
+```
+
+**High on the day turnover peaked in the last 5 days**
+```
+VALUE_AT_MAX_DAYS([High], [CWTO], 5)
 ```
 
 **A safe divide-by-zero guard** (see the `IIf` gotcha above)
