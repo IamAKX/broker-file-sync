@@ -265,6 +265,17 @@ class LmvSnapshotViewer(QWidget):
         self._update_filter_btn_label()
 
     def _show_strategy_picker(self):
+        # self._strategies is otherwise a one-time snapshot taken at __init__
+        # (see its docstring) — reload here so a strategy switched on in
+        # Strategy Builder since this viewer opened is offered right away,
+        # instead of only after closing and reopening the viewer. Any change
+        # already applied via _on_strategies_applied below is itself
+        # persisted, so this reload can't lose it.
+        from api.exceptions import ApiError, NetworkError
+        try:
+            self._strategies = [s for s in strategy_store.load_all() if s.get("active")]
+        except (ApiError, NetworkError):
+            pass
         popup = StrategyPickerPopup(self._filtered_strategies(), self._theme, self)
         popup.applied.connect(self._on_strategies_applied)
         btn_pos = self._strat_btn.mapToGlobal(self._strat_btn.rect().bottomLeft())

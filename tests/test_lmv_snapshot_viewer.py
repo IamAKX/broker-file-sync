@@ -54,3 +54,23 @@ def test_viewer_title_defaults_to_trade_date(qapp):
     from screens.lmv_snapshot_viewer import LmvSnapshotViewer
     w = LmvSnapshotViewer(HEADERS, DATA, date(2026, 7, 20), theme=None)
     assert "20-Jul-2026" in w.windowTitle()
+
+
+def test_strategy_picker_reloads_from_store_before_opening(qapp, monkeypatch):
+    """self._strategies is otherwise a one-time __init__ snapshot — a
+    strategy switched on in Strategy Builder after this viewer was opened
+    must still show up in its picker (see _show_strategy_picker)."""
+    from screens.lmv_snapshot_viewer import LmvSnapshotViewer
+    from services import strategy_store
+
+    monkeypatch.setattr(strategy_store, "load_all", lambda: [])
+    w = LmvSnapshotViewer(HEADERS, DATA, date(2026, 7, 20), theme=None)
+    assert w._strategies == []
+
+    monkeypatch.setattr(
+        strategy_store, "load_all",
+        lambda: [{"id": "new", "name": "New Strat", "active": True, "category": "Daily"}],
+    )
+    w._show_strategy_picker()
+
+    assert [s["name"] for s in w._strategies] == ["New Strat"]

@@ -219,6 +219,28 @@ def load_all() -> list:
     return []
 
 
+def merge_session_active(fresh: list, session: list) -> list:
+    """Reconciles a freshly-reloaded strategy list (e.g. a new load_all()
+    call) against a window's own in-memory *session* copy — used by any LMV
+    view that keeps its own per-session "applied to this table" active flag
+    separate from Strategy Builder's persisted one (see
+    screens.live_viewer.LiveViewerWindow.set_strategies' docstring).
+
+    Only strategies currently Active in Strategy Builder (*fresh*'s own
+    "active" field) are kept — one flipped off there shouldn't linger in an
+    already-open LMV window — but each kept strategy's *session*-side active
+    flag (whether the user has actually applied it to this table this
+    session) is preserved. A strategy that's active in Strategy Builder but
+    wasn't part of *session* yet — e.g. just switched on there after this
+    window was opened — is included but starts unapplied (active=False),
+    same as every strategy does on first open (LMV never auto-applies one
+    just because Strategy Builder marks it active).
+    """
+    active_by_id = {s["id"]: s.get("active", False) for s in session}
+    return [dict(s, active=active_by_id.get(s["id"], False))
+            for s in fresh if s.get("active")]
+
+
 def save_strategy(strategy: dict):
     """Upserts by id, both on the server and in the local cache. Propagates
     ApiError/NetworkError from the server call — a failed save must be

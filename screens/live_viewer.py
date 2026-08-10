@@ -262,9 +262,7 @@ class _LiveDataWorker(QObject):
                 # known to this window.
                 merged = strategies
             else:
-                active_by_id = {s["id"]: s.get("active", False) for s in strategies}
-                merged = [dict(s, active=active_by_id.get(s["id"], False))
-                         for s in fresh if s.get("active")]
+                merged = strategy_store.merge_session_active(fresh, strategies)
 
             in_view = [
                 s for s in merged
@@ -2339,12 +2337,33 @@ class LiveViewerWindow(QWidget):
         self._recompute_display()
 
     def _show_strategy_picker(self):
+        self._sync_strategies_from_store()
         popup = StrategyPickerPopup(self._filtered_strategies(), self._theme, self)
         popup.applied.connect(self._on_strategies_applied)
         btn_pos = self._strat_btn.mapToGlobal(self._strat_btn.rect().bottomLeft())
         popup.adjustSize()
         popup.move(btn_pos.x(), btn_pos.y() + 4)
         popup.show()
+
+    def _sync_strategies_from_store(self):
+        """Reloads strategy definitions from services.strategy_store right
+        before the picker opens, so a strategy just switched on in Strategy
+        Builder shows up immediately instead of needing the unrelated
+        "↻ N-Day Data" button first (previously the only thing that resynced
+        self._strategies — see _refresh_day_history_from_store's docstring).
+        Synchronous rather than routed through the worker thread: this is a
+        discrete click, not a per-tick path, same rationale as
+        _refresh_day_history. A store-refresh hiccup here just means the
+        picker opens with whatever it already had, same as any other
+        best-effort reload in this window."""
+        from services import strategy_store
+        from api.exceptions import ApiError, NetworkError
+        try:
+            fresh = strategy_store.load_all()
+        except (ApiError, NetworkError):
+            return
+        self._strategies = strategy_store.merge_session_active(fresh, self._strategies)
+        self._update_strat_btn_label()
 
     def _on_strategies_applied(self, updated: list):
         # Merge updated strategies back by ID so strategies outside the current
