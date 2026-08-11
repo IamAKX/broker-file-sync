@@ -183,12 +183,31 @@ class ThemeManager:
                 font-size: {font_scale.DISPLAY_LG}pt;
                 font-weight: bold;
             }}
-            QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox {{
+            QLineEdit, QPlainTextEdit, QTextEdit, QComboBox, QSpinBox,
+            QDateTimeEdit, QDateEdit, QTimeEdit {{
                 background-color: {p['input_bg']};
                 color: {p['text_primary']};
                 border: 1px solid {p['border']};
                 border-radius: 4px;
                 padding: 6px 10px;
+            }}
+            QDateTimeEdit::drop-down, QDateEdit::drop-down {{
+                border: none;
+                width: 20px;
+            }}
+            QDateTimeEdit QCalendarWidget, QDateEdit QCalendarWidget {{
+                background-color: {p['card_bg']};
+                color: {p['text_primary']};
+            }}
+            QCalendarWidget QAbstractItemView {{
+                background-color: {p['card_bg']};
+                color: {p['text_primary']};
+                selection-background-color: {p['accent']};
+                selection-color: {p['background']};
+            }}
+            QCalendarWidget QToolButton {{
+                background-color: {p['button_bg']};
+                color: {p['text_primary']};
             }}
             QSpinBox::up-button, QSpinBox::down-button {{
                 background: {p['button_bg']};

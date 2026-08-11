@@ -19,6 +19,8 @@ Only one pending/open signal per (strategy_id, symbol) at a time — a trigger
 firing again for a symbol that already has one is ignored until it resolves.
 """
 
+import copy
+import uuid
 from datetime import datetime, timedelta
 
 from services.strategy_alerts import messages, state_store
@@ -209,6 +211,14 @@ def _fire_entry(
     low = _to_float(row.get(_LOW_COLUMN))
 
     signal = {
+        # A stable id, assigned exactly once here (entry is the first
+        # notification-worthy transition — see backend_sync.py) and carried
+        # unchanged through every later mutation of this same signal dict,
+        # including once it's moved into alert history on resolve. Lets the
+        # backend sync (services/strategy_alerts/backend_sync.py) upsert the
+        # SAME durable row on every subsequent Target/Stop-out update
+        # instead of creating a new one each time.
+        "id": str(uuid.uuid4()),
         "state": "open",
         "strategy_id": strategy["id"],
         "strategy_name": strategy.get("name", ""),
@@ -231,6 +241,13 @@ def _fire_entry(
     )
     event.payload["title"] = messages.render_title(event)
     event.payload["message"] = messages.render_message(event)
+    # A deep, point-in-time copy — see _update_open_signal's comment on why
+    # a shallow dict(signal) risks a later-in-tick mutation leaking into an
+    # earlier event's snapshot (not a risk for entry specifically, since it
+    # only ever fires once per signal, but kept uniform across all three
+    # event kinds so callers (screens/live_viewer.py's backend push) have
+    # one consistent shape regardless of which kind fired).
+    event.payload["_signal"] = copy.deepcopy(signal)
     return event
 
 
@@ -333,5 +350,22 @@ def _update_open_signal(
         state_store.set_cooldown(key)
     else:
         state_store.set_open_signal(key, signal, force_flush=bool(events))
+
+    if events:
+        # ONE deepcopy of the FINAL post-mutation state (including
+        # resolved_at/resolution if this tick resolved it), attached to
+        # every event produced this call — all of them describe the same
+        # (strategy_id, symbol) signal, and taking the snapshot only now
+        # (rather than at each event's own construction point above) is
+        # what lets a target event that happens to be the one completing
+        # all_targets_hit still carry the resolved state, not a stale
+        # still-open one. A shallow dict(signal) would be unsafe for the
+        # SAME reason noted where target events are built above (shared
+        # nested "metrics"/"risk_reward" dict objects); nothing mutates
+        # `signal` again after this point, so sharing one copy across every
+        # event here (rather than one deepcopy per event) is safe.
+        snapshot = copy.deepcopy(signal)
+        for event in events:
+            event.payload["_signal"] = snapshot
 
     return events

@@ -15,8 +15,8 @@
 - 📥 **Multi-broker import** — drag-and-drop Excel exports from Sharekhan, ReliableSoftware, and NiftyInvest
 - 🔀 **Live Master View** — real-time merged table that auto-refreshes when files change on disk, with Sector filtering and Opening Range High/Low columns
 - 🧮 **Strategy Builder** — visual formula builder with conditional formatting and color rules
-- 🔔 **Strategy Notifications** — turn a strategy into a live trade-signal alert: debounced entry trigger, Stop Loss/Target/Trailing Exit lifecycle tracking, delivered via System tray or Email — see [docs/strategy-notifications.md](docs/strategy-notifications.md)
-- 🗂 **Live Alerts** — a log of every open and resolved signal, filterable by recency
+- 🔔 **Strategy Notifications** — turn a strategy into a live trade-signal alert: debounced entry trigger, Stop Loss/Target/Trailing Exit lifecycle tracking, delivered via System tray, Email, or Slack — see [docs/strategy-notifications.md](docs/strategy-notifications.md)
+- 🗂 **Live Alerts** — durable, tenant-scoped log of every open and resolved signal synced to the backend as it happens, filterable by Strategy/Direction/Stock/Sector/Status/Date-Time range (combined) with pagination; still-pending signals show separately in a local, live strip
 - 📅 **Historic data & LMV snapshots** — upload daily historic values and full LMV snapshots to the backend, browse them back, gated by a Market Holidays calendar so a holiday's data is never mistakenly saved
 - 📊 **Formula Stats & historic aggregates** — the Data menu's Formula Stats screen aggregates a strategy's columns over N historic days; `AVG_DAYS`/`MIN_DAYS`/etc. bring that same aggregation into the formula language itself — usable in any column, condition, or notification metric — see [docs/strategy-builder.md](docs/strategy-builder.md#historic-n-days-aggregates). `VALUE_DAYS_AGO`/`VALUE_ON_DATE` look up a single historic value instead of aggregating, and `VALUE_AT_MAX_DAYS`/`VALUE_AT_MIN_DAYS` look up one column's value on whichever day a second (driver) column peaked/bottomed over the window — see [Historic Value (Point Lookup)](docs/strategy-builder.md#historic-value-point-lookup)
 - ⚙️ **Config Editor** — manage sector mappings, script names, and column order
@@ -115,6 +115,7 @@ broker-file-sync/
 │   │   ├── engine.py              # trigger/debounce/lifecycle state machine
 │   │   ├── config_store.py        # per-strategy notification config (backend-synced)
 │   │   ├── state_store.py         # open signals + alert history (local)
+│   │   ├── backend_sync.py        # pushes entry/target/stop-out signals to the backend
 │   │   └── models.py, messages.py
 │   ├── notifications/         # Delivery channels
 │   │   ├── manager.py             # NotificationService facade

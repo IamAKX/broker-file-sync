@@ -35,7 +35,7 @@ def _isolate_disk_stores(tmp_path, monkeypatch):
     alerts_state_store.reset_for_user_switch()
     alerts_config_store.reload_cache()
 
-    from api import auth_api, formula_variables_api, settings_api, strategies_api
+    from api import auth_api, formula_variables_api, settings_api, strategies_api, strategy_signals_api
 
     monkeypatch.setattr(settings_api, "get_setting", lambda key: {"key": key, "value": None})
     monkeypatch.setattr(settings_api, "put_setting", lambda key, value: {"key": key, "value": value})
@@ -63,3 +63,19 @@ def _isolate_disk_stores(tmp_path, monkeypatch):
 
     monkeypatch.setattr(auth_api, "get_theme", lambda: {"theme": "light"})
     monkeypatch.setattr(auth_api, "update_theme", lambda theme: {"theme": theme})
+
+    # services/strategy_alerts/backend_sync.py fires a real HTTP call
+    # (dispatched to a background thread, so it wouldn't block a test either
+    # way, but a live_viewer test that produces an entry/target/stop-out
+    # event would otherwise make a genuine network attempt from every test
+    # run — see this fixture's own docstring for why that's unacceptable).
+    monkeypatch.setattr(
+        strategy_signals_api, "upsert_signal",
+        lambda signal_id, payload: {"id": signal_id, **payload},
+    )
+    monkeypatch.setattr(
+        strategy_signals_api, "list_signals",
+        lambda **kwargs: {"items": [], "total": 0, "page": kwargs.get("page", 1),
+                          "page_size": kwargs.get("page_size", 25), "total_pages": 0},
+    )
+    monkeypatch.setattr(strategy_signals_api, "clear_signals", lambda: None)

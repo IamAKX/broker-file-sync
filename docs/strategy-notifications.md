@@ -366,31 +366,54 @@ with no "1 Signal —" framing.
 
 ## 🗂 Live Alerts Screen
 
-A read-only log (sidebar → **Live Alerts**) of every pending/open signal and
-resolved alert. **Double-click any row** to open a full, structured detail
-popup for that signal — every field (Date/Time, Sector, Entry Price, High/Low,
-% Move, Score, Risk:Reward if configured) plus every metric with its role and
-achievement status, scrollable if it's long. A single click just selects the
-row; it takes a double-click to avoid opening a popup on every accidental
-click while scanning the table.
+A log (sidebar → **Live Alerts**) of strategy signals. **Double-click any
+row** to open a full, structured detail popup for that signal — every field
+(Date/Time, Sector, Entry Price, High/Low, % Move, Score, Risk:Reward if
+configured) plus every metric with its role and achievement status,
+scrollable if it's long. A single click just selects the row; it takes a
+double-click to avoid opening a popup on every accidental click while
+scanning the table.
 
-- **Recency filter**: Last 5/10/15/30 minutes, Last 1/2/3 hours, Since Market
-  Open, or All.
-- **Status column**: `Pending`, `Open`, `Targets Achieved`, or `Stopped Out` —
-  color-coded (orange/blue/green/red) so outcomes are scannable at a glance.
+Two parts, sourced differently:
+
+- **A small "Pending" strip** at the top — signals still inside their
+  debounce window, no alert fired yet. Local to this device only, live,
+  unfiltered (it's watching what's happening right now, not something to
+  search through).
+- **The main table** — every Open/Targets-Achieved/Stopped-Out signal,
+  **backend-driven and filterable**: every filter/page change queries your
+  account's durable, per-tenant signal history (not just the last few
+  hundred kept locally), so it isn't capped and follows your account across
+  devices/reinstalls.
+
+**Filters** (Strategy, Direction, Stock, Sector, Status, and an optional
+Date/Time range) all combine with **AND** — e.g. Strategy = "Breakout" +
+Direction = BUY + a specific date/time window returns only signals matching
+all three. **Apply Filters** re-queries with everything currently set;
+**Clear Filters** resets every field back to "All"/off. The Date/Time range
+is off by default (check **Date/Time range** to enable the From/To pickers).
+
+- **Status column**: `Open`, `Targets Achieved`, or `Stopped Out` (`Pending`
+  only ever appears in the strip above, never this table, since a pending
+  signal has no alert to be a durable record of yet) — color-coded so
+  outcomes are scannable at a glance.
 - **Details column**: every metric's name, current/frozen value, and (for
   targets) whether it's been achieved yet. Only this column stretches to fill
   extra space; every other column has a fixed, content-sized width and the
   table scrolls horizontally rather than squeezing everything to fit — hover
   any cell for its full text if it's still truncated.
-- **High** and **Low**: the running extremes reached since entry (separate
-  columns, not a combined string).
+- **High** and **Low**: the running extremes as of the last synced update
+  (see "Where the Data Lives" below for exactly when that is) — separate
+  columns, not a combined string.
 - **% Move**: the percentage move from entry to the relevant extreme (High for
   a BUY, Low for a SELL).
-- **Clear History**: wipes all open signals and resolved history (asks for
-  confirmation first — this cannot be undone).
-- **Refresh**: manually re-reads the underlying data; the screen also refreshes
-  automatically whenever you navigate to it.
+- **Page size**: 25, 50, or 100 rows per page, with Prev/Next navigation and a
+  "Page X of Y (N total)" count.
+- **Clear History**: wipes local pending state **and** your entire synced
+  history on the backend (asks for confirmation first — this cannot be
+  undone).
+- **Refresh**: manually re-reads both the pending strip and the current page;
+  the screen also refreshes automatically whenever you navigate to it.
 
 ---
 
@@ -400,9 +423,22 @@ click while scanning the table.
   through the same generic per-user settings mechanism as other app
   preferences — it survives reinstalls and syncs across devices logged into the
   same account.
-- **Open signals and alert history** are stored **locally only**, per logged-in
-  user on this machine — not synced to the backend or across devices. History is
-  capped at 500 entries (oldest dropped first).
+- **Pending signals** (still inside the debounce window) are **local-only**,
+  per logged-in user on this machine — never synced to the backend, since no
+  alert has fired for them yet (see the Live Alerts screen's "Pending" strip
+  above).
+- **Open/resolved signals** are synced to broker-sync-api's durable,
+  tenant-scoped signal store the moment a real notification fires — entry,
+  each Target achieved, and the final Stop Loss/Trailing Exit stop-out (see
+  `services/strategy_alerts/backend_sync.py`). This is deliberately **not**
+  every tick: a signal's running High/Low only advances in the backend when
+  one of those events actually fires next, same as everywhere else in this
+  feature that avoids a network round trip per poll cycle. A local copy of
+  the same open/resolved data still exists on this device too (capped at 500
+  entries, oldest dropped first) — the backend copy is what the Live Alerts
+  screen's filterable table above actually reads from.
+- A sync failure (offline, expired session) is logged and swallowed — it never
+  blocks or delays the System/Email/Slack notification that triggered it.
 - Deleting a strategy removes its notification config and any open signals being
   tracked under it; already-resolved history for that strategy is left alone (it's
   a record of what already happened, not a live subscription).

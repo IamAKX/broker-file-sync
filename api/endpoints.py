@@ -31,6 +31,8 @@ NOTIFICATIONS_EMAIL_TEST = "/notifications/email/test"
 STRATEGIES = "/strategies"
 STRATEGIES_IMPORT = "/strategies/import"
 
+STRATEGY_SIGNALS = "/strategy-signals"
+
 FORMULA_VARIABLES = "/formula-variables"
 
 SETTINGS = "/settings"

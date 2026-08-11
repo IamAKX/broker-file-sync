@@ -169,3 +169,22 @@ def test_events_flush_state_to_disk(lmv):
 
     alerts_state_store.reset_for_user_switch()  # drop in-memory cache, force reload from disk
     assert alerts_state_store.get_open_signals()  # the "open" entry signal survived a flush
+
+
+def test_entry_event_dispatches_backend_sync(lmv, monkeypatch):
+    """Each real event this tick must be pushed to the durable backend store
+    (services/strategy_alerts/backend_sync.py) — independent of, and in
+    addition to, the notifier delivery covered by the tests above."""
+    from services.strategy_alerts import backend_sync
+
+    calls = []
+    monkeypatch.setattr(backend_sync, "sync_event", lambda event: calls.append(event))
+
+    alerts_config_store.save_config("strat-1", _config())
+    lmv._controller = _FakeController()
+
+    lmv._run_strategy_alert_checks([STRATEGY], [_row(signal=1)], {}, {})   # tick 1: pending
+    lmv._run_strategy_alert_checks([STRATEGY], [_row(signal=1)], {}, {})   # tick 2: entry fires
+
+    assert len(calls) == 1
+    assert calls[0].kind == "entry"

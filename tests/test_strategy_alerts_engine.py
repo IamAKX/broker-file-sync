@@ -341,6 +341,87 @@ def test_cooldown_clears_once_condition_goes_false_and_rearms_on_next_true():
     assert next(iter(signals.values()))["state"] == "pending"
 
 
+# ── Backend-sync snapshot (event.payload["_signal"]) ────────────────────────
+# See services/strategy_alerts/backend_sync.py: every entry/target/stop_out
+# event carries a full point-in-time copy of the signal under "_signal", used
+# to push a durable backend record. These tests are about engine.py's own
+# contract for that snapshot, not the actual network push.
+
+def test_entry_event_has_stable_id_and_full_signal_snapshot():
+    configs = {"strat-1": _make_config(debounce_minutes=2, stop_loss=95, target=110)}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=101)], now=T0 + timedelta(minutes=3)
+    )
+
+    event = events[0]
+    signal = event.payload["_signal"]
+    assert signal["id"]   # a real, non-empty id was assigned
+    assert signal["state"] == "open"
+    assert signal["symbol"] == "INFY"
+    assert signal["entry_price"] == 101
+
+
+def test_signal_id_stays_the_same_across_entry_and_resolve():
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=95, target=110)}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    entry_events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1)
+    )
+    entry_id = entry_events[0].payload["_signal"]["id"]
+
+    stop_out_events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=94, low=94)], now=T0 + timedelta(minutes=2),
+    )
+    assert stop_out_events[0].payload["_signal"]["id"] == entry_id
+
+
+def test_stop_out_event_snapshot_includes_resolution_and_resolved_at():
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=95, target=110)}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1))
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=94, low=94)], now=T0 + timedelta(minutes=2),
+    )
+
+    signal = events[0].payload["_signal"]
+    assert signal["resolution"] == "stopped_out"
+    assert signal["resolved_at"]
+
+
+def test_last_of_multiple_targets_snapshot_reflects_final_resolved_state_not_stale():
+    # Regression guard: several targets achieving on the SAME tick must each
+    # get their OWN correct snapshot — a shallow dict(signal) would let a
+    # later target's "achieved" flip leak into an earlier target's already-
+    # captured snapshot, since both share the same nested "metrics" dict.
+    cfg = new_notification_config()
+    cfg["enabled"] = True
+    cfg["direction"] = "BUY"
+    cfg["debounce_minutes"] = 0
+    cfg["trigger_condition"] = _gt_condition("Signal", 0)
+    cfg["metrics"] = [
+        new_metric("Target 1", "target", [_num(110)]),
+        new_metric("Target 2", "target", [_num(120)]),
+    ]
+    configs = {"strat-1": cfg}
+
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1))
+
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=125, high=125)], now=T0 + timedelta(minutes=2),
+    )
+    assert len(events) == 2
+
+    # Both events resolved the SAME tick (all targets hit) — both snapshots
+    # must show the fully-resolved state, not just the one built later.
+    for event in events:
+        signal = event.payload["_signal"]
+        assert signal["resolution"] == "all_targets_achieved"
+        achieved = {m["name"] for m in signal["metrics"].values() if m.get("achieved")}
+        assert achieved == {"Target 1", "Target 2"}
+
+
 def test_cooldown_is_per_symbol_not_per_strategy():
     configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=95, target=110)}
     evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100, symbol="INFY")], now=T0)

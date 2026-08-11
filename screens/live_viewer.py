@@ -1643,6 +1643,16 @@ class LiveViewerWindow(QWidget):
             return
 
         alerts_state_store.flush()
+
+        # Durable, tenant-scoped backend copy of each transition (entry,
+        # target achieved, stop-out) — see services/strategy_alerts/
+        # backend_sync.py. Dispatched to a background thread per event, same
+        # as the notification channels below; never blocks this loop and a
+        # sync failure never stops the tray/Email/Slack delivery that follows.
+        from services.strategy_alerts import backend_sync
+        for event in events:
+            backend_sync.sync_event(event)
+
         notifier = getattr(self._controller, "_notifier", None)
         if notifier is None:
             return
