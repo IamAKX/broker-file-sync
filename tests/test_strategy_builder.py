@@ -158,6 +158,32 @@ def test_combined_headers_and_values_needs_day_history_for_days_columns(screen, 
     assert ok, msg
 
 
+def test_combined_headers_and_values_exclude_idx_drops_that_column(qapp):
+    # exclude_idx is how _add_column/_edit_column keep a column's own
+    # formula editor from offering itself as a field (self-reference would
+    # be circular) while still offering every OTHER strategy column.
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyEditor
+
+    s = new_strategy("S")
+    s["columns"] = [
+        {"name": "A", "formula": [{"type": "num", "value": "1"}], "fmt_rules": []},
+        {"name": "B", "formula": [{"type": "num", "value": "2"}], "fmt_rules": []},
+    ]
+    editor = StrategyEditor(s, [], None)
+
+    headers, values = editor._combined_headers_and_values(exclude_idx=0)
+    assert "A" not in headers
+    assert "B" in headers
+    assert "A" not in values
+    assert values["B"] == 2.0
+
+    # No exclusion (the _add_column case — a brand new column isn't in the
+    # list yet, so nothing needs to be dropped) offers both.
+    headers, values = editor._combined_headers_and_values()
+    assert "A" in headers and "B" in headers
+
+
 def test_open_editor_starts_background_fetch_only_for_days_columns(screen, monkeypatch):
     # The fix (part 1): opening a strategy that uses a _DAYS function kicks
     # off a proactive day_history fetch — scoped to just this strategy, not
@@ -1056,6 +1082,140 @@ def test_row_filter_editor_disables_this_and_passes_column_values(qapp, monkeypa
     assert captured.get("extra_row_values", {}).get("Out") == 42.0
 
 
+# ── A column's own formula offering sibling strategy columns as fields ──────
+# Bug: unlike the Row Filter/Trigger Condition editors above, a NEW column's
+# own Value-formula editor never offered this strategy's OTHER columns as
+# fields at all (ColumnEditorDialog hardcoded strategy_col_headers=[] and was
+# never given the sibling names any other way) — AVG_DAYS([SiblingCol], 20)
+# was unbuildable via the picker even though the engine (collect_day_requests
+# in services/strategy_engine.py) fully supports referencing another of the
+# same strategy's columns.
+
+def test_add_column_offers_existing_strategy_columns_as_fields(qapp, monkeypatch):
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyEditor
+    import screens.strategy_builder as sb
+
+    s = new_strategy("S")
+    s["columns"] = [{"name": "Max TR", "formula": [{"type": "col", "value": "High"}],
+                     "fmt_rules": []}]
+    editor = StrategyEditor(s, ["High", "Low"], None)
+    editor.update_lmv_data({"High": "100"}, [{"High": "100"}])
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, col_def, lmv_headers, theme=None, **kw):
+            captured["lmv_headers"] = lmv_headers
+            captured["extra_row_values"] = kw.get("extra_row_values")
+
+        def exec(self):
+            return 0   # rejected — we only care about construction
+
+    monkeypatch.setattr(sb, "ColumnEditorDialog", _FakeDlg)
+    editor._add_column()
+
+    assert "Max TR" in captured["lmv_headers"]
+    assert captured["extra_row_values"]["Max TR"] == 100.0
+
+
+def test_edit_column_excludes_itself_but_offers_other_columns(qapp, monkeypatch):
+    from services.strategy_store import new_strategy
+    from screens.strategy_builder import StrategyEditor
+    import screens.strategy_builder as sb
+
+    s = new_strategy("S")
+    s["columns"] = [
+        {"name": "Max TR", "formula": [{"type": "col", "value": "High"}], "fmt_rules": []},
+        {"name": "Avg TR", "formula": [{"type": "col", "value": "Low"}], "fmt_rules": []},
+    ]
+    editor = StrategyEditor(s, ["High", "Low"], None)
+    editor.update_lmv_data({"High": "100", "Low": "50"}, [{"High": "100", "Low": "50"}])
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, col_def, lmv_headers, theme=None, **kw):
+            captured["lmv_headers"] = lmv_headers
+            captured["extra_row_values"] = kw.get("extra_row_values")
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(sb, "ColumnEditorDialog", _FakeDlg)
+    editor._edit_column(1)   # editing "Avg TR"
+
+    assert "Avg TR" not in captured["lmv_headers"]      # can't reference itself
+    assert "Max TR" in captured["lmv_headers"]            # sibling still offered
+    assert "Max TR" in captured["extra_row_values"]
+    assert "Avg TR" not in captured["extra_row_values"]
+
+
+def test_column_formula_editor_offers_sibling_columns_and_values(qapp, monkeypatch):
+    from services.strategy_store import new_column
+    from screens.strategy_builder import ColumnEditorDialog
+    from screens import formula_editor
+
+    col = new_column("NewCol")
+    dlg = ColumnEditorDialog(
+        col, ["High", "Low", "Max TR"], None,
+        lmv_first_row={"High": "100", "Low": "50"},
+        all_lmv_data=[{"High": "100", "Low": "50"}],
+        extra_row_values={"Max TR": 50.0},
+    )
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, *a, **kw):
+            captured.update(kw)
+
+        def exec(self):
+            return 0
+
+        def get_tokens(self):
+            return []
+
+    monkeypatch.setattr(formula_editor, "ExpressionEditorDialog", _FakeDlg)
+    dlg._open_formula_editor()
+
+    assert "Max TR" in captured.get("lmv_headers", [])
+    assert captured.get("extra_row_values", {}).get("Max TR") == 50.0
+
+
+def test_fmt_rule_condition_editor_offers_sibling_columns_and_values(qapp, monkeypatch):
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+    from screens import formula_editor
+
+    col = new_column("NewCol")
+    col["fmt_rules"].append(new_fmt_rule())
+    dlg = ColumnEditorDialog(
+        col, ["High", "Max TR"], None,
+        lmv_first_row={"High": "100"}, all_lmv_data=[{"High": "100"}],
+        extra_row_values={"Max TR": 50.0},
+    )
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, *a, **kw):
+            captured.update(kw)
+
+        def exec(self):
+            return 0
+
+        def get_tokens(self):
+            return []
+
+    monkeypatch.setattr(formula_editor, "ExpressionEditorDialog", _FakeDlg)
+    from PySide6.QtWidgets import QLabel
+    dlg._open_condition_editor(0, QLabel())
+
+    assert "Max TR" in captured.get("lmv_headers", [])
+    assert captured.get("extra_row_values", {}).get("Max TR") == 50.0
+
+
 # ── Conditional-format rule: "Apply color to" target column picker ──────────
 
 def test_fmt_rule_has_target_column_combo_with_this_column_default(qapp):
@@ -1246,3 +1406,143 @@ def test_token_chip_brackets_col_arg(qapp):
     chip = TokenChip(tok, theme=None)
     label = chip.findChild(QLabel)
     assert label.text() == "MAX_DAYS([DAY TO], 10)"
+
+
+# ── Save-failure handling: Active toggle, clone, delete, editor save ────────
+# Bug this fixes: none of store.save_strategy/delete_strategy's call sites in
+# StrategyBuilderScreen had any error handling — a network hiccup meant the
+# UI (a toggle switch, a new card, a sidebar entry) silently diverged from
+# what the server actually had, with the failure logged only to error.log,
+# nothing shown to the user. The most user-visible instance: toggling a
+# strategy Active looked like it worked (the switch flips regardless), but
+# if the save failed, the server still had it Inactive — and Live Master
+# View's Strategies picker reads from the server, so the strategy silently
+# never appeared there. See _on_toggled's own comment for the full trace.
+
+def test_on_toggled_reverts_and_shows_error_on_save_failure(screen, monkeypatch):
+    from api import strategies_api
+    from api.exceptions import NetworkError
+    import screens.strategy_builder as sb
+
+    strat = sb.store.new_strategy("Toggle Me")
+    strat["active"] = False
+    screen._strategies = [strat]
+
+    monkeypatch.setattr(
+        strategies_api, "upsert_strategy",
+        lambda *a, **k: (_ for _ in ()).throw(NetworkError("unreachable")),
+    )
+    popup = []
+    monkeypatch.setattr(sb, "show_api_error", lambda theme, parent, exc: popup.append(exc))
+
+    screen._on_toggled(strat["id"], True)
+
+    # The switch visually flipped (ToggleSwitch's own state, not under test
+    # here) but the persist failed — the in-memory model must revert so the
+    # NEXT rebuild (_refresh_list, called by the failure path) shows the
+    # truth: still Inactive, matching what the server actually has.
+    assert screen._strategies[0]["active"] is False
+    assert len(popup) == 1
+
+
+def test_on_toggled_keeps_new_value_on_successful_save(screen, monkeypatch):
+    import screens.strategy_builder as sb
+
+    strat = sb.store.new_strategy("Toggle Me")
+    strat["active"] = False
+    screen._strategies = [strat]
+
+    popup = []
+    monkeypatch.setattr(sb, "show_api_error", lambda *a: popup.append(1))
+
+    screen._on_toggled(strat["id"], True)
+
+    assert screen._strategies[0]["active"] is True
+    assert popup == []
+
+
+def test_on_strategy_saved_does_not_apply_update_on_failure(screen, monkeypatch):
+    from api import strategies_api
+    from api.exceptions import ApiError
+    import screens.strategy_builder as sb
+
+    strat = sb.store.new_strategy("Original")
+    screen._strategies = [strat]
+
+    monkeypatch.setattr(
+        strategies_api, "upsert_strategy",
+        lambda *a, **k: (_ for _ in ()).throw(ApiError("boom", "unknown_error", 500)),
+    )
+    popup = []
+    monkeypatch.setattr(sb, "show_api_error", lambda theme, parent, exc: popup.append(exc))
+
+    updated = dict(strat, name="Edited Name")
+    screen._on_strategy_saved(updated)
+
+    # The sidebar's own copy must keep the last-persisted name — the edit
+    # never reached the server, so applying it locally would just make the
+    # card lie about what's actually saved.
+    assert screen._strategies[0]["name"] == "Original"
+    assert len(popup) == 1
+
+
+def test_on_strategy_saved_applies_update_on_success(screen, monkeypatch):
+    import screens.strategy_builder as sb
+
+    strat = sb.store.new_strategy("Original")
+    screen._strategies = [strat]
+
+    updated = dict(strat, name="Edited Name")
+    screen._on_strategy_saved(updated)
+
+    assert screen._strategies[0]["name"] == "Edited Name"
+
+
+def test_clone_strategy_removes_local_copy_on_failure(screen, monkeypatch):
+    from api import strategies_api
+    from api.exceptions import NetworkError
+    import screens.strategy_builder as sb
+
+    original = sb.store.new_strategy("Original")
+    screen._strategies = [original]
+
+    monkeypatch.setattr(
+        strategies_api, "upsert_strategy",
+        lambda *a, **k: (_ for _ in ()).throw(NetworkError("unreachable")),
+    )
+    popup = []
+    monkeypatch.setattr(sb, "show_api_error", lambda theme, parent, exc: popup.append(exc))
+
+    screen._clone_strategy(original)
+
+    # A clone that never reached the server must not linger in this
+    # window's own list — it would just vanish (confusingly) on next reload.
+    assert len(screen._strategies) == 1
+    assert screen._strategies[0] is original
+    assert len(popup) == 1
+
+
+def test_delete_strategy_restores_local_copy_on_failure(screen, monkeypatch):
+    from api import strategies_api
+    from api.exceptions import NetworkError
+    from PySide6.QtWidgets import QMessageBox
+    import screens.strategy_builder as sb
+
+    strat = sb.store.new_strategy("Keep Me")
+    screen._strategies = [strat]
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: QMessageBox.StandardButton.Yes)
+
+    monkeypatch.setattr(
+        strategies_api, "delete_strategy",
+        lambda *a, **k: (_ for _ in ()).throw(NetworkError("unreachable")),
+    )
+    popup = []
+    monkeypatch.setattr(sb, "show_api_error", lambda theme, parent, exc: popup.append(exc))
+
+    screen._delete_strategy(strat["id"])
+
+    # The server never actually deleted it — dropping it from this window's
+    # own list would just make it reappear (confusingly) on next reload.
+    assert len(screen._strategies) == 1
+    assert screen._strategies[0]["id"] == strat["id"]
+    assert len(popup) == 1

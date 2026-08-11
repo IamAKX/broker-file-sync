@@ -19,6 +19,8 @@ from PySide6.QtCore import Qt, Signal, QByteArray, QSize, QPointF, QObject, QThr
 from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QPainter, QFontMetrics, QAction
 from PySide6.QtSvg import QSvgRenderer
 
+from api.exceptions import ApiError, NetworkError
+from components.error_popup import show_api_error
 from services import strategy_store as store
 from services.strategy_alerts import config_store as alerts_config_store
 from services.strategy_alerts import models as alerts_models
@@ -627,13 +629,29 @@ class _AggColDialog(QDialog):
 
 class ColumnEditorDialog(QDialog):
     def __init__(self, col_def: dict, lmv_headers: list, theme=None,
-                 lmv_first_row: dict = None, all_lmv_data: list = None, parent=None):
+                 lmv_first_row: dict = None, all_lmv_data: list = None,
+                 extra_row_values: dict = None, parent=None):
+        """
+        lmv_headers: the full Fields list to offer — expected to already
+        include this strategy's OTHER columns (see StrategyEditor.
+        _combined_headers_and_values), same as the Row Filter/Trigger
+        Condition editors, so a column's own Value formula (and its
+        fmt-rule conditions) can reference a sibling column, e.g.
+        AVG_DAYS([MyOtherColumn], 20) — see docs/strategy-builder.md's
+        "Historic (N days) Aggregates" section.
+
+        extra_row_values: {sibling_column_name: computed_value} for the
+        compile-test row, forwarded to every ExpressionEditorDialog opened
+        from here so Compile & Test can actually resolve those sibling
+        columns instead of reporting them as empty/unknown.
+        """
         super().__init__(parent)
         self._col           = copy.deepcopy(col_def)
         self._lmv           = lmv_headers
         self._theme         = theme
         self._lmv_first_row = lmv_first_row or {}
         self._all_lmv_data  = all_lmv_data or []
+        self._extra_row_values = dict(extra_row_values or {})
         self.setWindowTitle("Edit Column")
         self.resize(720, 640)
         _apply_dialog_bg(self, theme)
@@ -755,6 +773,7 @@ class ColumnEditorDialog(QDialog):
             all_lmv_data=self._all_lmv_data,
             theme=self._theme,
             mode="value",
+            extra_row_values=self._extra_row_values,
             real_lmv_headers=list(self._lmv_first_row.keys()),
             parent=self,
         )
@@ -933,6 +952,7 @@ class ColumnEditorDialog(QDialog):
             theme=self._theme,
             mode="condition",
             self_value=self_value,
+            extra_row_values=self._extra_row_values,
             real_lmv_headers=list(self._lmv_first_row.keys()),
             parent=self,
         )
@@ -1822,14 +1842,23 @@ class StrategyEditor(QWidget):
         extra = [c for c in all_field_codes() if c not in self._lmv_headers]
         return self._lmv_headers + extra
 
-    def _combined_headers_and_values(self) -> tuple:
+    def _combined_headers_and_values(self, exclude_idx: int | None = None) -> tuple:
         """This strategy's own column names + the loaded LMV's columns +
         every Formula Builder field (see _field_names), plus each own-
         column's computed value on the compile-test row (self._lmv_first_row,
         picked by _pick_compile_test_row — not necessarily literal row 0) —
         for any formula/condition editor that should be able to reference
-        any of these (the row filter editor, and every Notifications-section
-        formula/condition editor).
+        any of these (the row filter editor, every Notifications-section
+        formula/condition editor, and — see _add_column/_edit_column — a
+        column's own Value formula and fmt-rule conditions).
+
+        ``exclude_idx``, when given, drops that one column (by its index in
+        self._strategy["columns"]) from what's offered — used when editing
+        an existing column's own formula, so it can't reference itself (a
+        self-reference would be circular; evaluate() has no special-casing
+        for "my own formula" the way THIS does for conditions). Omitted
+        (the default) when adding a brand new column, since it isn't in
+        self._strategy["columns"] yet and so needs no exclusion.
 
         Passes self._day_history through so a column built on MAX_DAYS/
         AVG_DAYS/VALUE_DAYS_AGO/etc. gets its real computed value here too,
@@ -1840,7 +1869,10 @@ class StrategyEditor(QWidget):
         against. See update_day_history.
         """
         from services.strategy_engine import evaluate
-        strat_cols = self._strategy.get("columns", [])
+        strat_cols = [
+            c for i, c in enumerate(self._strategy.get("columns", []))
+            if i != exclude_idx
+        ]
         all_headers = self._field_names() + [c["name"] for c in strat_cols]
         extra_values = {}
         for col in strat_cols:
@@ -2054,9 +2086,14 @@ class StrategyEditor(QWidget):
 
     def _add_column(self):
         col = store.new_column(f"Col{len(self._strategy['columns']) + 1}")
-        dlg = ColumnEditorDialog(col, self._field_names(), self._theme,
+        # Not excluding anything here (unlike _edit_column) — the new
+        # column isn't in self._strategy["columns"] yet, so every existing
+        # column is a valid sibling to reference.
+        headers, extra_values = self._combined_headers_and_values()
+        dlg = ColumnEditorDialog(col, headers, self._theme,
                                  lmv_first_row=self._lmv_first_row,
-                                 all_lmv_data=self._all_lmv_data, parent=self)
+                                 all_lmv_data=self._all_lmv_data,
+                                 extra_row_values=extra_values, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["columns"].append(dlg.result_col())
             self._refresh_columns()
@@ -2096,9 +2133,12 @@ class StrategyEditor(QWidget):
 
     def _edit_column(self, idx: int):
         col = self._strategy["columns"][idx]
-        dlg = ColumnEditorDialog(col, self._field_names(), self._theme,
+        # exclude_idx=idx — this column can't reference its own formula.
+        headers, extra_values = self._combined_headers_and_values(exclude_idx=idx)
+        dlg = ColumnEditorDialog(col, headers, self._theme,
                                  lmv_first_row=self._lmv_first_row,
-                                 all_lmv_data=self._all_lmv_data, parent=self)
+                                 all_lmv_data=self._all_lmv_data,
+                                 extra_row_values=extra_values, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["columns"][idx] = dlg.result_col()
             self._refresh_columns()
@@ -2521,7 +2561,17 @@ class StrategyBuilderScreen(QWidget):
         cloned["id"]   = str(uuid.uuid4())
         cloned["name"] = "Copy of " + original["name"]
         self._strategies.append(cloned)
-        store.save_strategy(cloned)
+        try:
+            store.save_strategy(cloned)
+        except (ApiError, NetworkError) as exc:
+            # Undo the local append — a clone that only exists in this
+            # window's memory (never reached the server) would silently
+            # vanish on the next reload anyway; better to be honest about it
+            # not having worked at all.
+            self._strategies.remove(cloned)
+            self._refresh_list()
+            show_api_error(self._theme, self, exc)
+            return
         self._refresh_list()
         self._open_editor(cloned)
 
@@ -2535,8 +2585,19 @@ class StrategyBuilderScreen(QWidget):
         msg.setDefaultButton(QMessageBox.StandardButton.No)
         if msg.exec() != QMessageBox.StandardButton.Yes:
             return
+        removed = next((s for s in self._strategies if s["id"] == strategy_id), None)
         self._strategies = [s for s in self._strategies if s["id"] != strategy_id]
-        store.delete_strategy(strategy_id)
+        try:
+            store.delete_strategy(strategy_id)
+        except (ApiError, NetworkError) as exc:
+            # Put it back — the server never actually deleted it, so
+            # dropping it from this window's own list would just make it
+            # reappear (confusingly) on the next reload anyway.
+            if removed is not None:
+                self._strategies.append(removed)
+            self._refresh_list()
+            show_api_error(self._theme, self, exc)
+            return
         alerts_config_store.delete_config(strategy_id)
         alerts_state_store.clear_strategy(strategy_id)
         self._refresh_list()
@@ -2545,18 +2606,43 @@ class StrategyBuilderScreen(QWidget):
         self._active_editor = None
 
     def _on_strategy_saved(self, updated: dict):
+        try:
+            store.save_strategy(updated)
+        except (ApiError, NetworkError) as exc:
+            # Deliberately NOT applied to self._strategies — the server
+            # never got it, so the sidebar card must keep showing whatever
+            # it last successfully persisted, not the edit that just failed
+            # to save. The editor panel itself is untouched, so the user's
+            # typed changes are still there to retry Save with.
+            show_api_error(self._theme, self, exc)
+            return
         for i, s in enumerate(self._strategies):
             if s["id"] == updated["id"]:
                 self._strategies[i] = updated
                 break
-        store.save_strategy(updated)
         self._refresh_list()
 
     def _on_toggled(self, strategy_id: str, active: bool):
+        # Bug this fixes: toggling Active/Inactive had no error handling at
+        # all, so a network hiccup meant the switch visually flipped (the
+        # ToggleSwitch widget updates itself before this handler even runs)
+        # while the actual persist silently failed — logged only to
+        # error.log, nothing shown to the user. Strategy Builder kept
+        # showing it as Active locally, but the server (and so every OTHER
+        # reader of it — Live Master View's Strategies picker in particular)
+        # still had the old value, until whenever this strategy next
+        # happened to save successfully. That's the "toggled it Active but
+        # it's not showing up in LMV" report this traces to.
         for s in self._strategies:
             if s["id"] == strategy_id:
+                previous = s.get("active", True)
                 s["active"] = active
-                store.save_strategy(s)
+                try:
+                    store.save_strategy(s)
+                except (ApiError, NetworkError) as exc:
+                    s["active"] = previous
+                    self._refresh_list()
+                    show_api_error(self._theme, self, exc)
                 break
 
     # ── LMV header injection ──────────────────────────────────────────────
