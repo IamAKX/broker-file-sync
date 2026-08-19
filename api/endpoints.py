@@ -38,3 +38,13 @@ FORMULA_VARIABLES = "/formula-variables"
 SETTINGS = "/settings"
 
 THEME = "/auth/me/theme"
+
+INCEPTION_AVAILABILITY = "/inception/availability"
+INCEPTION_INSTRUMENTS = "/inception/instruments"
+INCEPTION_COLUMNS = "/inception/columns"
+INCEPTION_SNAPSHOT = "/inception/snapshot"
+INCEPTION_HMV = "/inception/hmv"
+INCEPTION_RECOMPUTE = "/inception/recompute"
+INCEPTION_STRATEGIES = "/inception/strategies"
+INCEPTION_FORMULA_VARIABLES = "/inception/formula-variables"
+INCEPTION_COMPILE_CHECK = "/inception/compile-check"

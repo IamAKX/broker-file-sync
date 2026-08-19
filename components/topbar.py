@@ -96,6 +96,11 @@ class TopBar(QWidget):
                 ("---",          None),
                 ("Logout",       lambda: self.logout_requested.emit()),
             ]),
+            ("Inception", [
+                ("View by Date",      lambda: self.navigate.emit("inception_view_by_date")),
+                ("Strategy Builder",  lambda: self.navigate.emit("inception_strategy_builder")),
+                ("HMV",               lambda: self.navigate.emit("inception_hmv")),
+            ]),
             ("Help", [
                 ("About",              lambda: self._show_about()),
                 ("Terms & Conditions", lambda: None),

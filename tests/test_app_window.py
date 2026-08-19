@@ -20,7 +20,8 @@ def test_navigate_does_not_raise(controller):
     from app_window import MainWindow
     w = MainWindow(controller)
     for name in ["dashboard", "data_import", "config_editor", "notifications", "profile",
-                 "formula_builder", "formula_stats"]:
+                 "formula_builder", "formula_stats",
+                 "inception_view_by_date", "inception_strategy_builder", "inception_hmv"]:
         w.navigate(name)
 
 def test_close_event_hides_instead_of_quitting_by_default(controller):

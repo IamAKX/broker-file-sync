@@ -65,6 +65,9 @@ class MainWindow(QMainWindow):
         from screens.lmv_upload import LmvUploadScreen
         from screens.jobs import JobsScreen
         from screens.formula_stats import FormulaStatsScreen
+        from screens.inception_view_by_date import InceptionViewByDateScreen
+        from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
+        from screens.inception_hmv import InceptionHmvScreen
 
         dashboard        = DashboardScreen(self._controller)
         data_import      = DataImportScreen(self._controller)
@@ -118,6 +121,9 @@ class MainWindow(QMainWindow):
             ("lmv_upload",       LmvUploadScreen(self._controller)),
             ("jobs",             JobsScreen(self._controller)),
             ("formula_stats",    FormulaStatsScreen(self._controller)),
+            ("inception_view_by_date",     InceptionViewByDateScreen(self._controller)),
+            ("inception_strategy_builder", InceptionStrategyBuilderScreen(self._controller)),
+            ("inception_hmv",              InceptionHmvScreen(self._controller)),
         ]
         for name, widget in screens:
             self._screens[name] = widget
@@ -436,3 +442,7 @@ class MainWindow(QMainWindow):
         formula_stats = self._screens.get("formula_stats")
         if formula_stats is not None:
             formula_stats.refresh_theme()
+        for key in ("inception_view_by_date", "inception_strategy_builder", "inception_hmv"):
+            screen = self._screens.get(key)
+            if screen is not None:
+                screen.refresh_theme()

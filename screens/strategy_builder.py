@@ -321,12 +321,23 @@ class FormulaBuilder(QWidget):
     changed = Signal()
 
     def __init__(self, tokens: list, lmv_headers: list,
-                 theme=None, mode="value", parent=None):
+                 theme=None, mode="value", parent=None,
+                 field_label: str = "LMV Columns", show_aggregates: bool = True):
+        """field_label/show_aggregates: added for screens.inception_strategy_builder's
+        reuse of this widget with Inception's own field set — both default to
+        the exact prior behavior, so every existing (LMV) call site is
+        unaffected. show_aggregates=False hides the SUM_ALL/MIN_ALL/MAX_ALL/
+        AVG_ALL row (Inception's server-side evaluator doesn't implement
+        cross-row aggregates — see broker-sync-api's inception_strategy_engine
+        module docstring for why — so offering those buttons there would
+        silently produce None instead of a real value)."""
         super().__init__(parent)
         self._tokens      = list(tokens)
         self._lmv_headers = lmv_headers
         self._theme       = theme
         self._mode        = mode
+        self._field_label = field_label
+        self._show_aggregates = show_aggregates
         self._chips: list[TokenChip] = []
         self._build()
         self._refresh_chips()
@@ -430,24 +441,25 @@ class FormulaBuilder(QWidget):
         self._add_button_row(root, "Functions", FUNCTIONS, "func")
 
         # ── Aggregate functions ───────────────────────────────────────────
-        agg_lbl = QLabel("Aggregate (across all rows):")
-        agg_lbl.setFont(font_scale.font(font_scale.SMALL, False))
-        agg_lbl.setStyleSheet(f"color:{txts};")
-        root.addWidget(agg_lbl)
+        if self._show_aggregates:
+            agg_lbl = QLabel("Aggregate (across all rows):")
+            agg_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+            agg_lbl.setStyleSheet(f"color:{txts};")
+            root.addWidget(agg_lbl)
 
-        agg_inner = QWidget()
-        agg_row   = QHBoxLayout(agg_inner)
-        agg_row.setContentsMargins(0, 0, 0, 0)
-        agg_row.setSpacing(6)
-        for fname in AGG_FUNCS:
-            b = self._chip_button(fname)
-            b.clicked.connect(lambda _, fn=fname: self._add_agg_func(fn))
-            agg_row.addWidget(b)
-        agg_row.addStretch()
-        root.addWidget(agg_inner)
+            agg_inner = QWidget()
+            agg_row   = QHBoxLayout(agg_inner)
+            agg_row.setContentsMargins(0, 0, 0, 0)
+            agg_row.setSpacing(6)
+            for fname in AGG_FUNCS:
+                b = self._chip_button(fname)
+                b.clicked.connect(lambda _, fn=fname: self._add_agg_func(fn))
+                agg_row.addWidget(b)
+            agg_row.addStretch()
+            root.addWidget(agg_inner)
 
-        # ── LMV column chips ──────────────────────────────────────────────
-        col_lbl = QLabel("LMV Columns (click to insert):")
+        # ── Column chips ────────────────────────────────────────────────────
+        col_lbl = QLabel(f"{self._field_label} (click to insert):")
         col_lbl.setFont(font_scale.font(font_scale.SMALL, False))
         col_lbl.setStyleSheet(f"color:{txts};")
         root.addWidget(col_lbl)
