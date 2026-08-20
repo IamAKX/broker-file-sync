@@ -93,7 +93,11 @@ class FormulaCard(QFrame):
         t = self._theme
         bg, bd = _t(t, "button_bg"), _t(t, "border")
         txt, txts, accent = _t(t, "text_primary"), _t(t, "text_secondary"), _t(t, "accent")
-        self.setStyleSheet(f"QFrame{{background:{bg};border:1px solid {bd};border-radius:6px;}}")
+        # objectName-scoped — QLabel IS a QFrame subclass, so a bare
+        # "QFrame{...}" selector here would leak this border onto every
+        # label nested inside this card too.
+        self.setObjectName("formulaCard")
+        self.setStyleSheet(f"QFrame#formulaCard{{background:{bg};border:1px solid {bd};border-radius:6px;}}")
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(12, 8, 12, 8)
@@ -309,7 +313,8 @@ class FormulaBuilderScreen(QWidget):
 
         topbar = QFrame()
         topbar.setFixedHeight(56)
-        topbar.setStyleSheet(f"QFrame{{background:{card};border-bottom:1px solid {bd};}}")
+        topbar.setObjectName("formulaBuilderTopbar")
+        topbar.setStyleSheet(f"QFrame#formulaBuilderTopbar{{background:{card};border-bottom:1px solid {bd};}}")
         self._topbar = topbar
         top_lay = QHBoxLayout(topbar)
         top_lay.setContentsMargins(20, 0, 20, 0)
@@ -339,7 +344,8 @@ class FormulaBuilderScreen(QWidget):
 
         self._left_frame = QFrame()
         self._left_frame.setFixedWidth(360)
-        self._left_frame.setStyleSheet(f"QFrame{{background:{card};border-right:1px solid {bd};}}")
+        self._left_frame.setObjectName("formulaBuilderLeftFrame")
+        self._left_frame.setStyleSheet(f"QFrame#formulaBuilderLeftFrame{{background:{card};border-right:1px solid {bd};}}")
         left_root = QVBoxLayout(self._left_frame)
         left_root.setContentsMargins(12, 12, 12, 12)
         left_root.setSpacing(8)
@@ -362,7 +368,8 @@ class FormulaBuilderScreen(QWidget):
         body.addWidget(self._left_frame)
 
         self._right_frame = QFrame()
-        self._right_frame.setStyleSheet(f"QFrame{{background:{bg};}}")
+        self._right_frame.setObjectName("formulaBuilderRightFrame")
+        self._right_frame.setStyleSheet(f"QFrame#formulaBuilderRightFrame{{background:{bg};}}")
         right_root = QVBoxLayout(self._right_frame)
         right_root.setContentsMargins(0, 0, 0, 0)
         self._placeholder = QLabel("← Select a formula to edit, or add a new one")
@@ -473,9 +480,9 @@ class FormulaBuilderScreen(QWidget):
         t = self._theme
         bd, card, bg = _t(t, "border"), _t(t, "card_bg"), _t(t, "background")
         txts = _t(t, "text_secondary")
-        self._topbar.setStyleSheet(f"QFrame{{background:{card};border-bottom:1px solid {bd};}}")
-        self._left_frame.setStyleSheet(f"QFrame{{background:{card};border-right:1px solid {bd};}}")
-        self._right_frame.setStyleSheet(f"QFrame{{background:{bg};}}")
+        self._topbar.setStyleSheet(f"QFrame#formulaBuilderTopbar{{background:{card};border-bottom:1px solid {bd};}}")
+        self._left_frame.setStyleSheet(f"QFrame#formulaBuilderLeftFrame{{background:{card};border-right:1px solid {bd};}}")
+        self._right_frame.setStyleSheet(f"QFrame#formulaBuilderRightFrame{{background:{bg};}}")
         self._placeholder.setStyleSheet(f"color:{txts};")
         self._add_btn.setStyleSheet(
             f"QPushButton{{background:{_t(t,'accent')};color:{_t(t,'background')};"

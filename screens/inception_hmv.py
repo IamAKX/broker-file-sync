@@ -1,32 +1,71 @@
-"""Inception > HMV (Historic Master View) — the computed metric/column grid,
-shown year-wise or period-wise: pick a period type (Calendar Year / Quarter /
-Half-Year / Financial Year) and a specific period, see one row per instrument
-with that period's raw + Group A/B computed columns (see backend
-app/services/inception_columns.py) as columns — same idea as the live LMV
-grid, but built from the historical dataset's last trading day of the chosen
-period instead of a live tick.
+"""Inception > HMV (Historic Master View) — the computed metric/column grid:
+pick a From/To date range, see one row per locally-synced instrument with
+raw + Group A/B computed columns (see services/inception_columns.py) as of
+the last synced trading day on or before To — same idea as the live LMV
+grid, but built from the locally-synced historical dataset instead of a
+live tick.
+
+The date range isn't just a display window — a column whose formula needs
+more history than [from, to] actually contains comes back blank (e.g. 52WH
+needs ~52 weeks of data; a 6-month range leaves it blank) rather than
+silently reaching outside the range or always showing a value regardless of
+what the user selected. See services/inception_formula_engine.
+required_lookback_start and services/inception_compute_service.
+_apply_range_gate for where that's enforced — this screen just surfaces
+whatever comes back (a blank cell for a gated column, no separate
+"insufficient range" indicator needed since the row itself explains it —
+see the status label after Load).
+
+All of this runs locally now (services.inception_compute_service, backed by
+services.inception_bars_store) — see screens.inception_settings for the
+sync status / Sync Now action this screen depends on having been run at
+least once.
+
+Computing Group A/B across the full ~213-instrument universe can take
+anywhere from a couple seconds to (on a cold cache, long history) upwards
+of a minute — see inception_compute_service's module docstring on why, and
+what it caches to make repeat loads fast. _HmvLoadWorker runs it on a
+background QThread (same pattern as screens.inception_settings._SyncWorker)
+so the UI never freezes, with a QProgressBar driven by inception_compute_
+service.hmv's progress_cb (one tick per instrument) standing in for "is
+this actually still working" during a slow cold load.
 """
 
 import font_scale
-from datetime import date
+from datetime import date, timedelta
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QComboBox, QSpinBox,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QDateEdit,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QProgressBar,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QDate, QThread, Signal
 
-from api import inception_api
-from api.exceptions import ApiError, NetworkError
 from components.column_filter_popup import ColumnFilterPopup
-from components.error_popup import show_api_error
+from screens.inception_view_by_date import _display_symbol
+from services import inception_bars_store, inception_compute_service, inception_strategy_store
+from services.strategy_engine import apply_strategies
 
-_PERIOD_TYPES = [
-    ("Calendar Year", "year"),
-    ("Quarter", "quarter"),
-    ("Half Year", "half_year"),
-    ("Financial Year", "financial_year"),
-]
+
+class _HmvLoadWorker(QThread):
+    progress = Signal(int, int)          # done, total instruments
+    succeeded = Signal(object, list)     # as_of_date (date | None), rows
+    failed = Signal(str)
+
+    def __init__(self, date_from: date, date_to: date, parent=None):
+        super().__init__(parent)
+        self._date_from = date_from
+        self._date_to = date_to
+
+    def run(self):
+        try:
+            as_of_date, rows = inception_compute_service.hmv(
+                self._date_from, self._date_to,
+                progress_cb=lambda done, total: self.progress.emit(done, total),
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.succeeded.emit(as_of_date, rows)
 
 
 class InceptionHmvScreen(QWidget):
@@ -36,6 +75,7 @@ class InceptionHmvScreen(QWidget):
         self._headers: list = []
         self._data: list = []
         self._visible_cols: set = set()
+        self._worker: _HmvLoadWorker | None = None
         self._build()
 
     # ── build ────────────────────────────────────────────────────────────────
@@ -52,23 +92,33 @@ class InceptionHmvScreen(QWidget):
 
         toolbar = QHBoxLayout()
 
-        self._period_type_combo = QComboBox()
-        self._period_type_combo.setFont(font_scale.font(font_scale.SMALL, False))
-        for label, _ in _PERIOD_TYPES:
-            self._period_type_combo.addItem(label)
-        self._period_type_combo.currentIndexChanged.connect(self._on_period_type_changed)
-        toolbar.addWidget(self._period_type_combo)
+        today = date.today()
+        default_from = today - timedelta(days=365)
 
-        this_year = date.today().year
-        self._year_spin = QSpinBox()
-        self._year_spin.setRange(2000, this_year + 1)
-        self._year_spin.setValue(this_year)
-        self._year_spin.setFont(font_scale.font(font_scale.SMALL, False))
-        toolbar.addWidget(self._year_spin)
+        toolbar.addWidget(QLabel("From:"))
+        self._from_date = QDateEdit()
+        self._from_date.setCalendarPopup(True)
+        self._from_date.setDisplayFormat("dd-MMM-yyyy")
+        self._from_date.setDate(QDate(default_from.year, default_from.month, default_from.day))
+        self._from_date.setFont(font_scale.font(font_scale.SMALL, False))
+        toolbar.addWidget(self._from_date)
 
-        self._sub_period_combo = QComboBox()
-        self._sub_period_combo.setFont(font_scale.font(font_scale.SMALL, False))
-        toolbar.addWidget(self._sub_period_combo)
+        toolbar.addWidget(QLabel("To:"))
+        self._to_date = QDateEdit()
+        self._to_date.setCalendarPopup(True)
+        self._to_date.setDisplayFormat("dd-MMM-yyyy")
+        self._to_date.setDate(QDate(today.year, today.month, today.day))
+        self._to_date.setFont(font_scale.font(font_scale.SMALL, False))
+        toolbar.addWidget(self._to_date)
+
+        # QDateEdit's own popup calendar isn't covered by the app-wide
+        # stylesheet's QCalendarWidget rules (theme.py) — those are missing
+        # QLabel/header text colors, so day-of-week headers and nav-bar text
+        # render in Qt's default (black) on a dark background and are
+        # effectively invisible. Reuse the same proven stylesheet the
+        # View by Date calendar and formula_editor's date picker already
+        # use instead of patching theme.py's incomplete rules.
+        self._style_calendar_popups()
 
         self._load_btn = QPushButton("Load")
         self._load_btn.setFixedHeight(30)
@@ -92,6 +142,12 @@ class InceptionHmvScreen(QWidget):
         toolbar.addWidget(self._as_of_lbl)
         layout.addLayout(toolbar)
 
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setFixedHeight(6)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setVisible(False)
+        layout.addWidget(self._progress_bar)
+
         self._table = QTableWidget()
         self._table.setFont(font_scale.font(font_scale.SMALL, False))
         self._table.verticalHeader().setVisible(False)
@@ -112,69 +168,108 @@ class InceptionHmvScreen(QWidget):
         bottom.addStretch()
         layout.addLayout(bottom)
 
-        self._on_period_type_changed(0)
+    def _style_calendar_popups(self):
+        from components.availability_calendar import themed_calendar_stylesheet
+        t = self._controller.theme
+        stylesheet = themed_calendar_stylesheet(t)
+        for date_edit in (self._from_date, self._to_date):
+            cal = date_edit.calendarWidget()
+            if cal is not None:
+                cal.setStyleSheet(stylesheet)
 
-    # ── period selector ──────────────────────────────────────────────────────
+    # ── date range ───────────────────────────────────────────────────────────
 
-    def _on_period_type_changed(self, index: int):
-        _, kind = _PERIOD_TYPES[index]
-        self._sub_period_combo.clear()
-        if kind == "quarter":
-            self._sub_period_combo.addItems(["Q1", "Q2", "Q3", "Q4"])
-            self._sub_period_combo.setVisible(True)
-        elif kind == "half_year":
-            self._sub_period_combo.addItems(["H1", "H2"])
-            self._sub_period_combo.setVisible(True)
-        else:
-            self._sub_period_combo.setVisible(False)
-
-    def _current_period(self) -> tuple[str, str]:
-        _, kind = _PERIOD_TYPES[self._period_type_combo.currentIndex()]
-        year = self._year_spin.value()
-        if kind == "quarter":
-            return kind, f"{year}-{self._sub_period_combo.currentText()}"
-        if kind == "half_year":
-            return kind, f"{year}-{self._sub_period_combo.currentText()}"
-        return kind, str(year)
+    def _current_range(self) -> tuple[date, date]:
+        qf, qt = self._from_date.date(), self._to_date.date()
+        return date(qf.year(), qf.month(), qf.day()), date(qt.year(), qt.month(), qt.day())
 
     # ── load ─────────────────────────────────────────────────────────────────
 
     def _on_load(self):
         t = self._controller.theme
-        period_type, period = self._current_period()
+        date_from, date_to = self._current_range()
+        if date_from > date_to:
+            self._status_lbl.setText("From date must be on or before To date.")
+            self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
+            return
+
+        if inception_bars_store.last_synced_date() is None:
+            self._status_lbl.setText(
+                "No Inception data synced to this device yet — open Inception > "
+                "Data & Settings and click Sync Now."
+            )
+            self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
+            return
+
+        if self._worker is not None and self._worker.isRunning():
+            return
+
         self._load_btn.setEnabled(False)
         self._load_btn.setText("Loading...")
-        try:
-            result = inception_api.get_hmv(period_type, period)
-        except (ApiError, NetworkError) as exc:
-            show_api_error(t, self, exc)
-            return
-        finally:
-            self._load_btn.setEnabled(True)
-            self._load_btn.setText("Load")
+        self._status_lbl.setText("Computing…")
+        self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        self._progress_bar.setRange(0, 0)   # busy/indeterminate until the first progress tick arrives
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
 
-        rows = result.get("rows", [])
-        as_of = result.get("as_of_date")
-        self._as_of_lbl.setText(f"As of {as_of}" if as_of else "No trading day in this period")
+        self._worker = _HmvLoadWorker(date_from, date_to, parent=self)
+        self._worker.progress.connect(self._on_load_progress)
+        self._worker.succeeded.connect(lambda as_of_date, rows: self._on_load_succeeded(date_from, date_to, as_of_date, rows))
+        self._worker.failed.connect(self._on_load_failed)
+        self._worker.start()
+
+    def _on_load_progress(self, done: int, total: int):
+        self._progress_bar.setRange(0, total)
+        self._progress_bar.setValue(done)
+        self._status_lbl.setText(f"Computing… {done}/{total} instruments")
+
+    def _on_load_succeeded(self, date_from: date, date_to: date, as_of_date, rows: list):
+        t = self._controller.theme
+        self._load_btn.setEnabled(True)
+        self._load_btn.setText("Load")
+        self._progress_bar.setVisible(False)
+
+        self._as_of_lbl.setText(f"As of {as_of_date.isoformat()}" if as_of_date else "No synced trading day in this range")
 
         if not rows:
             self._headers, self._data = [], []
             self._table.setRowCount(0)
             self._table.setColumnCount(0)
-            self._status_lbl.setText(f"No data for {period_type} {period}.")
+            self._status_lbl.setText(f"No synced data for {date_from.isoformat()} to {date_to.isoformat()}.")
             self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
             return
 
         metric_keys = sorted({k for r in rows for k in r.get("values", {})})
         self._headers = ["Symbol"] + metric_keys
         self._data = [
-            [r["symbol"]] + [r.get("values", {}).get(k) for k in metric_keys]
+            [_display_symbol(r["symbol"])] + [r.get("values", {}).get(k) for k in metric_keys]
             for r in rows
         ]
+
+        # Active Inception strategies are evaluated entirely here, on the
+        # client — the hmv response above is base (raw + precomputed) values
+        # only. A strategy column referencing a range-gated (blank) field
+        # naturally comes back blank too (evaluate() already treats a None
+        # field that way). load_all() falls back to its local cache on a
+        # network error, so this can't raise.
+        strategies = [s for s in inception_strategy_store.load_all() if s.get("active")]
+        self._headers, self._data = apply_strategies(strategies, self._headers, self._data)
+
         self._visible_cols = set(range(len(self._headers)))
         self._populate_table()
-        self._status_lbl.setText(f"{len(rows)} instruments.")
+        self._status_lbl.setText(
+            f"{len(rows)} instruments. Blank cells mean this range doesn't cover enough "
+            f"history for that column (e.g. 52WH needs ~52 weeks)."
+        )
         self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+
+    def _on_load_failed(self, message: str):
+        t = self._controller.theme
+        self._load_btn.setEnabled(True)
+        self._load_btn.setText("Load")
+        self._progress_bar.setVisible(False)
+        self._status_lbl.setText(f"Load failed: {message}")
+        self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
 
     # ── table ────────────────────────────────────────────────────────────────
 
@@ -224,4 +319,5 @@ class InceptionHmvScreen(QWidget):
         self._as_of_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         if not self._status_lbl.text():
             self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        self._style_calendar_popups()
         self._table.repaint()

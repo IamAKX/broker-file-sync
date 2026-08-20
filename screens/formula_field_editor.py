@@ -251,7 +251,8 @@ class FieldFormulaBuilder(QWidget):
         txt, accent = _t(t, "text_primary"), _t(t, "accent")
 
         frame = QFrame()
-        frame.setStyleSheet(f"QFrame{{background:{bg};border:1px solid {bd};border-radius:8px;}}")
+        frame.setObjectName("fieldEditorCard")
+        frame.setStyleSheet(f"QFrame#fieldEditorCard{{background:{bg};border:1px solid {bd};border-radius:8px;}}")
         body = QVBoxLayout(frame)
         body.setContentsMargins(14, 10, 14, 14)
         body.setSpacing(8)

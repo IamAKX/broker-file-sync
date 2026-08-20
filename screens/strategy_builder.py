@@ -80,7 +80,11 @@ def _apply_dialog_bg(dialog: QDialog, theme):
     dialog.setStyleSheet(
         f"QDialog{{background:{bg};color:{txt};}}"
         f"QWidget{{background:{bg};color:{txt};}}"
-        f"QLabel{{background:transparent;}}"
+        # QLabel IS a QFrame subclass, so without an explicit "border:none"
+        # override here, the QFrame rule right below (a generic "any plain
+        # QFrame in this dialog looks like a card" convenience) leaks its
+        # border onto every label in the dialog too.
+        f"QLabel{{background:transparent;border:none;}}"
         f"QFrame{{background:{_t(theme,'card_bg')};border:1px solid {_t(theme,'border')};border-radius:6px;}}"
         f"QLineEdit{{background:{_t(theme,'input_bg')};color:{txt};"
         f"border:1px solid {_t(theme,'border')};border-radius:4px;padding:4px 8px;}}"
@@ -360,8 +364,9 @@ class FormulaBuilder(QWidget):
         # ── Token area ────────────────────────────────────────────────────
         token_frame = QFrame()
         token_frame.setMinimumHeight(44)
+        token_frame.setObjectName("tokenFrame")
         token_frame.setStyleSheet(
-            f"QFrame{{background:{inp_bg};border:1px solid {bd};border-radius:6px;}}"
+            f"QFrame#tokenFrame{{background:{inp_bg};border:1px solid {bd};border-radius:6px;}}"
         )
         self._token_layout = QHBoxLayout(token_frame)
         self._token_layout.setContentsMargins(8, 4, 8, 4)
@@ -841,8 +846,9 @@ class ColumnEditorDialog(QDialog):
         rules = self._col.get("fmt_rules", [])
         for idx, rule in enumerate(rules):
             rule_frame = QFrame()
+            rule_frame.setObjectName("fmtRuleFrame")
             rule_frame.setStyleSheet(
-                f"QFrame{{background:{bg};border:1px solid {bd};border-radius:6px;}}"
+                f"QFrame#fmtRuleFrame{{background:{bg};border:1px solid {bd};border-radius:6px;}}"
             )
             rlay = QVBoxLayout(rule_frame)
             rlay.setSpacing(6)
@@ -1734,7 +1740,8 @@ class NotificationSection(QWidget):
 
         for idx, m in enumerate(self._config.get("metrics", [])):
             frame = QFrame()
-            frame.setStyleSheet(f"QFrame{{background:{bg};border:1px solid {bd};border-radius:6px;}}")
+            frame.setObjectName("metricFrame")
+            frame.setStyleSheet(f"QFrame#metricFrame{{background:{bg};border:1px solid {bd};border-radius:6px;}}")
             lay = QVBoxLayout(frame)
             lay.setContentsMargins(10, 8, 10, 8)
             lay.setSpacing(6)
@@ -2181,8 +2188,9 @@ class StrategyEditor(QWidget):
 
         for idx, col in enumerate(self._strategy.get("columns", [])):
             row_frame = QFrame()
+            row_frame.setObjectName("columnRowFrame")
             row_frame.setStyleSheet(
-                f"QFrame{{background:{bg};border:1px solid {bd};border-radius:6px;}}"
+                f"QFrame#columnRowFrame{{background:{bg};border:1px solid {bd};border-radius:6px;}}"
             )
             row_lay = QVBoxLayout(row_frame)
             row_lay.setContentsMargins(12, 8, 12, 8)
@@ -2336,8 +2344,9 @@ class StrategyBuilderScreen(QWidget):
         # ── Top bar ───────────────────────────────────────────────────────
         self._topbar = QFrame()
         self._topbar.setFixedHeight(56)
+        self._topbar.setObjectName("strategyBuilderTopbar")
         self._topbar.setStyleSheet(
-            f"QFrame{{background:{card};border-bottom:1px solid {bd};}}"
+            f"QFrame#strategyBuilderTopbar{{background:{card};border-bottom:1px solid {bd};}}"
         )
         top_lay = QHBoxLayout(self._topbar)
         top_lay.setContentsMargins(20, 0, 20, 0)
@@ -2374,8 +2383,9 @@ class StrategyBuilderScreen(QWidget):
         # Left panel
         self._left_frame = QFrame()
         self._left_frame.setFixedWidth(300)
+        self._left_frame.setObjectName("strategyBuilderLeftFrame")
         self._left_frame.setStyleSheet(
-            f"QFrame{{background:{card};border-right:1px solid {bd};}}"
+            f"QFrame#strategyBuilderLeftFrame{{background:{card};border-right:1px solid {bd};}}"
         )
         left_root = QVBoxLayout(self._left_frame)
         left_root.setContentsMargins(12, 12, 12, 12)
@@ -2408,7 +2418,8 @@ class StrategyBuilderScreen(QWidget):
 
         # Right panel
         self._right_frame = QFrame()
-        self._right_frame.setStyleSheet(f"QFrame{{background:{bg};}}")
+        self._right_frame.setObjectName("strategyBuilderRightFrame")
+        self._right_frame.setStyleSheet(f"QFrame#strategyBuilderRightFrame{{background:{bg};}}")
         right_root = QVBoxLayout(self._right_frame)
         right_root.setContentsMargins(0, 0, 0, 0)
 
@@ -2726,12 +2737,12 @@ class StrategyBuilderScreen(QWidget):
         txts = _t(t, "text_secondary")
 
         self._topbar.setStyleSheet(
-            f"QFrame{{background:{card};border-bottom:1px solid {bd};}}"
+            f"QFrame#strategyBuilderTopbar{{background:{card};border-bottom:1px solid {bd};}}"
         )
         self._left_frame.setStyleSheet(
-            f"QFrame{{background:{card};border-right:1px solid {bd};}}"
+            f"QFrame#strategyBuilderLeftFrame{{background:{card};border-right:1px solid {bd};}}"
         )
-        self._right_frame.setStyleSheet(f"QFrame{{background:{bg};}}")
+        self._right_frame.setStyleSheet(f"QFrame#strategyBuilderRightFrame{{background:{bg};}}")
         self._placeholder.setStyleSheet(f"color:{txts};")
         _restyle_btn(self._new_btn, t, accent=True)
         _restyle_btn(self._vars_btn, t)

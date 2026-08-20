@@ -70,6 +70,11 @@ config_data.json
 historic_data.json
 formula_variables.json
 strategy_alert_state_*.json
+inception_strategies.json
+inception_formula_variables.json
+inception_bars.db
+inception_bars.db-wal
+inception_bars.db-shm
 
 # Skill installer lockfile (local install state, not source)
 skills-lock.json

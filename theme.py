@@ -1,9 +1,51 @@
 import os
+import re
+import tempfile
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import QApplication, QComboBox, QFrame
 import font_scale
 
 _CHECK_ICON = os.path.join(os.path.dirname(__file__), "assets", "icons", "check.svg").replace("\\", "/")
+_ICONS_DIR = os.path.join(os.path.dirname(__file__), "assets", "icons")
+
+
+def _recolored_icon_path(filename: str, color: str) -> str:
+    """Recolor an assets/icons/*.svg (all committed as fill="#000000"
+    placeholders — see screens/strategy_builder.py's _svg_icon docstring for
+    the same convention) to *color* and cache it as a real file in the OS
+    temp dir, returning its path for use in QSS `image: url(...)` — QSS's
+    url() needs an actual file, unlike QIcon's in-memory QPixmap route
+    _svg_icon uses for QPushButton icons elsewhere in the app.
+
+    A raw (still-black) SVG referenced directly, like _CHECK_ICON above, is
+    only safe when whatever sits behind it is guaranteed light (an accent-
+    colored checked checkbox square) — a subcontrol like QDateEdit's
+    drop-down arrow sits on the theme's own dark input background in dark
+    mode, so it needs the same per-theme recoloring _svg_icon does.
+    """
+    cache_path = os.path.join(
+        tempfile.gettempdir(), f"brokersync_icon_{filename.rsplit('.', 1)[0]}_{color.lstrip('#')}.svg",
+    )
+    # Always (re)written rather than reused-if-present: this is called at
+    # most a few times per app session (startup, theme toggle), so the
+    # write cost is negligible, and it avoids a stale/broken cached file
+    # from an earlier buggy version of this function ever silently
+    # surviving in the OS temp dir across app restarts.
+    try:
+        with open(os.path.join(_ICONS_DIR, filename), "r", encoding="utf-8") as f:
+            svg = f.read()
+    except FileNotFoundError:
+        return ""
+    # Unlike _svg_icon's tag-restricted version, this matches fill/stroke
+    # wherever they appear — down.svg (and possibly others) declares
+    # fill="#000000" on the root <svg> element itself rather than on the
+    # inner <path>, which a tag-restricted pattern silently never touches
+    # (the file comes back byte-for-byte unchanged, still black).
+    svg = re.sub(r'\bfill="(?!none)[^"]*"', f'fill="{color}"', svg)
+    svg = re.sub(r'\bstroke="(?!none)[^"]*"', f'stroke="{color}"', svg)
+    with open(cache_path, "w", encoding="utf-8") as f:
+        f.write(svg)
+    return cache_path.replace("\\", "/")
 
 
 def _patch_combo_popup_frame():
@@ -168,6 +210,7 @@ class ThemeManager:
 
     def apply(self):
         p = PALETTES[self._mode]
+        date_arrow_icon = _recolored_icon_path("down.svg", p["text_primary"])
 
         self._app.setPalette(self._build_palette(p))
         self._app.setStyleSheet(f"""
@@ -194,6 +237,11 @@ class ThemeManager:
             QDateTimeEdit::drop-down, QDateEdit::drop-down {{
                 border: none;
                 width: 20px;
+            }}
+            QDateTimeEdit::down-arrow, QDateEdit::down-arrow {{
+                image: url("{date_arrow_icon}");
+                width: 10px;
+                height: 10px;
             }}
             QDateTimeEdit QCalendarWidget, QDateEdit QCalendarWidget {{
                 background-color: {p['card_bg']};

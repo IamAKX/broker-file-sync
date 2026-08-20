@@ -358,8 +358,9 @@ class StrategyPickerPopup(QWidget):
 
         card = QFrame()
         card.setFixedWidth(260)
+        card.setObjectName("liveViewerCard")
         card.setStyleSheet(
-            f"QFrame{{background:{bg};border:1px solid {bd};border-radius:10px;}}"
+            f"QFrame#liveViewerCard{{background:{bg};border:1px solid {bd};border-radius:10px;}}"
         )
         lay = QVBoxLayout(card)
         lay.setContentsMargins(14, 14, 14, 14)

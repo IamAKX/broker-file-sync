@@ -1,9 +1,17 @@
 """Inception > View by Date — calendar view of the shared historical EOD
 dataset (see docs/INCEPTION_DATA.md in the backend repo): a green dot marks
 a trading day that has data, and clicking View pops up that day's raw +
-computed metrics for every instrument, reusing screens.historic_viewer's
-generic table popup (same widget the existing Data > Historic Upload >
-Browse by Date tab uses) rather than a bespoke one.
+computed (Group A/B) metrics for every locally-synced instrument, reusing
+screens.historic_viewer's generic table popup (same widget the existing
+Data > Historic Upload > Browse by Date tab uses) rather than a bespoke one.
+
+The day's row values come entirely from services.inception_compute_service,
+which computes Group A/B locally from services.inception_bars_store's
+synced bar cache — see screens.inception_settings for the sync status/Sync
+Now action. Only the green-dot availability check (does the SERVER have
+data for this day at all, useful even before this client has synced it) and
+"has this been synced locally yet" still touch the network/local store
+directly here.
 
 Unlike Historic Upload's Browse tab, there's no per-day Delete here —
 Inception's dataset is a shared, centrally-loaded market-data table (not
@@ -14,14 +22,50 @@ import calendar as _cal
 import font_scale
 from datetime import date
 
-from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar
+from PySide6.QtCore import Qt, QTimer, QThread, Signal
 
 from api import inception_api
 from api.exceptions import ApiError, NetworkError
 from components.availability_calendar import AvailabilityCalendar, themed_calendar_stylesheet
 from components.error_popup import show_api_error
 from screens.historic_viewer import HistoricDataViewer
+from services import inception_bars_store, inception_compute_service, inception_strategy_store
+from services.strategy_engine import apply_strategies
+
+# Local sync only ever pulls the canonical ('_I') roll series (see
+# services.inception_sync_service / the backend's get_bars default) — so
+# every symbol in the local store ends with this suffix, and stripping it
+# is exactly "the underlying symbol" with no extra network round trip.
+_CANONICAL_SUFFIX = "_I"
+
+
+def _display_symbol(symbol: str) -> str:
+    return symbol[: -len(_CANONICAL_SUFFIX)] if symbol.endswith(_CANONICAL_SUFFIX) else symbol
+
+
+class _SnapshotLoadWorker(QThread):
+    """Runs inception_compute_service.snapshot on a background thread — see
+    that module's docstring on why a cold Group A/B walk across the full
+    instrument universe can take a while, and screens.inception_settings.
+    _SyncWorker for the same pattern used for syncing."""
+    progress = Signal(int, int)   # done, total instruments
+    succeeded = Signal(list)      # rows
+    failed = Signal(str)
+
+    def __init__(self, as_of_date: date, parent=None):
+        super().__init__(parent)
+        self._as_of_date = as_of_date
+
+    def run(self):
+        try:
+            rows = inception_compute_service.snapshot(
+                self._as_of_date, progress_cb=lambda done, total: self.progress.emit(done, total),
+            )
+        except Exception as exc:
+            self.failed.emit(str(exc))
+            return
+        self.succeeded.emit(rows)
 
 
 class InceptionViewByDateScreen(QWidget):
@@ -31,6 +75,7 @@ class InceptionViewByDateScreen(QWidget):
         self._selected_date = date.today()
         self._available_days: set = set()
         self._viewers = []
+        self._worker: _SnapshotLoadWorker | None = None
         self._build()
 
     def _build(self):
@@ -71,6 +116,12 @@ class InceptionViewByDateScreen(QWidget):
         self._view_btn.clicked.connect(self._on_view_clicked)
         bottom_row.addWidget(self._view_btn)
         layout.addLayout(bottom_row)
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setFixedHeight(6)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setVisible(False)
+        layout.addWidget(self._progress_bar)
 
         layout.addStretch()
 
@@ -127,28 +178,67 @@ class InceptionViewByDateScreen(QWidget):
 
     def _on_view_clicked(self):
         t = self._controller.theme
-        try:
-            result = inception_api.get_snapshot(self._selected_date)
-        except (ApiError, NetworkError) as exc:
-            show_api_error(t, self, exc)
-            return
-        except (KeyError, ValueError, TypeError):
-            self._status_lbl.setText("Couldn't parse response from server.")
+        if inception_bars_store.last_synced_date() is None:
+            self._status_lbl.setText(
+                "No Inception data synced to this device yet — open Inception > "
+                "Data & Settings and click Sync Now."
+            )
             self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
             return
 
-        rows = result.get("rows", [])
+        if self._worker is not None and self._worker.isRunning():
+            return
+
+        self._view_btn.setEnabled(False)
+        self._status_lbl.setText("Computing…")
+        self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        self._progress_bar.setRange(0, 0)   # busy/indeterminate until the first progress tick arrives
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
+
+        self._worker = _SnapshotLoadWorker(self._selected_date, parent=self)
+        self._worker.progress.connect(self._on_view_progress)
+        self._worker.succeeded.connect(self._on_view_succeeded)
+        self._worker.failed.connect(self._on_view_failed)
+        self._worker.start()
+
+    def _on_view_progress(self, done: int, total: int):
+        self._progress_bar.setRange(0, total)
+        self._progress_bar.setValue(done)
+        self._status_lbl.setText(f"Computing… {done}/{total} instruments")
+
+    def _on_view_succeeded(self, rows: list):
+        t = self._controller.theme
+        self._view_btn.setEnabled(True)
+        self._progress_bar.setVisible(False)
+
         if not rows:
-            self._status_lbl.setText(f"No data for {self._selected_date.strftime('%d-%b-%Y')}.")
+            self._status_lbl.setText(
+                f"No synced data for {self._selected_date.strftime('%d-%b-%Y')} — try syncing again "
+                f"(Inception > Data & Settings)."
+            )
             self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
             return
 
         metric_keys = sorted({k for r in rows for k in r.get("values", {})})
         headers = ["Symbol"] + metric_keys
         table_rows = [
-            [r["symbol"]] + [r.get("values", {}).get(k) for k in metric_keys]
+            # Display the underlying symbol (e.g. "ABB") rather than the raw
+            # roll-series symbol ("ABB_I") — that suffix is an internal
+            # detail of which continuous-futures series was picked as
+            # canonical, not something a user browsing by date needs to see.
+            [_display_symbol(r["symbol"])] + [r.get("values", {}).get(k) for k in metric_keys]
             for r in rows
         ]
+
+        # Active Inception strategies are evaluated entirely here, on the
+        # client — the snapshot response above is base (raw + precomputed)
+        # values only. Same engine/appending shape LMV's own live/historical
+        # viewers use for their own strategy columns. load_all() already
+        # falls back to its local cache on a network error, so this can't
+        # raise.
+        strategies = [s for s in inception_strategy_store.load_all() if s.get("active")]
+        headers, table_rows = apply_strategies(strategies, headers, table_rows)
 
         viewer = HistoricDataViewer(
             headers, table_rows, self._selected_date.strftime("%d-%b-%Y"), theme=t,
@@ -157,6 +247,13 @@ class InceptionViewByDateScreen(QWidget):
         viewer.show()
         self._viewers.append(viewer)
         self._status_lbl.setText("")
+
+    def _on_view_failed(self, message: str):
+        t = self._controller.theme
+        self._view_btn.setEnabled(True)
+        self._progress_bar.setVisible(False)
+        self._status_lbl.setText(f"Load failed: {message}")
+        self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
 
     # ── theme ────────────────────────────────────────────────────────────────
 

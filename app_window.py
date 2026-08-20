@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         from screens.inception_view_by_date import InceptionViewByDateScreen
         from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
         from screens.inception_hmv import InceptionHmvScreen
+        from screens.inception_settings import InceptionSettingsScreen
 
         dashboard        = DashboardScreen(self._controller)
         data_import      = DataImportScreen(self._controller)
@@ -124,6 +125,7 @@ class MainWindow(QMainWindow):
             ("inception_view_by_date",     InceptionViewByDateScreen(self._controller)),
             ("inception_strategy_builder", InceptionStrategyBuilderScreen(self._controller)),
             ("inception_hmv",              InceptionHmvScreen(self._controller)),
+            ("inception_settings",         InceptionSettingsScreen(self._controller)),
         ]
         for name, widget in screens:
             self._screens[name] = widget

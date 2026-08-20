@@ -186,12 +186,18 @@ CONSTANTS_CATALOGUE = [
 ]
 
 
-def VARIABLE_CATALOGUE_FROM_STORE() -> list:
+def VARIABLE_CATALOGUE_FROM_STORE(variable_store=None) -> list:
     """One entry per saved formula variable (see services.formula_variable_store)
     — click one to insert "{Name}", which inlines that variable's own formula
     wherever it's used (services.strategy_engine._expand_var_tokens). Use
-    VariablesManagerDialog (below) to create/edit/delete them."""
-    from services import formula_variable_store as var_store
+    VariablesManagerDialog (below) to create/edit/delete them.
+
+    variable_store: defaults to services.formula_variable_store — added so
+    screens.inception_strategy_builder can pass services.
+    inception_formula_variable_store instead, keeping Inception's variables
+    fully separate from LMV's (see that module's docstring)."""
+    from services import formula_variable_store as _default_store
+    var_store = variable_store or _default_store
     return [
         {
             "name": f"{{{v['name']}}}",
@@ -748,17 +754,36 @@ class ExpressionEditorDialog(QDialog):
     right panel shows description; top area shows live expression preview.
     """
 
+    #: Full nav order — every existing (LMV) caller gets exactly this list
+    #: since sections defaults to None. See screens.inception_strategy_builder
+    #: for a caller that trims it (Historic Value/Rows don't apply there).
+    _ALL_SECTIONS = ["Functions", "Historic Value", "Operators", "Fields", "Rows", "Constants", "Variables"]
+
     def __init__(self, tokens: list, lmv_headers: list,
                  strategy_col_headers: list, lmv_first_row: dict,
                  all_lmv_data: list = None,
                  theme=None, mode: str = "value", self_value=None,
                  allow_self: bool = None, extra_row_values: dict = None,
                  real_lmv_headers: list = None,
+                 sections: list = None, variable_store=None,
                  parent=None):
+        """sections/variable_store: added for screens.inception_strategy_builder's
+        reuse of this dialog with Inception's own field set — both default to
+        the exact prior behavior (full 7-section nav, services.
+        formula_variable_store), so every existing (LMV) call site is
+        unaffected. sections lets a caller drop nav entries that don't apply
+        to it (Inception has no day_history/cross-row "of Symbol" support,
+        so it drops "Historic Value"/"Rows" rather than offering functions
+        that would silently do nothing server-side); variable_store swaps
+        which store's variables the Variables tab/"Save as Variable" reads
+        and writes.
+        """
         super().__init__(parent)
         self._initial_tokens = list(tokens)
         self._lmv_headers = list(lmv_headers)
         self._strategy_col_headers = list(strategy_col_headers)
+        self._sections = list(sections) if sections is not None else list(self._ALL_SECTIONS)
+        self._variable_store = variable_store
         # The sheet's OWN currently-loaded columns — a strict subset of
         # self._lmv_headers above, which is really "every name offered in
         # the Fields list" (Formula Builder fields, other strategy columns,
@@ -877,7 +902,7 @@ class ExpressionEditorDialog(QDialog):
             f"QListWidget::item:selected{{background:{bd};color:{txt};"
             f"border-left:3px solid {acc};}}"
         )
-        for section in ["Functions", "Historic Value", "Operators", "Fields", "Rows", "Constants", "Variables"]:
+        for section in self._sections:
             self._nav_list.addItem(section)
         self._nav_list.currentRowChanged.connect(self._on_nav_changed)
         body_lay.addWidget(self._nav_list)
@@ -1090,19 +1115,28 @@ class ExpressionEditorDialog(QDialog):
 
     # ── Nav / Search ──────────────────────────────────────────────────────────
 
+    def _catalogue_for_section(self, section: str) -> list:
+        all_headers = self._lmv_headers + self._strategy_col_headers
+        if section == "Functions":
+            return FUNCTION_CATALOGUE
+        if section == "Historic Value":
+            return POINT_LOOKUP_CATALOGUE
+        if section == "Operators":
+            return OPERATOR_CATALOGUE
+        if section == "Fields":
+            return FIELD_CATALOGUE_FROM_HEADERS(all_headers)
+        if section == "Rows":
+            return ROW_CATALOGUE_FROM_DATA(self._all_lmv_data)
+        if section == "Constants":
+            return CONSTANTS_CATALOGUE
+        if section == "Variables":
+            return VARIABLE_CATALOGUE_FROM_STORE(self._variable_store)
+        return []
+
     def _on_nav_changed(self, row: int):
         self._search_box.clear()
-        all_headers = self._lmv_headers + self._strategy_col_headers
-        catalogues = [
-            FUNCTION_CATALOGUE,
-            POINT_LOOKUP_CATALOGUE,
-            OPERATOR_CATALOGUE,
-            FIELD_CATALOGUE_FROM_HEADERS(all_headers),
-            ROW_CATALOGUE_FROM_DATA(self._all_lmv_data),
-            CONSTANTS_CATALOGUE,
-            VARIABLE_CATALOGUE_FROM_STORE(),
-        ]
-        self._current_catalogue = catalogues[row] if 0 <= row < len(catalogues) else []
+        section = self._sections[row] if 0 <= row < len(self._sections) else None
+        self._current_catalogue = self._catalogue_for_section(section) if section else []
         self._populate_item_list(self._current_catalogue)
 
     def _on_search(self, text: str):
@@ -1402,7 +1436,8 @@ class ExpressionEditorDialog(QDialog):
         if not (self._compiled_ok and self._compiled_tokens):
             return
         from PySide6.QtWidgets import QInputDialog
-        from services import formula_variable_store as var_store
+        from services import formula_variable_store as _default_store
+        var_store = self._variable_store or _default_store
 
         name, ok = QInputDialog.getText(self, "Save as Variable", "Variable name:")
         name = name.strip()
@@ -1454,12 +1489,18 @@ class VariablesManagerDialog(QDialog):
     gets the full catalogue — including referencing other variables."""
 
     def __init__(self, lmv_headers: list, lmv_first_row: dict,
-                 all_lmv_data: list = None, theme=None, parent=None):
+                 all_lmv_data: list = None, theme=None,
+                 sections: list = None, variable_store=None, parent=None):
+        """sections/variable_store: see ExpressionEditorDialog — both
+        default to prior (LMV) behavior and are forwarded to every
+        ExpressionEditorDialog this dialog opens."""
         super().__init__(parent)
         self._lmv_headers   = list(lmv_headers)
         self._lmv_first_row = lmv_first_row or {}
         self._all_lmv_data  = all_lmv_data or []
         self._theme = theme
+        self._sections = sections
+        self._variable_store = variable_store
         self.setWindowTitle("Manage Variables")
         self.setFixedSize(520, 440)
         self._build()
@@ -1540,7 +1581,8 @@ class VariablesManagerDialog(QDialog):
         root.addLayout(close_row)
 
     def _refresh_list(self):
-        from services import formula_variable_store as var_store
+        from services import formula_variable_store as _default_store
+        var_store = self._variable_store or _default_store
         selected_id = None
         current = self._list.currentItem()
         if current is not None:
@@ -1558,7 +1600,8 @@ class VariablesManagerDialog(QDialog):
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
     def _valid_name(self, name: str, exclude_id: str = None) -> bool:
-        from services import formula_variable_store as var_store
+        from services import formula_variable_store as _default_store
+        var_store = self._variable_store or _default_store
         if not name:
             QMessageBox.warning(self, "Invalid name", "Variable name can't be empty.")
             return False
@@ -1575,7 +1618,8 @@ class VariablesManagerDialog(QDialog):
 
     def _new_variable(self):
         from PySide6.QtWidgets import QInputDialog
-        from services import formula_variable_store as var_store
+        from services import formula_variable_store as _default_store
+        var_store = self._variable_store or _default_store
         name, ok = QInputDialog.getText(self, "New Variable", "Variable name:")
         name = name.strip()
         if not ok or not self._valid_name(name):
@@ -1585,7 +1629,8 @@ class VariablesManagerDialog(QDialog):
             [], self._lmv_headers, [], self._lmv_first_row,
             all_lmv_data=self._all_lmv_data, theme=self._theme,
             mode="value", allow_self=False,
-            real_lmv_headers=list(self._lmv_first_row.keys()), parent=self,
+            real_lmv_headers=list(self._lmv_first_row.keys()),
+            sections=self._sections, variable_store=self._variable_store, parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()
@@ -1593,7 +1638,8 @@ class VariablesManagerDialog(QDialog):
             self._refresh_list()
 
     def _edit_selected(self):
-        from services import formula_variable_store as var_store
+        from services import formula_variable_store as _default_store
+        var_store = self._variable_store or _default_store
         variable = self._selected_variable()
         if variable is None:
             return
@@ -1601,7 +1647,8 @@ class VariablesManagerDialog(QDialog):
             variable.get("formula", []), self._lmv_headers, [], self._lmv_first_row,
             all_lmv_data=self._all_lmv_data, theme=self._theme,
             mode="value", allow_self=False,
-            real_lmv_headers=list(self._lmv_first_row.keys()), parent=self,
+            real_lmv_headers=list(self._lmv_first_row.keys()),
+            sections=self._sections, variable_store=self._variable_store, parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()
@@ -1610,7 +1657,8 @@ class VariablesManagerDialog(QDialog):
 
     def _rename_selected(self):
         from PySide6.QtWidgets import QInputDialog
-        from services import formula_variable_store as var_store
+        from services import formula_variable_store as _default_store
+        var_store = self._variable_store or _default_store
         variable = self._selected_variable()
         if variable is None:
             return
@@ -1624,7 +1672,8 @@ class VariablesManagerDialog(QDialog):
         self._refresh_list()
 
     def _delete_selected(self):
-        from services import formula_variable_store as var_store
+        from services import formula_variable_store as _default_store
+        var_store = self._variable_store or _default_store
         variable = self._selected_variable()
         if variable is None:
             return

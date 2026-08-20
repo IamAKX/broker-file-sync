@@ -1,5 +1,5 @@
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 from PySide6.QtWidgets import QApplication
@@ -19,6 +19,36 @@ def controller(qapp):
     return AppController(qapp)
 
 
+@pytest.fixture
+def bars_db(tmp_path, monkeypatch):
+    """Points services.inception_bars_store at a throwaway SQLite file for
+    the duration of one test, so tests never touch (or depend on leftover
+    state in) the real inception_bars.db next to the app."""
+    from services import inception_bars_store
+    monkeypatch.setattr(inception_bars_store, "_DB_FILE", str(tmp_path / "inception_bars_test.db"))
+    return inception_bars_store
+
+
+def _run_worker(qapp, screen, timeout_ms=5000):
+    """View by Date / HMV now compute on a background QThread (see
+    screens.inception_view_by_date._SnapshotLoadWorker / screens.
+    inception_hmv._HmvLoadWorker) — real threads, but running the REAL local
+    compute (no network), so letting them actually run in a test is safe and
+    simpler than mocking. Waits for the worker to finish, then pumps the Qt
+    event loop so its queued succeeded/failed signal actually reaches its
+    slot (cross-thread signals are queued, not delivered synchronously)."""
+    assert screen._worker is not None
+    assert screen._worker.wait(timeout_ms)
+    qapp.processEvents()
+
+
+def _bar(symbol, d, o, h, low, c, vol=1000, oi=500):
+    return {
+        "symbol": symbol, "trade_date": d, "open": o, "high": h, "low": low, "close": c,
+        "volume": vol, "open_interest": oi,
+    }
+
+
 # ── api/inception_api.py: wrapper -> api_client call shape ──────────────────
 
 def test_get_availability_hits_expected_path_and_params(monkeypatch):
@@ -29,26 +59,19 @@ def test_get_availability_hits_expected_path_and_params(monkeypatch):
     assert captured["params"] == {"from": "2026-01-01", "to": "2026-01-31"}
 
 
-def test_get_snapshot_hits_expected_path(monkeypatch):
+def test_get_bars_omits_symbols_param_when_not_given(monkeypatch):
     captured = {}
     monkeypatch.setattr(api_client, "get", lambda path, params=None: captured.update(path=path, params=params) or {})
-    inception_api.get_snapshot(date(2026, 3, 5))
-    assert captured["path"] == "/inception/snapshot"
-    assert captured["params"] == {"date": "2026-03-05"}
+    inception_api.get_bars(date(2025, 1, 1), date(2025, 12, 31))
+    assert captured["path"] == "/inception/bars"
+    assert captured["params"] == {"from": "2025-01-01", "to": "2025-12-31"}
 
 
-def test_get_hmv_omits_metrics_param_when_not_given(monkeypatch):
+def test_get_bars_includes_symbols_param_when_given(monkeypatch):
     captured = {}
     monkeypatch.setattr(api_client, "get", lambda path, params=None: captured.update(path=path, params=params) or {})
-    inception_api.get_hmv("year", "2025")
-    assert captured["params"] == {"period_type": "year", "period": "2025"}
-
-
-def test_get_hmv_includes_metrics_param_when_given(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(api_client, "get", lambda path, params=None: captured.update(path=path, params=params) or {})
-    inception_api.get_hmv("quarter", "2025-Q2", metrics=["CLOSE", "52WH"])
-    assert captured["params"]["metrics"] == ["CLOSE", "52WH"]
+    inception_api.get_bars(date(2025, 1, 1), date(2025, 12, 31), symbols=["ABB_I"])
+    assert captured["params"]["symbols"] == ["ABB_I"]
 
 
 def test_upsert_strategy_hits_expected_path_and_body(monkeypatch):
@@ -58,14 +81,6 @@ def test_upsert_strategy_hits_expected_path_and_body(monkeypatch):
     assert captured["path"] == "/inception/strategies/s1"
     assert captured["body"]["name"] == "My Strategy"
     assert captured["body"]["columns"] == [{"name": "c1"}]
-
-
-def test_compile_check_hits_expected_path(monkeypatch):
-    captured = {}
-    monkeypatch.setattr(api_client, "post", lambda path, json_body=None: captured.update(path=path, body=json_body) or {})
-    inception_api.compile_check([{"type": "num", "value": "1"}])
-    assert captured["path"] == "/inception/compile-check"
-    assert captured["body"] == {"formula": [{"type": "num", "value": "1"}]}
 
 
 # ── FormulaBuilder: new params default to prior behavior ────────────────────
@@ -103,10 +118,569 @@ def test_topbar_has_inception_menu_before_help(qapp, controller):
 
     inception_btn = next(b for b in buttons if b.text() == "Inception")
     actions = [a.text() for a in inception_btn.menu().actions()]
-    assert actions == ["View by Date", "Strategy Builder", "HMV"]
+    assert actions == ["View by Date", "Strategy Builder", "HMV", "", "Data & Settings"]
 
 
-# ── screens construct and behave ─────────────────────────────────────────────
+# ── services.inception_columns ────────────────────────────────────────────
+
+def test_group_b_has_24_gap_codes_each_producing_3_metrics():
+    from services.inception_columns import GROUP_B, gap_metric_names
+
+    assert len(GROUP_B) == 24
+    for code in GROUP_B:
+        assert gap_metric_names(code) == [f"{code} LOW", f"{code} HIGH", f"{code} DATE"]
+
+
+def test_group_a_has_47_codes_and_no_overlap_with_raw_or_group_b():
+    from services.inception_columns import GROUP_A, GROUP_B, RAW_FIELDS
+
+    assert len(GROUP_A) == 47
+    assert not (set(GROUP_A) & set(GROUP_B))
+    assert not (set(GROUP_A) & set(RAW_FIELDS))
+
+
+def test_column_catalogue_exposes_bare_gap_code_plus_low_high_date():
+    from services.inception_columns import GROUP_A, GROUP_B, RAW_FIELDS, column_catalogue
+
+    catalogue = column_catalogue()
+    codes = {c.code for c in catalogue}
+    assert len(catalogue) == len(RAW_FIELDS) + len(GROUP_A) + len(GROUP_B) * 4
+    for code in GROUP_B:
+        assert code in codes
+        assert f"{code} LOW" in codes and f"{code} HIGH" in codes and f"{code} DATE" in codes
+
+
+# ── services.inception_formula_engine: Group A (ported from the backend's
+# now-removed test_inception.py — same hand-traced fixtures, verifying the
+# relocated copy) ─────────────────────────────────────────────────────────
+
+def test_compute_group_a_period_bookkeeping():
+    from services.inception_formula_engine import compute_group_a
+
+    bars = [
+        _bar("X", date(2024, 12, 30), 100, 105, 95, 100),
+        _bar("X", date(2024, 12, 31), 101, 106, 96, 102),
+        _bar("X", date(2025, 1, 2), 103, 110, 100, 108),
+        _bar("X", date(2025, 1, 3), 109, 112, 107, 110),
+        _bar("X", date(2025, 4, 1), 111, 115, 109, 113),
+    ]
+    result = compute_group_a(bars)
+    d1, d2, d3, d4, d5 = (b["trade_date"] for b in bars)
+
+    assert result[d1]["P.OPEN"] is None
+    assert result[d1]["ATH"] == 105 and result[d1]["ATL"] == 95
+    assert result[d1]["CQO"] == 100 and result[d1]["CQH"] == 105 and result[d1]["CQL"] == 95
+
+    assert result[d2]["P.OPEN"] == 100 and result[d2]["P.CLOSE"] == 100
+    assert result[d2]["% CHG PDC AND OPEN"] == pytest.approx(1.0)
+    assert result[d2]["DAY % CHANGE"] == pytest.approx(2.0)
+    assert result[d2]["ATH"] == 106 and result[d2]["ATL"] == 95
+
+    # New quarter/year at d3; FY (Apr-Mar) does NOT reset (Jan 2025 is FY2024).
+    assert result[d3]["CQO"] == 103 and result[d3]["PQC"] == 102
+    assert result[d3]["QT"] == 102 and result[d3]["QB"] == 102
+    assert result[d3]["CFYO"] == 100 and result[d3]["PFYO"] is None
+
+    assert result[d4]["CQH"] == 112 and result[d4]["PQC"] == 102
+
+    # Crosses Apr 1 at d5: quarter and FY both reset; calendar year doesn't.
+    assert result[d5]["CQO"] == 111 and result[d5]["PQC"] == 110
+    assert result[d5]["QT"] == 110 and result[d5]["QB"] == 102
+    assert result[d5]["CYO"] == 103 and result[d5]["CYH"] == 115  # year unchanged
+    assert result[d5]["CFYO"] == 111 and result[d5]["PFYO"] == 100
+    assert result[d5]["ATH"] == 115 and result[d5]["ATL"] == 95
+
+
+def test_compute_group_a_weekly_pwc_updates_only_on_new_week():
+    from services.inception_formula_engine import compute_group_a
+
+    bars = [
+        _bar("X", date(2025, 1, 6), 100, 101, 99, 100),
+        _bar("X", date(2025, 1, 7), 100, 101, 99, 101),
+        _bar("X", date(2025, 1, 10), 101, 102, 100, 102),  # week 1's close = 102
+        _bar("X", date(2025, 1, 13), 105, 106, 104, 105),  # first day of week 2
+        _bar("X", date(2025, 1, 14), 106, 107, 105, 106),  # still week 2
+    ]
+    result = compute_group_a(bars)
+    d1, d2, d3, d4, d5 = (b["trade_date"] for b in bars)
+
+    assert result[d1]["% CHG PWC AND OPEN"] is None
+    assert result[d3]["% CHG PWC AND OPEN"] is None
+    assert result[d4]["% CHG PWC AND OPEN"] == pytest.approx((105 - 102) / 102 * 100)
+    assert result[d5]["% CHG PWC AND OPEN"] == pytest.approx((106 - 102) / 102 * 100)
+
+
+def test_compute_group_a_52_week_window_evicts_old_bars():
+    from services.inception_formula_engine import compute_group_a
+
+    bars = [
+        _bar("X", date(2024, 1, 1), 100, 200, 50, 100),
+        _bar("X", date(2025, 6, 1), 100, 110, 90, 100),
+    ]
+    result = compute_group_a(bars)
+    last = bars[-1]["trade_date"]
+    assert result[last]["52WH"] == 110 and result[last]["52WL"] == 90
+    assert result[last]["ATH"] == 200 and result[last]["ATL"] == 50  # never windowed
+
+
+def test_compute_group_a_week_window_days_is_configurable():
+    from services.inception_formula_engine import compute_group_a
+
+    bars = [
+        _bar("X", date(2024, 1, 1), 100, 200, 50, 100),
+        _bar("X", date(2025, 6, 1), 100, 110, 90, 100),
+    ]
+    last = bars[-1]["trade_date"]
+    # A wider custom window pulls the 2024 extremes back into 52WH/52WL.
+    result = compute_group_a(bars, week_window_days=600)
+    assert result[last]["52WH"] == 200 and result[last]["52WL"] == 50
+
+
+# ── services.inception_formula_engine: Group B ────────────────────────────
+
+def test_compute_group_b_opens_and_fills_a_daily_gap_up():
+    from services.inception_formula_engine import compute_group_b
+
+    d1, d2, d3 = date(2025, 2, 3), date(2025, 2, 4), date(2025, 2, 5)
+    bars = [
+        _bar("X", d1, 99, 101, 98, 100),
+        _bar("X", d2, 106, 108, 105, 106),
+        _bar("X", d3, 107, 109, 98, 99),
+    ]
+    result = compute_group_b(bars, threshold_pct=0.5)
+
+    assert result[d1]["DAY UF GUP 1"] is None
+    assert result[d3]["DAY FD GUP 1"] == (100, 106, d2)
+    assert result[d3]["DAY UF GUP 1"] == (106, 107, d3)
+    assert result[d3]["DAY UF GUP 2"] is None
+    assert result[d3]["DAY UF GDN 1"] is None
+    assert result[d3]["WEEK UF GUP 1"] is None
+
+
+def test_compute_group_b_fifo_caps_at_configured_depth():
+    from services.inception_formula_engine import compute_group_b
+
+    bars = [_bar("X", date(2025, 3, 3), 100, 101, 99, 100)]
+    price = 100
+    for i in range(1, 6):
+        price *= 1.10
+        bars.append(_bar("X", date(2025, 3, 3 + i), price, price * 1.02, price * 0.98, price))
+
+    result = compute_group_b(bars, threshold_pct=0.5, fifo_cap=3)
+    last_day = bars[-1]["trade_date"]
+    ranks = [result[last_day][f"DAY UF GUP {r}"] for r in (1, 2, 3)]
+    assert all(area is not None for area in ranks)
+    opened_dates = [area[2] for area in ranks]
+    assert opened_dates == sorted(opened_dates, reverse=True)
+    assert opened_dates[0] == last_day
+
+    # A shallower configured depth caps at 2.
+    result2 = compute_group_b(bars, threshold_pct=0.5, fifo_cap=2)
+    assert result2[last_day]["DAY UF GUP 3"] is None
+    assert result2[last_day]["DAY UF GUP 2"] is not None
+
+
+def test_compute_group_b_gap_down_uses_mirror_condition():
+    from services.inception_formula_engine import compute_group_b
+
+    d1, d2 = date(2025, 5, 5), date(2025, 5, 6)
+    bars = [_bar("X", d1, 100, 101, 99, 100), _bar("X", d2, 94, 95, 93, 94)]
+    result = compute_group_b(bars, threshold_pct=0.5)
+    assert result[d2]["DAY UF GDN 1"] == (94, 100, d2)
+    assert result[d2]["DAY UF GUP 1"] is None
+
+
+# ── services.inception_formula_engine: required_lookback_start ──────────────
+
+def test_required_lookback_fixed_buffer_codes():
+    from services.inception_formula_engine import required_lookback_start
+
+    as_of = date(2026, 8, 18)
+    assert required_lookback_start("P.OPEN", as_of) == as_of - timedelta(days=7)
+    assert required_lookback_start("% CHG PWC AND OPEN", as_of) == as_of - timedelta(days=14)
+    assert required_lookback_start("52WH", as_of) == as_of - timedelta(days=364)
+    assert required_lookback_start("52WH", as_of, week_window_days=100) == as_of - timedelta(days=100)
+
+
+def test_required_lookback_all_time_uses_first_traded_date():
+    from services.inception_formula_engine import required_lookback_start
+
+    as_of = date(2026, 8, 18)
+    assert required_lookback_start("ATH", as_of, first_traded_date=date(2022, 1, 28)) == date(2022, 1, 28)
+    assert required_lookback_start("ATL", as_of, first_traded_date=None) is None
+
+
+def test_required_lookback_current_and_previous_and_last2_period_codes():
+    from services.inception_formula_engine import required_lookback_start
+
+    as_of = date(2026, 8, 18)  # Q3 2026, FY2026 (Apr start)
+    assert required_lookback_start("CQO", as_of) == date(2026, 7, 1)
+    assert required_lookback_start("CFYO", as_of) == date(2026, 4, 1)
+    assert required_lookback_start("PQC", as_of) == date(2026, 4, 1)
+    assert required_lookback_start("PYC", as_of) == date(2025, 1, 1)
+    assert required_lookback_start("QT", as_of) == date(2026, 1, 1)
+    assert required_lookback_start("YT", as_of) == date(2024, 1, 1)
+
+
+def test_required_lookback_unrecognized_code_is_ungated():
+    from services.inception_formula_engine import required_lookback_start
+
+    assert required_lookback_start("OPEN", date(2026, 8, 18)) is None
+    assert required_lookback_start("SOME_UNKNOWN_CODE", date(2026, 8, 18)) is None
+
+
+# ── services.inception_bars_store ────────────────────────────────────────
+
+def test_upsert_and_query_bars_for_symbol(bars_db):
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2025, 1, 1), 100, 101, 99, 100),
+        _bar("ABB_I", date(2025, 1, 2), 100, 103, 99, 102),
+    ])
+    rows = bars_db.bars_for_symbol("ABB_I")
+    assert [r["trade_date"] for r in rows] == [date(2025, 1, 1), date(2025, 1, 2)]
+    assert rows[1]["close"] == 102
+
+
+def test_upsert_bars_replaces_existing_row_for_same_key(bars_db):
+    bars_db.upsert_bars([_bar("ABB_I", date(2025, 1, 1), 100, 101, 99, 100)])
+    bars_db.upsert_bars([_bar("ABB_I", date(2025, 1, 1), 200, 201, 199, 200)])
+    rows = bars_db.bars_for_symbol("ABB_I")
+    assert len(rows) == 1 and rows[0]["close"] == 200
+
+
+def test_last_synced_date_and_latest_synced_date_on_or_before(bars_db):
+    assert bars_db.last_synced_date() is None
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2025, 1, 1), 100, 101, 99, 100),
+        _bar("ABB_I", date(2025, 3, 1), 100, 101, 99, 100),
+    ])
+    assert bars_db.last_synced_date() == date(2025, 3, 1)
+    assert bars_db.latest_synced_date_on_or_before(date(2025, 2, 1)) == date(2025, 1, 1)
+    assert bars_db.latest_synced_date_on_or_before(date(2024, 1, 1)) is None
+
+
+def test_bars_for_date_returns_all_symbols(bars_db):
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2025, 1, 1), 100, 101, 99, 100),
+        _bar("TCS_I", date(2025, 1, 1), 200, 201, 199, 200),
+    ])
+    rows = bars_db.bars_for_date(date(2025, 1, 1))
+    assert {r["symbol"] for r in rows} == {"ABB_I", "TCS_I"}
+
+
+def test_clear_local_cache_resets_store(bars_db, tmp_path):
+    bars_db.upsert_bars([_bar("ABB_I", date(2025, 1, 1), 100, 101, 99, 100)])
+    assert bars_db.row_count() == 1
+    bars_db.clear_local_cache()
+    assert bars_db.row_count() == 0
+
+
+# ── services.inception_sync_service ──────────────────────────────────────
+
+def test_incremental_sync_fetches_from_day_after_last_synced(bars_db, monkeypatch):
+    from services import inception_sync_service
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2025, 1, 1), 100, 101, 99, 100)])
+
+    captured = {}
+    monkeypatch.setattr(inception_api, "get_bars", lambda date_from, date_to, symbols=None: (
+        captured.update(date_from=date_from, date_to=date_to) or {"rows": []}
+    ))
+
+    inception_sync_service.incremental_sync(today=date(2025, 1, 5))
+    assert captured["date_from"] == date(2025, 1, 2)
+    assert captured["date_to"] == date(2025, 1, 5)
+
+
+def test_incremental_sync_on_empty_store_chunks_like_full_backfill(bars_db, monkeypatch):
+    """Regression guard: "Sync Now" on a fresh install used to send one
+    un-chunked ~26-year request, which the backend's per-request range cap
+    always rejected — see inception_sync_service.incremental_sync's
+    docstring."""
+    from services import inception_sync_service
+
+    calls = []
+    monkeypatch.setattr(inception_api, "get_bars", lambda date_from, date_to, symbols=None: (
+        calls.append((date_from, date_to)) or {"rows": []}
+    ))
+
+    inception_sync_service.incremental_sync(today=date(2001, 6, 1))
+    assert len(calls) >= 2  # chunked, not one giant request
+    assert all((to - frm).days <= inception_sync_service._CHUNK_DAYS for frm, to in calls)
+
+
+def test_incremental_sync_noop_when_already_up_to_date(bars_db, monkeypatch):
+    from services import inception_sync_service
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2025, 1, 5), 100, 101, 99, 100)])
+
+    called = []
+    monkeypatch.setattr(inception_api, "get_bars", lambda *a, **k: called.append(1) or {"rows": []})
+
+    total = inception_sync_service.incremental_sync(today=date(2025, 1, 5))
+    assert total == 0 and called == []
+
+
+def test_full_backfill_chunks_into_year_windows_and_upserts_each(bars_db, monkeypatch):
+    from services import inception_sync_service
+
+    calls = []
+
+    def _fake_get_bars(date_from, date_to, symbols=None):
+        calls.append((date_from, date_to))
+        return {"rows": [dict(_bar("ABB_I", date_from, 100, 101, 99, 100))]}
+
+    monkeypatch.setattr(inception_api, "get_bars", _fake_get_bars)
+
+    total = inception_sync_service.full_backfill(today=date(2001, 6, 1))
+    assert len(calls) >= 2  # spans more than one _CHUNK_DAYS window
+    assert all((to - frm).days <= inception_sync_service._CHUNK_DAYS for frm, to in calls)
+    assert total == len(calls)
+    assert bars_db.row_count() == len(calls)
+
+
+def test_sync_wraps_api_error_as_sync_error(bars_db, monkeypatch):
+    """A real rejection (bad range, etc.) fails immediately — no retries,
+    since retrying an ApiError wouldn't change the outcome."""
+    from services import inception_sync_service
+    from api.exceptions import ApiError
+
+    calls = []
+
+    def _boom(*a, **k):
+        calls.append(1)
+        raise ApiError("boom", "server_error", 500)
+
+    monkeypatch.setattr(inception_api, "get_bars", _boom)
+    monkeypatch.setattr(inception_sync_service.time, "sleep", lambda s: None)
+    with pytest.raises(inception_sync_service.SyncError):
+        inception_sync_service.incremental_sync(today=date(2025, 1, 5))
+    assert len(calls) == 1
+
+
+def test_transient_network_error_is_retried_and_succeeds(bars_db, monkeypatch):
+    """Regression guard: a Full Resync used to abort entirely on the first
+    transient network blip anywhere across its ~27 sequential chunk
+    requests — see inception_sync_service's module docstring."""
+    from services import inception_sync_service
+    from api.exceptions import NetworkError
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2025, 1, 1), 100, 101, 99, 100)])  # small delta -> one chunk
+
+    calls = []
+
+    def _flaky(date_from, date_to, symbols=None):
+        calls.append((date_from, date_to))
+        if len(calls) == 1:
+            raise NetworkError("connection aborted")
+        return {"rows": [dict(_bar("ABB_I", date_from, 100, 101, 99, 100))]}
+
+    monkeypatch.setattr(inception_api, "get_bars", _flaky)
+    monkeypatch.setattr(inception_sync_service.time, "sleep", lambda s: None)  # skip the real backoff delay
+
+    total = inception_sync_service.incremental_sync(today=date(2025, 1, 5))
+    assert total == 1
+    assert len(calls) == 2   # failed once, succeeded on retry
+
+
+def test_network_error_gives_up_after_max_retries(bars_db, monkeypatch):
+    from services import inception_sync_service
+    from api.exceptions import NetworkError
+
+    calls = []
+
+    def _always_fails(*a, **k):
+        calls.append(1)
+        raise NetworkError("connection aborted")
+
+    monkeypatch.setattr(inception_api, "get_bars", _always_fails)
+    monkeypatch.setattr(inception_sync_service.time, "sleep", lambda s: None)
+
+    with pytest.raises(inception_sync_service.SyncError):
+        inception_sync_service.incremental_sync(today=date(2025, 1, 5))
+    assert len(calls) == inception_sync_service._MAX_RETRIES
+
+
+def test_incremental_sync_still_chunks_a_stale_partial_backfill(bars_db, monkeypatch):
+    """Regression guard: if a previous Full Resync got interrupted partway
+    (some old data already synced, but last_synced_date() is still years
+    behind today), a later "Sync Now" must chunk the remaining gap instead
+    of sending one oversized request — same bug as the empty-store case,
+    just with SOME data already present instead of none."""
+    from services import inception_sync_service
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2001, 1, 1), 100, 101, 99, 100)])
+
+    calls = []
+    monkeypatch.setattr(inception_api, "get_bars", lambda date_from, date_to, symbols=None: (
+        calls.append((date_from, date_to)) or {"rows": []}
+    ))
+
+    inception_sync_service.incremental_sync(today=date(2005, 1, 1))
+    assert len(calls) >= 2
+    assert all((to - frm).days <= inception_sync_service._CHUNK_DAYS for frm, to in calls)
+
+
+# ── services.inception_compute_service ───────────────────────────────────
+
+def test_snapshot_computes_group_a_and_raw_fields_from_local_bars(bars_db):
+    from services import inception_compute_service
+
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2025, 1, 1), 100, 105, 95, 102),
+        _bar("ABB_I", date(2025, 1, 2), 103, 110, 100, 108),
+    ])
+    rows = inception_compute_service.snapshot(date(2025, 1, 2))
+    assert len(rows) == 1
+    values = rows[0]["values"]
+    assert rows[0]["symbol"] == "ABB_I"
+    assert values["CLOSE"] == 108 and values["OPEN"] == 103
+    assert values["P.CLOSE"] == 102  # previous day's close
+    assert values["ATH"] == 110
+
+
+def test_snapshot_skips_instruments_with_no_bar_on_that_date(bars_db):
+    from services import inception_compute_service
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2025, 1, 1), 100, 101, 99, 100)])
+    rows = inception_compute_service.snapshot(date(2025, 1, 2))
+    assert rows == []
+
+
+def test_hmv_returns_none_as_of_date_when_nothing_synced_in_range(bars_db):
+    from services import inception_compute_service
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2024, 1, 1), 100, 101, 99, 100)])
+    as_of, rows = inception_compute_service.hmv(date(2025, 1, 1), date(2025, 12, 31))
+    assert as_of is None and rows == []
+
+
+def test_hmv_applies_range_gate_to_52wh(bars_db):
+    from services import inception_compute_service
+
+    # Two bars far enough apart that 52WH needs the earlier one, but the
+    # requested range only covers the later one.
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2024, 1, 1), 100, 500, 50, 100),
+        _bar("ABB_I", date(2025, 6, 1), 100, 110, 90, 100),
+    ])
+    as_of, rows = inception_compute_service.hmv(date(2025, 5, 1), date(2025, 6, 1))
+    assert as_of == date(2025, 6, 1)
+    assert rows[0]["values"]["52WH"] is None  # range too short to cover the 364-day window
+    assert rows[0]["values"]["OPEN"] == 100   # raw fields are never gated
+
+
+# ── services.inception_compute_service: row cache ────────────────────────
+
+def test_snapshot_reuses_cached_row_on_repeated_calls(bars_db, monkeypatch):
+    """The expensive part (compute_group_a/b) should run once per (symbol,
+    data+settings fingerprint) — a second identical call must not re-walk
+    the instrument's history. See inception_compute_service's module
+    docstring on why this matters (a cold walk is tens of seconds across
+    the full instrument universe)."""
+    from services import inception_compute_service
+
+    inception_compute_service.clear_cache()
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+
+    calls = []
+    real_compute_group_a = inception_compute_service.compute_group_a
+    monkeypatch.setattr(
+        inception_compute_service, "compute_group_a",
+        lambda bars, **kw: (calls.append(1) or real_compute_group_a(bars, **kw)),
+    )
+
+    inception_compute_service.snapshot(date(2026, 8, 18))
+    inception_compute_service.snapshot(date(2026, 8, 18))
+    assert len(calls) == 1
+
+
+def test_snapshot_recomputes_after_new_bars_synced(bars_db, monkeypatch):
+    from services import inception_compute_service
+
+    inception_compute_service.clear_cache()
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+
+    calls = []
+    real_compute_group_a = inception_compute_service.compute_group_a
+    monkeypatch.setattr(
+        inception_compute_service, "compute_group_a",
+        lambda bars, **kw: (calls.append(1) or real_compute_group_a(bars, **kw)),
+    )
+
+    inception_compute_service.snapshot(date(2026, 8, 18))
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 19), 100, 106, 95, 101)])
+    inception_compute_service.snapshot(date(2026, 8, 19))
+    assert len(calls) == 2   # new trade date -> different fingerprint -> recompute
+
+
+def test_snapshot_and_hmv_progress_cb_called_once_per_instrument(bars_db):
+    from services import inception_compute_service
+
+    inception_compute_service.clear_cache()
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100),
+        _bar("TCS_I", date(2026, 8, 18), 190, 205, 185, 200),
+    ])
+
+    ticks = []
+    inception_compute_service.snapshot(date(2026, 8, 18), progress_cb=lambda done, total: ticks.append((done, total)))
+    assert ticks == [(1, 2), (2, 2)]
+
+    ticks.clear()
+    inception_compute_service.hmv(date(2026, 1, 1), date(2026, 8, 18), progress_cb=lambda done, total: ticks.append((done, total)))
+    assert ticks == [(1, 2), (2, 2)]
+
+
+# ── screens: view by date ────────────────────────────────────────────────
+
+def test_view_by_date_display_symbol_strips_roll_suffix():
+    from screens.inception_view_by_date import _display_symbol
+
+    assert _display_symbol("ABB_I") == "ABB"
+    assert _display_symbol("SOMETHING") == "SOMETHING"  # no suffix to strip
+
+
+def test_view_by_date_shows_sync_prompt_when_nothing_synced(qapp, controller, bars_db):
+    from screens.inception_view_by_date import InceptionViewByDateScreen
+
+    screen = InceptionViewByDateScreen(controller)
+    screen._selected_date = date(2026, 8, 18)
+    screen._on_view_clicked()
+    assert "Sync" in screen._status_lbl.text()
+
+
+def test_view_by_date_applies_active_strategies_locally(qapp, controller, monkeypatch, bars_db):
+    """Group A/B and strategy columns are both computed entirely locally now
+    — no network call at all for View by Date (see services.
+    inception_compute_service, services.strategy_engine.apply_strategies)."""
+    from screens.inception_view_by_date import InceptionViewByDateScreen
+    from services import inception_strategy_store
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+
+    screen = InceptionViewByDateScreen(controller)
+    screen._selected_date = date(2026, 8, 18)
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "Range", "active": True, "row_filter": [],
+        "columns": [{
+            "name": "Day Range",
+            "formula": [{"type": "col", "value": "CLOSE"}, {"type": "op", "value": "-"}, {"type": "col", "value": "OPEN"}],
+        }],
+    }])
+
+    from unittest.mock import MagicMock
+    from screens import inception_view_by_date as ivd
+    fake_viewer_cls = MagicMock()
+    monkeypatch.setattr(ivd, "HistoricDataViewer", fake_viewer_cls)
+
+    screen._on_view_clicked()
+    _run_worker(qapp, screen)
+    headers, rows = fake_viewer_cls.call_args.args[:2]
+    assert "Day Range" in headers
+    assert rows[0][headers.index("Day Range")] == 10.0
+    assert rows[0][headers.index("Symbol")] == "ABB"
+
 
 def test_view_by_date_screen_constructs(qapp, controller):
     from screens.inception_view_by_date import InceptionViewByDateScreen
@@ -116,56 +690,298 @@ def test_view_by_date_screen_constructs(qapp, controller):
     screen.refresh_theme()
 
 
-def test_hmv_screen_period_string_for_each_type(qapp, controller):
+# ── screens: HMV ─────────────────────────────────────────────────────────
+
+def test_hmv_screen_current_range_reads_the_date_pickers(qapp, controller):
+    from PySide6.QtCore import QDate
     from screens.inception_hmv import InceptionHmvScreen
 
     screen = InceptionHmvScreen(controller)
-    screen._year_spin.setValue(2025)
+    screen._from_date.setDate(QDate(2025, 1, 1))
+    screen._to_date.setDate(QDate(2025, 12, 31))
+    assert screen._current_range() == (date(2025, 1, 1), date(2025, 12, 31))
 
-    screen._period_type_combo.setCurrentIndex(0)  # Calendar Year
-    assert screen._current_period() == ("year", "2025")
 
-    screen._period_type_combo.setCurrentIndex(1)  # Quarter
-    screen._sub_period_combo.setCurrentIndex(1)   # Q2
-    assert screen._current_period() == ("quarter", "2025-Q2")
+def test_hmv_screen_rejects_from_after_to_without_computing(qapp, controller):
+    from PySide6.QtCore import QDate
+    from screens.inception_hmv import InceptionHmvScreen
 
-    screen._period_type_combo.setCurrentIndex(2)  # Half Year
-    screen._sub_period_combo.setCurrentIndex(1)   # H2
-    assert screen._current_period() == ("half_year", "2025-H2")
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2025, 12, 31))
+    screen._to_date.setDate(QDate(2025, 1, 1))
 
-    screen._period_type_combo.setCurrentIndex(3)  # Financial Year
-    assert screen._current_period() == ("financial_year", "2025")
+    screen._on_load()
+    assert screen._data == []
+    assert "must be on or before" in screen._status_lbl.text()
 
+
+def test_hmv_screen_shows_sync_prompt_when_nothing_synced(qapp, controller, bars_db):
+    from screens.inception_hmv import InceptionHmvScreen
+
+    screen = InceptionHmvScreen(controller)
+    screen._on_load()
+    assert "Sync" in screen._status_lbl.text()
+
+
+def test_hmv_screen_displays_underlying_symbol_not_roll_series(qapp, controller, bars_db):
+    from screens.inception_hmv import InceptionHmvScreen
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+    screen = InceptionHmvScreen(controller)
+    from PySide6.QtCore import QDate
+    screen._from_date.setDate(QDate(2026, 1, 1))
+    screen._to_date.setDate(QDate(2026, 8, 18))
+
+    screen._on_load()
+    _run_worker(qapp, screen)
+    assert screen._data[0][screen._headers.index("Symbol")] == "ABB"
+    assert screen._data[0][screen._headers.index("CLOSE")] == 100
+
+
+def test_hmv_screen_applies_active_strategies_locally(qapp, controller, monkeypatch, bars_db):
+    from screens.inception_hmv import InceptionHmvScreen
+    from services import inception_strategy_store
+    from PySide6.QtCore import QDate
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2026, 1, 1))
+    screen._to_date.setDate(QDate(2026, 8, 18))
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "Range", "active": True, "row_filter": [],
+        "columns": [{
+            "name": "Day Range",
+            "formula": [{"type": "col", "value": "CLOSE"}, {"type": "op", "value": "-"}, {"type": "col", "value": "OPEN"}],
+        }],
+    }])
+
+    screen._on_load()
+    _run_worker(qapp, screen)
+    assert "Day Range" in screen._headers
+    assert screen._data[0][screen._headers.index("Day Range")] == 10.0
+
+
+# ── screens: strategy builder ────────────────────────────────────────────
 
 def test_strategy_builder_screen_constructs_with_empty_data(qapp, controller, monkeypatch):
     from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
+    from services import inception_strategy_store
 
-    monkeypatch.setattr(inception_api, "list_columns", lambda: {"columns": []})
     monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
     monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
 
     screen = InceptionStrategyBuilderScreen(controller)
     screen._reload_all()
     assert screen._strategies == []
-    assert screen._list.count() == 0
+    assert screen._active_editor is None
+    assert inception_strategy_store.all_categories() == ["Daily", "Weekly", "Monthly", "Common"]
 
 
-def test_strategy_builder_new_strategy_then_add_column(qapp, controller, monkeypatch):
+def test_strategy_builder_fields_come_from_local_catalogue_no_network(qapp, controller, monkeypatch):
+    """Confirms the Fields list no longer needs GET /inception/columns —
+    Group A/B's catalogue moved entirely client-side (services.
+    inception_columns)."""
     from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
 
-    monkeypatch.setattr(inception_api, "list_columns", lambda: {"columns": [{"code": "OPEN"}]})
     monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
     monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
 
     screen = InceptionStrategyBuilderScreen(controller)
     screen._reload_all()
-    screen._on_new()
-    assert screen._current["name"] == "New Strategy"
-    assert screen._columns_list.count() == 0
+    assert "OPEN" in screen._fields
+    assert "52WH" in screen._fields
+    assert "DAY UF GUP 1" in screen._fields
 
-    from PySide6.QtWidgets import QListWidgetItem
-    from PySide6.QtCore import Qt
-    item = QListWidgetItem("Adjusted = [OPEN] + 1")
-    item.setData(Qt.ItemDataRole.UserRole, {"name": "Adjusted", "formula": []})
-    screen._columns_list.addItem(item)
-    assert "Adjusted" in screen._current_field_universe()
+
+def test_strategy_builder_new_strategy_opens_editor(qapp, controller, monkeypatch):
+    from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
+
+    monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
+
+    screen = InceptionStrategyBuilderScreen(controller)
+    screen._reload_all()
+    screen._new_strategy()
+
+    assert screen._active_editor is not None
+    assert screen._active_editor._strategy["name"] == "New Strategy"
+    assert screen._active_editor._strategy["columns"] == []
+    assert "OPEN" in screen._fields
+
+
+def test_strategy_editor_field_universe_includes_own_columns(qapp, controller):
+    from screens.inception_strategy_builder import _InceptionStrategyEditor
+
+    strategy = {
+        "id": "s1", "name": "Test", "active": True, "category": "Daily",
+        "columns": [{"name": "Adjusted", "formula": [], "fmt_rules": []}], "row_filter": [],
+    }
+    editor = _InceptionStrategyEditor(strategy, ["OPEN", "CLOSE"], theme=controller.theme)
+    assert editor._field_names() == ["OPEN", "CLOSE", "Adjusted"]
+
+
+def test_column_editor_always_shows_editable_formula(qapp, controller):
+    from screens.inception_strategy_builder import _InceptionColumnEditorDialog
+
+    col = {"name": "MyColumn", "formula": [{"type": "col", "value": "52WH"}, {"type": "op", "value": "+"}, {"type": "num", "value": "1"}], "fmt_rules": []}
+    dlg = _InceptionColumnEditorDialog(col, ["52WH"], theme=controller.theme)
+    assert hasattr(dlg, "_formula_preview")
+
+
+def test_strategy_editor_save_emits_strategy_with_name_and_category(qapp, controller):
+    from screens.inception_strategy_builder import _InceptionStrategyEditor
+
+    strategy = {
+        "id": "s1", "name": "Old Name", "active": True, "category": "Daily",
+        "columns": [], "row_filter": [],
+    }
+    editor = _InceptionStrategyEditor(strategy, ["OPEN"], theme=controller.theme)
+    editor._name_edit.setText("Renamed")
+
+    captured = {}
+    editor.saved.connect(lambda s: captured.update(s))
+    editor._save()
+
+    assert captured["name"] == "Renamed"
+    assert captured["category"] == "Daily"
+
+
+def test_strategy_builder_toggle_active_reverts_on_api_failure(qapp, controller, monkeypatch):
+    from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
+    from api.exceptions import ApiError
+
+    monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": [
+        {"id": "s1", "name": "S1", "active": True, "category": "Daily", "columns": [], "row_filter": []},
+    ]})
+
+    screen = InceptionStrategyBuilderScreen(controller)
+    screen._reload_all()
+
+    def _boom(*a, **k):
+        raise ApiError("boom", "server_error", 500)
+    monkeypatch.setattr("services.inception_strategy_store.save_strategy", _boom)
+
+    import screens.inception_strategy_builder as isb
+    monkeypatch.setattr(isb, "show_api_error", lambda *a, **k: None)
+
+    screen._on_toggle("s1", False)
+    assert screen._strategies[0]["active"] is True   # reverted
+
+
+# ── screens: settings ────────────────────────────────────────────────────
+
+def test_settings_screen_loads_defaults_when_nothing_saved(qapp, controller, monkeypatch, bars_db):
+    from screens.inception_settings import InceptionSettingsScreen
+    from services.inception_formula_engine import DEFAULT_FIFO_CAP, DEFAULT_GAP_THRESHOLD_PCT, DEFAULT_WEEK_WINDOW_DAYS
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    screen = InceptionSettingsScreen(controller)
+    assert screen._threshold_spin.value() == pytest.approx(DEFAULT_GAP_THRESHOLD_PCT)
+    assert screen._window_spin.value() == DEFAULT_WEEK_WINDOW_DAYS
+    assert screen._fifo_spin.value() == DEFAULT_FIFO_CAP
+
+
+def test_settings_screen_save_params_persists_via_config_store(qapp, controller, monkeypatch, bars_db):
+    from screens.inception_settings import InceptionSettingsScreen
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    captured = {}
+    monkeypatch.setattr("services.config_store.save_json", lambda key, value: captured.update(key=key, value=value))
+
+    screen = InceptionSettingsScreen(controller)
+    screen._threshold_spin.setValue(1.5)
+    screen._window_spin.setValue(300)
+    screen._fifo_spin.setValue(5)
+    screen._save_params()
+
+    assert captured["value"] == {"gap_threshold_pct": 1.5, "week_window_days": 300, "fifo_cap": 5}
+
+
+def test_settings_screen_sync_progress_slots_update_label(qapp, controller, monkeypatch, bars_db):
+    """Drives the worker's slot methods directly rather than spinning up a
+    real QThread — same convention screens/live_viewer.py's tests use for
+    LiveDataReader (see components/update_dialog.py's docstring)."""
+    from screens.inception_settings import InceptionSettingsScreen
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    screen = InceptionSettingsScreen(controller)
+
+    screen._on_sync_progress("Syncing 2025-01-01 .. 2025-12-31…", 0.5)
+    assert "50%" in screen._sync_progress_lbl.text()
+    assert screen._sync_progress_bar.value() == 50
+
+    screen._on_sync_succeeded(1234)
+    assert "1,234" in screen._sync_progress_lbl.text()
+
+    screen._on_sync_failed("network down")
+    assert "network down" in screen._sync_progress_lbl.text()
+
+
+def test_settings_screen_progress_bar_shown_during_sync_hidden_after(qapp, controller, monkeypatch, bars_db):
+    """_start_sync's visibility/button-disable effects happen synchronously
+    (before the worker thread is even started); the fake sync function below
+    just avoids a real background thread making real network calls in a
+    unit test."""
+    from screens.inception_settings import InceptionSettingsScreen
+    from services import inception_sync_service
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", lambda progress_cb=None, today=None: 0)
+    # isHidden() (not isVisible()) — the screen is never actually .show()n in
+    # this test, so isVisible() would read False regardless of our own
+    # setVisible() calls (it also depends on the whole ancestor chain being
+    # shown); isHidden() reflects this widget's own explicit shown/hidden
+    # state directly.
+    screen = InceptionSettingsScreen(controller)
+    assert screen._sync_progress_bar.isHidden() is True
+
+    screen._start_sync(full=False)
+    assert screen._sync_progress_bar.isHidden() is False
+    assert screen._sync_now_btn.isEnabled() is False
+
+    assert screen._worker.wait(2000)   # worker thread finished
+    qapp.processEvents()               # deliver its queued `succeeded` signal
+
+    assert screen._sync_progress_bar.isHidden() is True
+    assert screen._sync_now_btn.isEnabled() is True
+
+
+def test_settings_screen_progress_bar_indeterminate_when_fraction_is_none(qapp, controller, monkeypatch, bars_db):
+    from screens.inception_settings import InceptionSettingsScreen
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    screen = InceptionSettingsScreen(controller)
+
+    screen._on_sync_progress("Syncing 2026-08-19 .. 2026-08-20…", None)
+    assert screen._sync_progress_bar.minimum() == 0 and screen._sync_progress_bar.maximum() == 0
+
+    screen._on_sync_progress("Syncing 2000-01-01 .. 2000-12-31…", 0.25)
+    assert screen._sync_progress_bar.maximum() == 100
+    assert screen._sync_progress_bar.value() == 25
+
+
+def test_settings_screen_sync_status_reflects_local_store(qapp, controller, monkeypatch, bars_db):
+    from screens.inception_settings import InceptionSettingsScreen
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    screen = InceptionSettingsScreen(controller)
+
+    screen._refresh_sync_status()
+    assert screen._sync_headline_lbl.text() == "Not synced"
+    assert "No data synced" in screen._sync_status_lbl.text()
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 100, 101, 99, 100)])
+    screen._refresh_sync_status()
+    assert screen._sync_headline_lbl.text() == "Synced"
+    assert "2026-08-18" in screen._sync_status_lbl.text()
+
+
+def test_settings_screen_buttons_explain_sync_now_vs_full_resync(qapp, controller, monkeypatch, bars_db):
+    from screens.inception_settings import InceptionSettingsScreen
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    screen = InceptionSettingsScreen(controller)
+
+    assert "since your last sync" in screen._sync_now_btn.toolTip()
+    assert "ENTIRE historical dataset" in screen._resync_btn.toolTip()

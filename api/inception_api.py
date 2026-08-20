@@ -4,13 +4,9 @@ from datetime import date
 from api.client import api_client
 from api.endpoints import (
     INCEPTION_AVAILABILITY,
-    INCEPTION_COLUMNS,
-    INCEPTION_COMPILE_CHECK,
+    INCEPTION_BARS,
     INCEPTION_FORMULA_VARIABLES,
-    INCEPTION_HMV,
     INCEPTION_INSTRUMENTS,
-    INCEPTION_RECOMPUTE,
-    INCEPTION_SNAPSHOT,
     INCEPTION_STRATEGIES,
 )
 
@@ -26,23 +22,16 @@ def list_instruments() -> dict:
     return api_client.get(INCEPTION_INSTRUMENTS)
 
 
-def list_columns() -> dict:
-    return api_client.get(INCEPTION_COLUMNS)
-
-
-def get_snapshot(trade_date: date) -> dict:
-    return api_client.get(INCEPTION_SNAPSHOT, params={"date": trade_date.isoformat()})
-
-
-def get_hmv(period_type: str, period: str, metrics: list[str] | None = None) -> dict:
-    params = {"period_type": period_type, "period": period}
-    if metrics:
-        params["metrics"] = metrics
-    return api_client.get(INCEPTION_HMV, params=params)
-
-
-def recompute(symbol: str | None = None) -> dict:
-    return api_client.post(INCEPTION_RECOMPUTE, json_body={"symbol": symbol})
+def get_bars(date_from: date, date_to: date, symbols: list[str] | None = None) -> dict:
+    """Bulk raw-bar feed (see services.inception_sync_service, the only
+    caller) — replaces the old get_snapshot/get_hmv/list_columns/recompute
+    calls, all removed along with their backend endpoints when Group A/B
+    computation moved entirely to this client (services.
+    inception_formula_engine/inception_compute_service)."""
+    params = {"from": date_from.isoformat(), "to": date_to.isoformat()}
+    if symbols:
+        params["symbols"] = symbols
+    return api_client.get(INCEPTION_BARS, params=params)
 
 
 def list_strategies() -> dict:
@@ -77,7 +66,3 @@ def upsert_variable(variable_id: str, name: str, formula: list) -> dict:
 
 def delete_variable(variable_id: str) -> None:
     api_client.delete(f"{INCEPTION_FORMULA_VARIABLES}/{variable_id}")
-
-
-def compile_check(formula: list) -> dict:
-    return api_client.post(INCEPTION_COMPILE_CHECK, json_body={"formula": formula})
