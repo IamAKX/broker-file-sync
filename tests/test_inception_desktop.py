@@ -223,6 +223,53 @@ def test_compute_group_a_52_week_window_evicts_old_bars():
     assert result[last]["ATH"] == 200 and result[last]["ATL"] == 50  # never windowed
 
 
+def test_compute_group_a_52_week_window_matches_naive_scan():
+    """52WH/52WL are tracked via a sliding-window-maximum/-minimum (two
+    monotonic deques) for O(n) performance instead of a naive max()/min()
+    rescan of the whole window on every bar (see inception_formula_engine's
+    module docstring — profiling a cold HMV load showed the naive rescan
+    dominating total load time, worse than every other Group A/B column's
+    computation combined, once window sizes grow to ~250+ trading days).
+    Regression guard: randomized bar sequences must produce IDENTICAL
+    52WH/52WL to the naive reference, across several window sizes — a
+    correctness bug in the monotonic-deque bookkeeping wouldn't show up in
+    the small hand-picked fixtures above."""
+    import random
+    from collections import deque
+    from services.inception_formula_engine import compute_group_a
+
+    def naive_52w(bars, week_window_days):
+        window = deque()
+        out = []
+        for bar in bars:
+            d = bar["trade_date"]
+            window.append((d, bar["high"], bar["low"]))
+            cutoff = d - timedelta(days=week_window_days)
+            while window and window[0][0] < cutoff:
+                window.popleft()
+            out.append((max(h for _, h, _ in window), min(lo for _, _, lo in window)))
+        return out
+
+    rng = random.Random(12345)
+    for _trial in range(15):
+        n = rng.randint(1, 250)
+        d, price, bars = date(2015, 1, 1), 100.0, []
+        made = 0
+        while made < n:
+            if d.weekday() < 5:
+                price *= 1 + rng.uniform(-0.05, 0.05)
+                bars.append(_bar("X", d, price, price * 1.02, price * 0.98, price))
+                made += 1
+            d += timedelta(days=1)
+        week_window_days = rng.choice([364, 250, 30, 5])
+        naive = naive_52w(bars, week_window_days)
+        result = compute_group_a(bars, week_window_days=week_window_days)
+        for bar, (naive_high, naive_low) in zip(bars, naive):
+            row = result[bar["trade_date"]]
+            assert row["52WH"] == naive_high
+            assert row["52WL"] == naive_low
+
+
 def test_compute_group_a_week_window_days_is_configurable():
     from services.inception_formula_engine import compute_group_a
 

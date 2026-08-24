@@ -32,8 +32,18 @@ year = Apr 1 - Mar 31 (Indian FY, keyed by its starting calendar year).
 
 52WH/52WL use a rolling N-calendar-day window (week_window_days, default
 364 — the standard "52-week high/low" definition), not a trading-day count
-— a deque evicts bars older than the window on each step, O(n) amortized
-over the whole history.
+— tracked via the classic sliding-window-maximum/-minimum technique (two
+monotonic deques, one for high one for low: each bar is pushed onto the
+back after popping off any back entries it makes obsolete — a high/low that
+can never be the window's max/min again once a later, at-least-as-extreme
+bar has entered the window — and popped off the front once its date ages
+out of the window). Every bar is pushed and popped from each deque at most
+once across the whole run, so this is genuinely O(n) over the full
+history — NOT the O(n * window size) a naive max()/min() rescan of every
+bar currently in the window would be on every single day (window size is
+commonly 250-260 trading days once the window's full — profiling a cold
+HMV load showed exactly that rescan as by far the single largest cost,
+more than every other Group A/B column's computation combined).
 
 ── Group B: gap-area tracking ───────────────────────────────────────────────
 An "area" is a PRICE RANGE, not a single number: the two bounds are
@@ -296,7 +306,11 @@ def compute_group_a(bars: list[dict], week_window_days: int = DEFAULT_WEEK_WINDO
     result: dict[date, dict] = {}
 
     running: dict[str, dict] = {pt: None for pt in ("quarter", "half_year", "year", "fy")}
-    window: deque = deque()   # (date, high, low) for the 52-week roll
+    # Sliding-window max/min for 52WH/52WL — see module docstring. Each
+    # holds (date, value) pairs; front is always the current window's
+    # max/min once expired entries are popped off it.
+    max_window: deque = deque()   # monotonically decreasing by high
+    min_window: deque = deque()   # monotonically increasing by low
     ath = None
     atl = None
     prev_bar = None
@@ -326,12 +340,21 @@ def compute_group_a(bars: list[dict], week_window_days: int = DEFAULT_WEEK_WINDO
         row["ATH"] = ath
         row["ATL"] = atl
 
-        window.append((d, bar["high"], bar["low"]))
         cutoff = d - timedelta(days=week_window_days)
-        while window and window[0][0] < cutoff:
-            window.popleft()
-        row["52WH"] = max(h for _, h, _ in window)
-        row["52WL"] = min(lo for _, _, lo in window)
+
+        while max_window and max_window[0][0] < cutoff:
+            max_window.popleft()
+        while max_window and max_window[-1][1] <= bar["high"]:
+            max_window.pop()
+        max_window.append((d, bar["high"]))
+        row["52WH"] = max_window[0][1]
+
+        while min_window and min_window[0][0] < cutoff:
+            min_window.popleft()
+        while min_window and min_window[-1][1] >= bar["low"]:
+            min_window.pop()
+        min_window.append((d, bar["low"]))
+        row["52WL"] = min_window[0][1]
 
         # Quarter / half-year / year / financial-year — current + previous + top/bottom
         for pt in ("quarter", "half_year", "year", "fy"):
@@ -497,16 +520,33 @@ def compute_group_b(
     return result
 
 
+_GAP_FIFO_KEYS = (
+    ("UF_GUP", "UF", "GUP"), ("FD_GUP", "FD", "GUP"),
+    ("UF_GDN", "UF", "GDN"), ("FD_GDN", "FD", "GDN"),
+)
+
+# {(period_label, fifo_key): [rank-1 code, rank-2 code, rank-3 code]} — the
+# 24 gap-column names (services.inception_columns.GROUP_B's own keys) are
+# entirely static (only depend on period_label/fifo_key/rank, never on the
+# data), so build every f-string once here at import time rather than
+# 3 times per fifo_key per bar in _fill_gap_row below — that loop runs once
+# per (period_label, bar) pair over an instrument's WHOLE history, so
+# re-formatting the same 12 strings on every single call was pure waste.
+_GAP_CODE_TABLE = {
+    (period_label, fifo_key): [f"{period_label} {out_fill} {out_dir} {rank}" for rank in (1, 2, 3)]
+    for period_label in ("DAY", "WEEK")
+    for fifo_key, out_fill, out_dir in _GAP_FIFO_KEYS
+}
+
+
 def _fill_gap_row(row: dict, period_label: str, fifos: dict[str, list]) -> None:
-    for fifo_key, out_fill, out_dir in (
-        ("UF_GUP", "UF", "GUP"), ("FD_GUP", "FD", "GUP"),
-        ("UF_GDN", "UF", "GDN"), ("FD_GDN", "FD", "GDN"),
-    ):
+    for fifo_key, _out_fill, _out_dir in _GAP_FIFO_KEYS:
         areas = fifos.get(fifo_key, [])
-        for rank in (1, 2, 3):
-            code = f"{period_label} {out_fill} {out_dir} {rank}"
-            if rank <= len(areas):
-                area = areas[rank - 1]
+        codes = _GAP_CODE_TABLE[(period_label, fifo_key)]
+        n = len(areas)
+        for i, code in enumerate(codes):
+            if i < n:
+                area = areas[i]
                 row[code] = (area.low, area.high, area.opened_on)
             else:
                 row[code] = None
