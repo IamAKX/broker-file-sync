@@ -896,15 +896,24 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
     for row in data:
         row_dict = dict(zip(headers, row))
 
-        # Compute each active strategy's columns first, then evaluate its row
-        # filter against a row enriched with those computed values — so a filter
-        # can reference the strategy's own columns by name.
+        # Compute each active strategy's columns in order, against a row
+        # enriched with every earlier column's own just-computed value (not
+        # the original row_dict) — so a later column can reference an
+        # earlier one by name (e.g. "Trigger Price" = [Floor_10D] * 1.01),
+        # same as the row filter below and as the Strategy Builder editor's
+        # own Test Formula already promises (screens.strategy_builder.
+        # StrategyEditor._combined_headers_and_values pre-computes every
+        # sibling column for exactly this reason — this loop used to be the
+        # one place that DIDN'T honor it, evaluating every column against
+        # row_dict regardless of column order, so a column referencing an
+        # earlier sibling silently came back blank here even though testing
+        # it in the editor showed a real value).
         per_strat = []   # (passed, [computed values in column order])
         for strat in active:
             enriched = dict(row_dict)
             values = []
             for col in strat.get("columns", []):
-                val = evaluate(col["formula"], row_dict, all_dicts,
+                val = evaluate(col["formula"], enriched, all_dicts,
                                agg_cache=agg_cache, sym_index=sym_index,
                                day_history=day_history)
                 enriched[col["name"]] = val

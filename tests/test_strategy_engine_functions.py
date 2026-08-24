@@ -316,6 +316,48 @@ def test_apply_strategies_unfiltered_strategy_keeps_all_rows():
     _, new_data = apply_strategies([s_cg, s_all], headers, data)
     assert len(new_data) == 2
 
+def test_apply_strategies_later_column_can_reference_earlier_own_column():
+    """Regression: a column's formula used to be evaluated against the
+    original row (row_dict) rather than the row enriched with this same
+    strategy's own earlier-computed columns — so "Trigger Price" =
+    [Floor_10D] * 1.01 (both columns of ONE strategy) silently came back
+    None here even though Strategy Builder's own Test Formula (which DOES
+    pre-compute sibling columns — see screens.strategy_builder.
+    StrategyEditor._combined_headers_and_values) showed a real value while
+    editing. Only the row filter honored this before; every column now does."""
+    from services.strategy_engine import apply_strategies
+    strat = {
+        "id": "1", "active": True, "row_filter": [],
+        "columns": [
+            {"name": "Floor_10D", "formula": [tok_col("Low")]},
+            {"name": "Trigger Price", "formula": [tok_col("Floor_10D"), tok_op("*"), tok_num(1.01)]},
+        ],
+    }
+    headers = ["Sector", "Low"]
+    data = [["CG", "100"]]
+    new_headers, new_data = apply_strategies([strat], headers, data)
+    assert new_data[0][new_headers.index("Floor_10D")] == 100.0
+    assert new_data[0][new_headers.index("Trigger Price")] == 101.0
+
+def test_apply_strategies_row_filter_can_still_reference_own_column():
+    """Same fix, from the row-filter side: this already worked (row filter
+    was evaluated against `enriched`) — kept as a regression guard alongside
+    the column-order fix above so the two don't drift apart again."""
+    from services.strategy_engine import apply_strategies
+    strat = {
+        "id": "1", "active": True,
+        "row_filter": [tok_col("Trigger Price"), tok_op(">"), tok_num(100)],
+        "columns": [
+            {"name": "Floor_10D", "formula": [tok_col("Low")]},
+            {"name": "Trigger Price", "formula": [tok_col("Floor_10D"), tok_op("*"), tok_num(1.01)]},
+        ],
+    }
+    headers = ["Sector", "Low"]
+    data = [["CG", "100"], ["CG", "1"]]
+    _, new_data = apply_strategies([strat], headers, data)
+    assert len(new_data) == 1
+    assert float(new_data[0][headers.index("Low")]) == 100.0
+
 def test_row_filter_can_reference_strategy_own_column():
     # Filter on the strategy's computed column (not a raw LMV column).
     # Column "Out" = LTP; keep rows where Out <= 15.
