@@ -53,8 +53,19 @@ class ConfigTabWidget(QWidget):
         self._default_data = [tuple(r) for r in default_data]
         self._reorderable = reorderable
         self._store_key = store_key
-        # Load persisted rows for this tab, falling back to defaults.
-        if store_key:
+        # Load persisted rows for this tab, falling back to defaults. A
+        # reorderable tab is single-column (one column name per row) and is
+        # saved/loaded as a flat list via save_column_order/load_column_order
+        # instead of the generic save_tab/load_tab list-of-row-tuples shape
+        # — see services.config_store.save_column_order's docstring for why
+        # that distinction matters (using save_tab here used to silently
+        # corrupt this tab's data for every reader, including LMV's own
+        # column-order restore).
+        if store_key and self._reorderable:
+            from services import config_store
+            saved = config_store.load_column_order(key=store_key)
+            self._initial_data = [(name,) for name in saved] if saved else self._default_data
+        elif store_key:
             from services import config_store
             self._initial_data = [tuple(r) for r in
                                   config_store.load_tab(store_key, default_data)]
@@ -349,7 +360,12 @@ class ConfigTabWidget(QWidget):
     def _save(self):
         if self._store_key:
             from services import config_store
-            config_store.save_tab(self._store_key, self.get_data())
+            if self._reorderable:
+                config_store.save_column_order(
+                    [row[0] for row in self.get_data() if row], key=self._store_key,
+                )
+            else:
+                config_store.save_tab(self._store_key, self.get_data())
         QMessageBox.information(self, "Saved", "Configuration saved successfully.")
 
     def get_data(self) -> list:
@@ -406,6 +422,22 @@ class ConfigEditorScreen(QWidget):
             ConfigTabWidget(["Column Name"], MAIN_COLUMN_ORDER_DATA, t,
                             reorderable=True, store_key="main_column_order"),
             "Main Column Order"
+        )
+        from services.config_store import INCEPTION_HMV_COLUMN_ORDER
+        # A small starter set (not the full ~150-column Inception
+        # catalogue — see services.inception_columns.column_catalogue) so
+        # this tab isn't blank on first open; same "list just the columns
+        # you care about, in whatever order" partial-list convention as
+        # Main Column Order above (whose own default only names ~20 of
+        # LMV's ~82 columns). Add/remove rows for anything else.
+        inception_column_order_defaults = [
+            ("Sector",), ("Symbol",), ("OPEN",), ("HIGH",), ("LOW",), ("CLOSE",),
+            ("VOL",), ("OPENINT",), ("52WH",), ("52WL",), ("ATH",), ("ATL",),
+        ]
+        tabs.addTab(
+            ConfigTabWidget(["Column Name"], inception_column_order_defaults, t,
+                            reorderable=True, store_key=INCEPTION_HMV_COLUMN_ORDER),
+            "Inception HMV Column Order"
         )
 
         layout.addWidget(tabs, 1)

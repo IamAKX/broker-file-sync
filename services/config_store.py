@@ -16,11 +16,13 @@ settings store, since it's an identity-level preference with no tenant
 dependency.
 
 Tab keys (stable identifiers, independent of UI labels):
-  "sector_stock"      — (Sector, Stock)
-  "script_name"       — (Stock, Initial)
-  "main_column_name"  — (Actual, Renamed)
-  "main_column_order" — (Column Name,)
-  "theme"             — "dark" | "light" (local-cache key only — see above)
+  "sector_stock"                 — (Sector, Stock)
+  "script_name"                  — (Stock, Initial)
+  "main_column_name"             — (Actual, Renamed)
+  "main_column_order"            — flat list of column names (LMV) — see
+                                    save_column_order/load_column_order
+  "inception_hmv_column_order"   — same shape, Inception HMV's own list
+  "theme"                        — "dark" | "light" (local-cache key only — see above)
 """
 
 import json
@@ -30,6 +32,7 @@ _STORE_FILE = os.path.join(os.path.dirname(os.path.dirname(__file__)), "config_d
 
 MAIN_COLUMN_NAME  = "main_column_name"
 MAIN_COLUMN_ORDER = "main_column_order"
+INCEPTION_HMV_COLUMN_ORDER = "inception_hmv_column_order"
 THEME             = "theme"
 LMV_HIGHLIGHT_COLOR = "lmv_highlight_color"
 LMV_COLUMN_HIGHLIGHT_COLORS = "lmv_column_highlight_colors"
@@ -138,15 +141,36 @@ def save_tab(key: str, rows: list):
     save_json(key, [list(r) for r in rows])
 
 
-def save_column_order(ordered_names: list):
-    """Persist the user's column order as a list of column names."""
-    save_json(MAIN_COLUMN_ORDER, list(ordered_names))
+def save_column_order(ordered_names: list, key: str = MAIN_COLUMN_ORDER):
+    """Persist the user's column order as a FLAT list of column names —
+    deliberately not save_tab's list-of-row-tuples shape (screens.
+    config_editor.ConfigTabWidget's reorderable tabs are single-column, so
+    a "row" there and a "name" here are the same thing; using save_tab for
+    them used to save [["OPEN"], ["HIGH"], ...] instead of ["OPEN", "HIGH",
+    ...] — silently breaking every reader of this key, since
+    screens.live_viewer._restore_column_order (the only real consumer)
+    expects and iterates a flat list of strings; a list of 1-element lists
+    made every "in saved" lookup an unhashable-list dict-key crash the next
+    time LMV rendered. ConfigTabWidget now saves/loads reorderable tabs
+    through this pair specifically to keep that shape correct — see its
+    _save/__init__.
+
+    *key* defaults to MAIN_COLUMN_ORDER (LMV's own column order) but takes
+    any settings key — screens.inception_hmv reuses this same pair under
+    INCEPTION_HMV_COLUMN_ORDER for its own, separate reorder list.
+    """
+    save_json(key, list(ordered_names))
 
 
-def load_column_order() -> list:
-    """Return saved column order (list of names), or [] if none saved."""
-    order = load_json(MAIN_COLUMN_ORDER, None)
-    return list(order) if isinstance(order, list) else []
+def load_column_order(key: str = MAIN_COLUMN_ORDER) -> list:
+    """Return saved column order (list of names) for *key*, or [] if none
+    saved — silently drops any non-string entry (defends against the
+    legacy list-of-1-element-lists shape a pre-fix save_tab call could have
+    written under this same key; see save_column_order's docstring)."""
+    order = load_json(key, None)
+    if not isinstance(order, list):
+        return []
+    return [name for name in order if isinstance(name, str)]
 
 
 def save_theme(mode: str):

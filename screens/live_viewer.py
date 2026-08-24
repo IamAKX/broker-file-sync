@@ -2188,9 +2188,17 @@ class LiveViewerWindow(QWidget):
             item = self._table.horizontalHeaderItem(logical)
             if item:
                 name_to_logical[item.text()] = logical
-        # Walk the saved order; skip names not present in the current table
+        # Walk the saved order; skip names not present in the current table.
+        # load_column_order() already filters to strings (see its
+        # docstring), but a non-string entry here would crash this loop
+        # outright (dict.get on an unhashable key) rather than just being
+        # skipped like every other unmatched name — guard directly too,
+        # belt-and-suspenders against any other path that might someday
+        # write this key in a different shape.
         target_visual = 0
         for name in saved:
+            if not isinstance(name, str):
+                continue
             logical = name_to_logical.get(name)
             if logical is None:
                 continue

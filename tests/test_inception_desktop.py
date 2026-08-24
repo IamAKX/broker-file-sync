@@ -1001,6 +1001,39 @@ def test_hmv_screen_includes_formula_builder_columns(qapp, controller, bars_db):
     assert "DT" in screen._headers and "DB" in screen._headers
 
 
+def test_hmv_screen_applies_saved_column_order_from_config_editor(qapp, controller, bars_db, tmp_path, monkeypatch):
+    """Config Editor's "Inception HMV Column Order" tab (services.
+    config_store.INCEPTION_HMV_COLUMN_ORDER) — same idea as LMV's own "Main
+    Column Order" tab, an alternative to dragging one column at a time
+    across a table this wide. Sector/Symbol still win the leftmost two
+    spots regardless (see components.frozen_table_columns) — the saved
+    order applies to everything after that."""
+    from services import config_store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "c.json"))
+    config_store.save_column_order(["CLOSE", "OPEN"], key=config_store.INCEPTION_HMV_COLUMN_ORDER)
+
+    from screens.inception_hmv import InceptionHmvScreen
+    from PySide6.QtCore import QDate
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2026, 1, 1))
+    screen._to_date.setDate(QDate(2026, 8, 18))
+
+    screen._on_load()
+    _run_worker(qapp, screen)
+
+    hdr = screen._table.horizontalHeader()
+    sector_logical = screen._headers.index("Sector")
+    symbol_logical = screen._headers.index("Symbol")
+    close_logical = screen._headers.index("CLOSE")
+    open_logical = screen._headers.index("OPEN")
+    assert hdr.visualIndex(sector_logical) == 0
+    assert hdr.visualIndex(symbol_logical) == 1
+    assert hdr.visualIndex(close_logical) == 2
+    assert hdr.visualIndex(open_logical) == 3
+
+
 def test_hmv_strategy_picker_lets_multiple_strategies_be_selected_and_applied(qapp, controller, monkeypatch, bars_db):
     """Before the picker, HMV silently unioned every persisted-active
     strategy together (services.strategy_engine.apply_strategies) with no

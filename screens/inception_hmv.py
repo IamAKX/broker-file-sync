@@ -48,6 +48,17 @@ Sector + Symbol are frozen at the left edge via components.
 frozen_table_columns (see that module — generalizes screens.live_viewer's
 single-column Scrip Name freeze to two columns) and always stay visible
 regardless of the Columns filter, same convention LMV uses for Scrip Name.
+
+Column order can also be set from Config Editor's "Inception HMV Column
+Order" tab (screens.config_editor, services.config_store.
+INCEPTION_HMV_COLUMN_ORDER) instead of dragging — see
+_restore_saved_column_order, same idea as LMV's own "Main Column Order" tab
++ screens.live_viewer._restore_column_order, under a separate key since
+Inception's column universe is entirely different from LMV's. Unlike LMV,
+a drag here isn't auto-persisted back to that list (LMV's live-drag-persist
+interacts with its own frozen-column pinning in a way that isn't worth
+replicating here too) — the Config Editor tab is the one way to save an
+order, and it's re-applied on every render.
 """
 
 import font_scale
@@ -419,7 +430,41 @@ class InceptionHmvScreen(QWidget):
         for c in range(len(self._headers)):
             self._table.setColumnHidden(c, c not in self._visible_cols)
         self._table.resizeColumnsToContents()
+        # Order restored BEFORE the freeze re-pin below, same sequence
+        # screens.live_viewer uses for its own saved column order + Scrip
+        # Name freeze — so Sector/Symbol always win the leftmost spot
+        # regardless of what the saved order says about them.
+        self._restore_saved_column_order()
         self._freeze.configure(self._headers, _FROZEN_HEADERS, self._freeze_style())
+
+    def _restore_saved_column_order(self):
+        """Reorders columns to match the Config Editor > "Inception HMV
+        Column Order" tab's saved list (services.config_store.
+        INCEPTION_HMV_COLUMN_ORDER) — same mechanism/shape as screens.
+        live_viewer._restore_column_order for LMV's own "Main Column Order"
+        tab, under a separate key since Inception's ~150-column universe is
+        entirely different from LMV's. That tab exists specifically because
+        dragging one column at a time across a table this wide is tedious —
+        it lets you list (search + up/down-reorder, no dragging) just the
+        columns you want pulled to specific positions; anything not listed
+        keeps its current relative position, same partial-list convention
+        LMV's own tab already uses (its default only names ~20 of LMV's ~82
+        columns, not all of them)."""
+        from services import config_store
+        saved = config_store.load_column_order(key=config_store.INCEPTION_HMV_COLUMN_ORDER)
+        if not saved:
+            return
+        hdr = self._table.horizontalHeader()
+        name_to_logical = {name: i for i, name in enumerate(self._headers)}
+        target_visual = 0
+        for name in saved:
+            logical = name_to_logical.get(name)
+            if logical is None:
+                continue
+            current_visual = hdr.visualIndex(logical)
+            if current_visual != target_visual:
+                hdr.moveSection(current_visual, target_visual)
+            target_visual += 1
 
     def _show_col_filter(self):
         if not self._headers:
