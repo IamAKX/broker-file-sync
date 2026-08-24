@@ -72,7 +72,6 @@ from PySide6.QtCore import Qt, QDate, QThread, Signal
 
 from api.exceptions import ApiError, NetworkError
 from components.column_filter_popup import ColumnFilterPopup
-from components.error_popup import show_api_error
 from components.frozen_table_columns import FrozenColumns
 from screens.inception_view_by_date import _display_symbol
 from services import (
@@ -371,14 +370,20 @@ class InceptionHmvScreen(QWidget):
         popup.show()
 
     def _on_strategies_applied(self, updated: list):
-        t = self._controller.theme
+        # Deliberately NOT persisted via inception_strategy_store.
+        # save_strategy() — "active" here is this screen's own SESSION-local
+        # "applied to this table" flag, not Strategy Builder's persisted
+        # "active" field, even though they're the same dict key. Persisting
+        # every strategy the picker happened to show (not just the ones
+        # actually toggled) would silently deactivate every other, unchecked
+        # strategy in Strategy Builder too — see screens.live_viewer's
+        # identical fix (_on_strategies_applied) for the full "6 strategies
+        # applied, then a 7th activated, and the 6 disappeared" story this
+        # traces to. Persisting the real Active flag is Strategy Builder's
+        # own toggle's job exclusively (_InceptionStrategyEditor's save, or
+        # the strategy card's toggle on InceptionStrategyBuilderScreen).
         updated_by_id = {s["id"]: s for s in updated}
         self._strategies = [updated_by_id.get(s["id"], s) for s in self._strategies]
-        for s in updated:
-            try:
-                inception_strategy_store.save_strategy(s)
-            except (ApiError, NetworkError) as exc:
-                show_api_error(t, self, exc)
         self._recompute_display()
 
     def _update_strat_btn_label(self):
@@ -394,7 +399,12 @@ class InceptionHmvScreen(QWidget):
         if not self._raw_headers:
             self._update_strat_btn_label()
             return
-        headers, data = apply_strategies(self._strategies, self._raw_headers, self._raw_data)
+        # include_streak_columns=False — Inception has no day_history/
+        # historic-value support wired up (see inception_strategy_builder.
+        # py's module docstring), so the "Days True"/"Since" pair would
+        # always read "0"/blank here — dead weight, not a useful feature.
+        headers, data = apply_strategies(self._strategies, self._raw_headers, self._raw_data,
+                                          include_streak_columns=False)
         # Keep any strategy-appended column (beyond the raw/base set)
         # visible by default, without undoing a column-visibility choice the
         # user already made for existing columns (same top-up-not-reset rule

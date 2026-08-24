@@ -879,8 +879,15 @@ def test_view_by_date_applies_active_strategies_locally(qapp, controller, monkey
 def test_view_by_date_strategy_picker_lets_multiple_strategies_be_selected(qapp, controller, monkeypatch, bars_db):
     """The picker (screens.live_viewer.StrategyPickerPopup, reused as-is)
     replaces the old "no way to pick which strategies apply" gap — Apply
-    persists the chosen subset and updates the button label, same shape
-    LMV's own picker uses."""
+    updates this screen's own session state and the button label, same
+    shape LMV's own picker uses.
+
+    Deliberately asserts save_strategy is NEVER called here — see screens.
+    live_viewer._on_strategies_applied's docstring for the regression this
+    guards against: persisting every strategy the picker showed (not just
+    the ones toggled) used to silently deactivate every other, unchecked
+    strategy in Strategy Builder too ("applied 6 strategies, activated a
+    7th, and the 6 disappeared")."""
     from screens.inception_view_by_date import InceptionViewByDateScreen
     from services import inception_strategy_store
 
@@ -898,7 +905,8 @@ def test_view_by_date_strategy_picker_lets_multiple_strategies_be_selected(qapp,
 
     updated = [dict(s1, active=True) for s1 in strategies]  # both picked on
     screen._on_strategies_applied(updated)
-    assert len(saved) == 2 and all(s["active"] for s in saved)
+    assert saved == []
+    assert all(s["active"] for s in screen._strategies)
     assert screen._strat_btn.text() == "⚡  Strategies  2/2"
 
 
@@ -979,6 +987,31 @@ def test_hmv_screen_applies_active_strategies_locally(qapp, controller, monkeypa
     _run_worker(qapp, screen)
     assert "Day Range" in screen._headers
     assert screen._data[0][screen._headers.index("Day Range")] == 10.0
+
+
+def test_hmv_screen_does_not_add_row_filter_streak_columns(qapp, controller, monkeypatch, bars_db):
+    """services.strategy_engine.apply_strategies' "Days True"/"Since"
+    streak columns (for a strategy with a row filter) are LMV-only —
+    Inception has no day_history/historic-value support wired up, so this
+    screen calls apply_strategies with include_streak_columns=False. A
+    strategy WITH a row filter here must NOT gain those two extra columns."""
+    from screens.inception_hmv import InceptionHmvScreen
+    from services import inception_strategy_store
+    from PySide6.QtCore import QDate
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2026, 1, 1))
+    screen._to_date.setDate(QDate(2026, 8, 18))
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "Range", "active": True,
+        "row_filter": [{"type": "col", "value": "CLOSE"}, {"type": "op", "value": ">"}, {"type": "num", "value": "0"}],
+        "columns": [],
+    }])
+
+    screen._on_load()
+    _run_worker(qapp, screen)
+    assert not any("Days True" in h or "Since" in h for h in screen._headers)
     assert "Sector" in screen._headers   # see services.inception_sector
     assert screen._strat_btn.text() == "⚡  Strategies  1/1"
 
@@ -1068,10 +1101,50 @@ def test_hmv_strategy_picker_lets_multiple_strategies_be_selected_and_applied(qa
 
     # Toggle it off via the picker's apply path (no re-Load needed) — the
     # column should disappear from the re-derived display immediately.
+    # NOT persisted server-side (see this screen's own _on_strategies_
+    # applied docstring) — session-local only.
     screen._on_strategies_applied([dict(strategies[0], active=False)])
-    assert saved and saved[-1]["active"] is False
+    assert saved == []
     assert "Day Range" not in screen._headers
     assert screen._strat_btn.text() == "⚡  Strategies  0/1"
+
+
+def test_hmv_strategies_applied_never_deactivates_unchecked_ones_server_side(qapp, controller, monkeypatch, bars_db):
+    """End-to-end regression for the "6 strategies disappear when a 7th is
+    activated" bug — applying a subset via the picker must not silently
+    persist active=False for OTHER strategies that were offered but not
+    part of this Apply. See services.strategy_engine... no, see screens.
+    live_viewer._on_strategies_applied's docstring for the full story;
+    inception_hmv.InceptionHmvScreen copied the same (buggy, now fixed)
+    pattern this session."""
+    from screens.inception_hmv import InceptionHmvScreen
+    from services import inception_strategy_store as store
+    from api import inception_api
+
+    saved_server = {}
+
+    def fake_upsert(strategy_id, name, active, category, columns, row_filter):
+        saved_server[strategy_id] = {
+            "id": strategy_id, "name": name, "active": active,
+            "category": category, "columns": columns, "row_filter": row_filter,
+        }
+        return saved_server[strategy_id]
+
+    monkeypatch.setattr(inception_api, "upsert_strategy", fake_upsert)
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": list(saved_server.values())})
+
+    for i in range(3):
+        store.save_strategy({"id": f"s{i}", "name": f"S{i}", "active": True, "category": "Daily", "columns": [], "row_filter": []})
+
+    screen = InceptionHmvScreen(controller)
+    screen._strategies = store.load_all()
+
+    # Apply s0/s1, leaving s2 offered-but-unchecked.
+    updated = [dict(s, active=(s["id"] != "s2")) for s in screen._strategies]
+    screen._on_strategies_applied(updated)
+
+    assert saved_server["s2"]["active"] is True   # never touched server-side
+    assert any(s["id"] == "s2" and s.get("active") for s in store.load_all())
 
 
 # ── screens: strategy builder ────────────────────────────────────────────

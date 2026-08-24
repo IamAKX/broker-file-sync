@@ -32,6 +32,13 @@ _FILE_SETTLE_S = 0.2    # brief wait so disk writes finish before re-reading
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
 
+# Every cell in the table gets this same alignment — computed once here
+# rather than re-evaluating the Qt.AlignmentFlag `|` operator (surprisingly
+# not free: Python enum flag combination goes through several method calls
+# each time) once per cell, every render. Profiling a 220-row x 85-column
+# rebuild showed this actually mattering at that scale.
+_CELL_ALIGNMENT = Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft
+
 
 def _svg_icon(filename: str, color: str) -> QIcon:
     """Load an assets/icons/*.svg file, recolored to match the current theme
@@ -929,6 +936,7 @@ class LiveViewerWindow(QWidget):
         self._row_key_index: int = 0
         self._dot_state          = True
         self._visible_cols: set  = set()   # populated after first load
+        self._sized_col_names: set = set()  # column names already auto-sized — see _populate_table
         self._strategies: list   = []      # injected by DataImportScreen
         self._selected_category: str = "All"
         self._strat_col_defs: list = []    # set each render — see _populate_table
@@ -1734,6 +1742,14 @@ class LiveViewerWindow(QWidget):
         t = self._theme
         norm_bg  = QColor(t.get("card_bg")      if t else "#1c2128")
         norm_txt = QColor(t.get("text_primary")  if t else "#e6edf3")
+        # Built once per render pass and reused for every cell's default
+        # (non-highlighted, non-conditionally-formatted) style, rather than
+        # a fresh QBrush(norm_bg)/QBrush(norm_txt) per cell — profiling a
+        # 220-row x 85-column rebuild showed that allocation adding up at
+        # this scale (see _apply_cell_style, called once per cell on every
+        # render, including every ordinary live tick's fast in-place path).
+        norm_bg_brush  = QBrush(norm_bg)
+        norm_txt_brush = QBrush(norm_txt)
         win_bg   = t.get("background")           if t else "#0d1117"
         hdr_bg   = t.get("button_bg")            if t else "#21262d"
         strat_hdr = t.get("accent") + "22"       if t else "#39d35322"
@@ -1788,7 +1804,7 @@ class LiveViewerWindow(QWidget):
         if fast:
             self._update_cells_in_place(
                 disp_data, disp_headers, all_dicts, strat_col_defs,
-                base_col_count, norm_bg, norm_txt, strat_hdr,
+                base_col_count, norm_bg_brush, norm_txt_brush, strat_hdr,
                 highlight, agg_cache, sym_index,
             )
             self._update_strat_btn_label()
@@ -1806,51 +1822,87 @@ class LiveViewerWindow(QWidget):
         )
         self._table.setStyleSheet(table_style)
 
-        self._table.setColumnCount(len(disp_headers))
-        self._table.setHorizontalHeaderLabels(disp_headers)
-        self._table.setRowCount(len(disp_data))
+        # setItem() below runs 200+ rows x 80+ columns worth of QTableWidgetItem
+        # creation whenever the header set changes (any strategy toggle,
+        # category change, or column added/removed) — the "fast path" above
+        # can't be used since existing items no longer line up 1:1 with the
+        # new column layout. Left un-batched, every individual setItem/
+        # setColumnHidden call can trigger its own layout/repaint pass on a
+        # widget this wide, which is exactly the "LMV gets slow when I apply
+        # a strategy" report this traces to. setUpdatesEnabled(False) defers
+        # all of that to one repaint when re-enabled — standard Qt batching
+        # for exactly this "populate a widget from scratch" shape, and safe
+        # here since nothing in this block reads back anything the paint
+        # event itself would have produced.
+        self._table.setUpdatesEnabled(False)
+        try:
+            self._table.setColumnCount(len(disp_headers))
+            self._table.setHorizontalHeaderLabels(disp_headers)
+            self._table.setRowCount(len(disp_data))
 
-        bold_font   = font_scale.font(font_scale.SMALL, True)
-        scrip_col   = disp_headers.index("Scrip Name") if "Scrip Name" in disp_headers else -1
-        for r, row in enumerate(disp_data):
-            row_dict = all_dicts[r]
-            row_colors = get_row_fmt_colors(
-                strat_col_defs, row, base_col_count, row_dict, all_dicts,
-                agg_cache, sym_index, self._day_history)
-            for c, val in enumerate(row):
-                item = QTableWidgetItem(self._fmt_cell(val))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
-                if c == scrip_col:
-                    item.setFont(bold_font)
-                self._apply_cell_style(
-                    item, c, disp_headers, row_colors, strat_col_defs,
-                    base_col_count, norm_bg, norm_txt, strat_hdr,
-                )
-                self._table.setItem(r, c, item)
+            bold_font   = font_scale.font(font_scale.SMALL, True)
+            scrip_col   = disp_headers.index("Scrip Name") if "Scrip Name" in disp_headers else -1
+            for r, row in enumerate(disp_data):
+                row_dict = all_dicts[r]
+                row_colors = get_row_fmt_colors(
+                    strat_col_defs, row, base_col_count, row_dict, all_dicts,
+                    agg_cache, sym_index, self._day_history)
+                for c, val in enumerate(row):
+                    item = QTableWidgetItem(self._fmt_cell(val))
+                    item.setTextAlignment(_CELL_ALIGNMENT)
+                    if c == scrip_col:
+                        item.setFont(bold_font)
+                    self._apply_cell_style(
+                        item, c, disp_headers, row_colors, strat_col_defs,
+                        base_col_count, norm_bg_brush, norm_txt_brush, strat_hdr,
+                    )
+                    self._table.setItem(r, c, item)
 
-        # Ensure visible_cols covers strategy columns too
-        if len(disp_headers) > len(self._headers):
-            for c in range(len(self._headers), len(disp_headers)):
-                self._visible_cols.add(c)
+            # Ensure visible_cols covers strategy columns too
+            if len(disp_headers) > len(self._headers):
+                for c in range(len(self._headers), len(disp_headers)):
+                    self._visible_cols.add(c)
 
-        # Apply column visibility
-        for c in range(len(disp_headers)):
-            self._table.setColumnHidden(c, c not in self._visible_cols)
+            # Apply column visibility
+            for c in range(len(disp_headers)):
+                self._table.setColumnHidden(c, c not in self._visible_cols)
 
-        # Auto-size columns only the first time we see this header layout, so
-        # user-adjusted widths survive theme/strategy/category re-renders.
-        if getattr(self, "_sized_headers", None) != tuple(disp_headers):
-            self._table.resizeColumnsToContents()
-            self._sized_headers = tuple(disp_headers)
+            # Auto-size only NEWLY-seen columns, not resizeColumnsToContents()
+            # for the whole table on every render — that re-measures EVERY
+            # column (text width of every cell in it) even when only a
+            # strategy toggle added/removed its OWN one or two columns, with
+            # the ~80 base sheet columns unchanged. Profiling a realistic
+            # 220-row x 85-column rebuild showed resizeColumnsToContents()
+            # alone costing as much as populating every cell in the table
+            # combined — exactly the "LMV gets slow when I apply a
+            # strategy" report this traces to, since applying/toggling ANY
+            # strategy changes disp_headers' shape and so re-triggered a
+            # full-table remeasure every time. self._sized_col_names is a
+            # persistent set (by column NAME, across the window's whole
+            # life, not reset per-render) — a base column is measured once,
+            # ever; a strategy column is measured once, the first render it
+            # appears in, and skipped on every later render even if the
+            # strategy is toggled off and back on (same "user-adjusted
+            # widths survive re-renders" intent the old per-render-tuple
+            # check aimed for, just without re-measuring untouched columns
+            # to get there).
+            new_names = [h for h in disp_headers if h not in self._sized_col_names]
+            if new_names:
+                name_to_idx = {h: i for i, h in enumerate(disp_headers)}
+                for name in new_names:
+                    self._table.resizeColumnToContents(name_to_idx[name])
+                self._sized_col_names.update(new_names)
 
-        self._render_sig = sig
-        self._restore_column_order()
-        frozen_style = (
-            f"QTableView {{ background: {norm_bg.name()}; color: {norm_txt.name()}; "
-            f"border-right: 2px solid palette(mid); }}"
-            f"QTableView QHeaderView::section {{ background: {hdr_bg}; color: {norm_txt.name()}; }}"
-        )
-        self._configure_frozen_column(scrip_col, frozen_style)
+            self._render_sig = sig
+            self._restore_column_order()
+            frozen_style = (
+                f"QTableView {{ background: {norm_bg.name()}; color: {norm_txt.name()}; "
+                f"border-right: 2px solid palette(mid); }}"
+                f"QTableView QHeaderView::section {{ background: {hdr_bg}; color: {norm_txt.name()}; }}"
+            )
+            self._configure_frozen_column(scrip_col, frozen_style)
+        finally:
+            self._table.setUpdatesEnabled(True)
         self._update_strat_btn_label()
 
     def _on_section_moved(self, logical: int, old_visual: int, new_visual: int):
@@ -2209,16 +2261,23 @@ class LiveViewerWindow(QWidget):
 
     def _apply_cell_style(self, item, c, disp_headers, row_colors,
                           strat_col_defs, base_col_count,
-                          norm_bg, norm_txt, strat_hdr):
+                          norm_bg_brush, norm_txt_brush, strat_hdr):
         """Set foreground/background for one cell, incl. strategy formatting.
 
         row_colors ({target_column_name: color}, from
         services.strategy_engine.get_row_fmt_colors) is looked up by this
         cell's own column name — a conditional-format rule can paint ANY
         column, not just the strategy column that owns it (see
-        services.strategy_store's fmt_rule "target_column")."""
-        item.setForeground(QBrush(norm_txt))
-        item.setBackground(QBrush(norm_bg))
+        services.strategy_store's fmt_rule "target_column").
+
+        *norm_bg_brush*/*norm_txt_brush* are pre-built QBrush objects (one
+        pair for the whole render pass — see _populate_table), reused as-is
+        for the common case rather than constructing a fresh QBrush per
+        cell — this runs once per cell on EVERY render, including the fast
+        in-place path every live tick takes, so the allocation adds up
+        across a wide sheet."""
+        item.setForeground(norm_txt_brush)
+        item.setBackground(norm_bg_brush)
         header = disp_headers[c] if c < len(disp_headers) else None
         cell_color = row_colors.get(header) if header is not None else None
         if cell_color:
@@ -2233,7 +2292,7 @@ class LiveViewerWindow(QWidget):
 
     def _update_cells_in_place(self, disp_data, disp_headers, all_dicts,
                                strat_col_defs, base_col_count,
-                               norm_bg, norm_txt, strat_hdr,
+                               norm_bg_brush, norm_txt_brush, strat_hdr,
                                highlight, agg_cache=None, sym_index=None):
         """
         Update existing QTableWidgetItems in place (no recreation).
@@ -2255,7 +2314,7 @@ class LiveViewerWindow(QWidget):
                 item = self._table.item(r, c)
                 if item is None:
                     item = QTableWidgetItem()
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+                    item.setTextAlignment(_CELL_ALIGNMENT)
                     self._table.setItem(r, c, item)
                     old_text = None
                 else:
@@ -2267,7 +2326,7 @@ class LiveViewerWindow(QWidget):
                 # restored colour reflects current strategy formatting.
                 self._apply_cell_style(
                     item, c, disp_headers, row_colors, strat_col_defs,
-                    base_col_count, norm_bg, norm_txt, strat_hdr,
+                    base_col_count, norm_bg_brush, norm_txt_brush, strat_hdr,
                 )
 
                 if not highlight:
@@ -2389,9 +2448,24 @@ class LiveViewerWindow(QWidget):
         # category filter are not overwritten.
         updated_by_id = {s["id"]: s for s in updated}
         self._strategies = [updated_by_id.get(s["id"], s) for s in self._strategies]
-        from services import strategy_store as store
-        for s in updated:
-            store.save_strategy(s)
+        # Deliberately NOT persisted via store.save_strategy() — "active" here
+        # is this window's own SESSION-local "applied to this table" flag
+        # (see merge_session_active's docstring: LMV forces every strategy
+        # session-inactive on open regardless of what was last saved), not
+        # Strategy Builder's persisted "active" field, even though they're
+        # the same dict key. A previous version DID call save_strategy() for
+        # every strategy in *updated* here — which is every strategy that was
+        # visible in the picker at Apply time, not just the ones the user
+        # actually changed — so applying ANY subset silently persisted
+        # active=False for every other, unchecked-but-otherwise-active
+        # strategy in that same category. Strategy Builder's own list (the
+        # SAME "active" field) would then show them as deactivated, and the
+        # picker would stop offering them at all on its next open (see
+        # merge_session_active's own `if s.get("active")` filter on the
+        # freshly-reloaded list) — exactly the "I applied 6 strategies, then
+        # activated a 7th, and the 6 just disappeared" report this traces to.
+        # Persisting a strategy's real Active flag is Strategy Builder's own
+        # toggle's job (screens.strategy_builder._on_toggled) exclusively.
         # Don't reset _visible_cols here — that would undo any column filter
         # the user has applied. _populate_table already extends _visible_cols
         # to cover any new strategy columns while leaving the rest untouched.

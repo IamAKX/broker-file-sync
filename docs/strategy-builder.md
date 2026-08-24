@@ -125,11 +125,12 @@ way.
 
 ## Historic Value (Point Lookup)
 
-`VALUE_DAYS_AGO`, `VALUE_ON_DATE`, `VALUE_AT_MAX_DAYS`, and
-`VALUE_AT_MIN_DAYS` are a different kind of historic function from the
-aggregates above — a **single historic value**, not a Min/Max/Average over a
-window. They live in their own **Historic Value** section in the Expression
-Editor's left nav (not folded into Functions), right next to it:
+`VALUE_DAYS_AGO`, `VALUE_ON_DATE`, `VALUE_AT_MAX_DAYS`, `VALUE_AT_MIN_DAYS`,
+`VALUE_AT_MAX_DATES`, and `VALUE_AT_MIN_DATES` are a different kind of
+historic function from the aggregates above — a **single historic value**,
+not a Min/Max/Average over a window. They live in their own **Historic
+Value** section in the Expression Editor's left nav (not folded into
+Functions), right next to it:
 
 ```
 VALUE_DAYS_AGO([High], 2)          — this stock's High exactly 2 trading days
@@ -139,27 +140,71 @@ VALUE_AT_MAX_DAYS([High], [CWTO], 5) — High on whichever of the last 5
                                        trading days [CWTO] was at its highest
 VALUE_AT_MIN_DAYS([Low], [CWTO], 5)  — same, for whichever day [CWTO] was at
                                        its lowest
+VALUE_AT_MAX_DATES([High], [CWTO], 2026-08-10, 2026-08-14)
+                                    — same as VALUE_AT_MAX_DAYS, but over an
+                                       explicit calendar range instead of
+                                       "the last N trading days" — for a
+                                       window that doesn't line up to a
+                                       trading-day count from today, e.g. one
+                                       specific calendar week
+VALUE_AT_MIN_DATES([Low], [CWTO], 2026-08-10, 2026-08-14)
+                                    — same, for whichever day in the range
+                                       [CWTO] was at its lowest
 ```
 
 Clicking any of these opens a picker — pick a column, then either a "days
 back" number, a calendar date (dotted where saved snapshot data actually
-exists), or (for `VALUE_AT_MAX_DAYS`/`VALUE_AT_MIN_DAYS`) a second **driver**
-column plus a day count — and the complete call is inserted for you, ready
-to use, rather than typing it by hand.
+exists), or (for `VALUE_AT_MAX_DAYS`/`VALUE_AT_MIN_DAYS`/
+`VALUE_AT_MAX_DATES`/`VALUE_AT_MIN_DATES`) a second **driver** column plus a
+day count or a From/To date range — and the complete call is inserted for
+you, ready to use, rather than typing it by hand.
 
-`VALUE_AT_MAX_DAYS`/`VALUE_AT_MIN_DAYS` take two columns: the first is what
-gets returned, the second (the driver) is what decides which of the last N
-trading days wins. Either can be a raw sheet column or another of this
-strategy's own columns (any custom formula), same as `AVG_DAYS`/etc. above —
-both column pickers offer the full Fields list, not a restricted set.
+`VALUE_AT_MAX_DAYS`/`VALUE_AT_MIN_DAYS`/`VALUE_AT_MAX_DATES`/
+`VALUE_AT_MIN_DATES` take two columns: the first is what gets returned, the
+second (the driver) is what decides which day in the window wins. Either
+can be a raw sheet column or another of this strategy's own columns (any
+custom formula), same as `AVG_DAYS`/etc. above — both column pickers offer
+the full Fields list, not a restricted set.
+
+The `_DATES` pair's date range is **static** — typed into the formula, not
+rolling — so "last week" means re-opening the picker (or editing the dates
+by hand) to point at a new range each week, unlike `_DAYS`' N-trading-days
+window, which is always relative to today.
 
 Same non-live refresh cadence as Historic (N days) above (load/toggle/
 category-change/**↻ N-Day Data**), same Compile & Test placeholder caveat,
-and the same click-a-cell popup in Live Master View (for
-`VALUE_AT_MAX_DAYS`/`VALUE_AT_MIN_DAYS`, the popup drills into the *value*
-column's own history, not the driver's) — it's the identical underlying
-mechanism, just resolving to one specific day's value instead of an
-aggregate over several.
+and the same click-a-cell popup in Live Master View (for any of these four,
+the popup drills into the *value* column's own history, not the driver's)
+— it's the identical underlying mechanism, just resolving to one specific
+day's value instead of an aggregate over several.
+
+---
+
+## Row-Filter Streak ("Days True" / "Since")
+
+Any strategy that has a **Row Filter** automatically gets two extra
+read-only columns in Live Master View — nothing to build, no formula to
+write:
+
+| Column | Meaning |
+|--------|---------|
+| **\<Strategy Name> — Days True** | How many of the most recent consecutive historic days the Row Filter has evaluated true, counting back from the last saved day. |
+| **\<Strategy Name> — Since** | The date that run started (the oldest day of the current streak). |
+
+A strategy with no Row Filter (matches every row) doesn't get these columns
+— "always true" has no streak worth tracking.
+
+The lookback window is 60 trading days. If the Row Filter has been true for
+the *entire* window, there's no way to tell from that fetch alone whether it
+was already true further back — **Days True** shows `≥60` instead of a bare
+number in that case, and **Since** is blank (the real start date is
+unknown). A row that doesn't currently pass this strategy's filter (shown
+because it matched a *different* active strategy) shows blank for both,
+same as that strategy's own computed columns do.
+
+Same non-live refresh cadence as Historic (N days)/Historic Value above
+(load/toggle/category-change/**↻ N-Day Data**) — these aren't recomputed on
+every live tick.
 
 ---
 

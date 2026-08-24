@@ -749,6 +749,83 @@ def test_strategies_applied_merges_not_replaces(qapp, tmp_path, monkeypatch):
     assert by_id["1"]["active"] is True
 
 
+def test_strategies_applied_does_not_persist_active_flag(qapp, tmp_path, monkeypatch):
+    """Regression: applying a subset via the Strategies picker used to call
+    store.save_strategy() for EVERY strategy the picker had shown (not just
+    the ones the user actually toggled) — persisting active=False for every
+    other, unchecked-but-otherwise-active strategy in that same category.
+    That's a real bug report: "I applied 6 strategies, then activated a 7th,
+    and the existing 6 just disappeared" — because their real (Strategy
+    Builder) active flag got silently cleared server-side the moment ANY
+    picker subset was applied, and merge_session_active's own `if
+    s.get("active")` filter then drops them from every future picker open
+    until someone manually reactivates them in Strategy Builder.
+
+    "active" in the picker is this window's own SESSION-local "applied to
+    this table" flag (see merge_session_active's docstring — LMV forces
+    every strategy session-inactive on open regardless of what was last
+    saved) — it must never be written back to the server from here; only
+    Strategy Builder's own toggle (_on_toggled) may do that.
+    """
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    saved_ids = []
+    monkeypatch.setattr(store, "save_strategy", lambda s: saved_ids.append(s["id"]))
+
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    lmv.set_strategies([
+        {"id": "1", "name": "A", "active": True,  "category": "Daily", "columns": []},
+        {"id": "2", "name": "B", "active": False, "category": "Daily", "columns": []},
+    ])
+    # Apply toggles A on, leaves B off — same shape a real StrategyPickerPopup emits.
+    lmv._on_strategies_applied([
+        {"id": "1", "name": "A", "active": True,  "category": "Daily", "columns": []},
+        {"id": "2", "name": "B", "active": False, "category": "Daily", "columns": []},
+    ])
+    assert saved_ids == []
+
+
+def test_strategies_applied_survives_reopen_without_dropping_unchecked_ones(qapp, tmp_path, monkeypatch):
+    """End-to-end version of the same regression, through the real
+    strategy_store (server stubbed via monkeypatch) rather than just
+    asserting save_strategy wasn't called: applying [s0..s5] must not
+    silently deactivate s6 (offered in the picker, active in Strategy
+    Builder, but not part of this Apply) server-side — it must still show
+    up, active, the next time strategies are reloaded from the store."""
+    from services import strategy_store as store
+    from api import strategies_api
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+
+    saved_server = {}
+
+    def fake_upsert(strategy_id, name, active, category, columns, row_filter):
+        saved_server[strategy_id] = {
+            "id": strategy_id, "name": name, "active": active,
+            "category": category, "columns": columns, "row_filter": row_filter,
+        }
+        return saved_server[strategy_id]
+
+    monkeypatch.setattr(strategies_api, "upsert_strategy", fake_upsert)
+    monkeypatch.setattr(strategies_api, "list_strategies", lambda: {"strategies": list(saved_server.values())})
+
+    for i in range(7):
+        store.save_strategy({"id": f"s{i}", "name": f"S{i}", "active": True, "category": "Daily", "columns": [], "row_filter": []})
+
+    from screens.live_viewer import LiveViewerWindow
+    lmv = LiveViewerWindow("", "", "", [])
+    lmv.set_strategies([dict(s, active=False) for s in store.load_all() if s.get("active")])
+
+    # Apply s0..s5, leaving s6 offered-but-unchecked (same as opening the
+    # real picker with s6 visible in the "Daily" category but not ticked).
+    updated = [dict(s, active=(s["id"] != "s6")) for s in lmv._strategies]
+    lmv._on_strategies_applied(updated)
+
+    assert saved_server["s6"]["active"] is True   # never touched server-side
+    reloaded = store.load_all()
+    assert any(s["id"] == "s6" and s.get("active") for s in reloaded)
+
+
 def test_filtered_strategies_by_category(qapp, tmp_path, monkeypatch):
     from services import strategy_store as store
     monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))

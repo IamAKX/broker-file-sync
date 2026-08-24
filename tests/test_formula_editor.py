@@ -440,11 +440,15 @@ def test_point_lookup_tokens_round_trip_through_dialog(qapp):
 def test_point_lookup_catalogue_has_both_functions():
     from screens.formula_editor import POINT_LOOKUP_CATALOGUE
     names = {f["name"] for f in POINT_LOOKUP_CATALOGUE}
-    assert names == {"VALUE_DAYS_AGO", "VALUE_ON_DATE", "VALUE_AT_MAX_DAYS", "VALUE_AT_MIN_DAYS"}
+    assert names == {
+        "VALUE_DAYS_AGO", "VALUE_ON_DATE", "VALUE_AT_MAX_DAYS", "VALUE_AT_MIN_DAYS",
+        "VALUE_AT_MAX_DATES", "VALUE_AT_MIN_DATES",
+    }
     pickers = {f["name"]: f["token"]["needs_point_picker"] for f in POINT_LOOKUP_CATALOGUE}
     assert pickers == {
         "VALUE_DAYS_AGO": "days_ago", "VALUE_ON_DATE": "on_date",
         "VALUE_AT_MAX_DAYS": "extreme_days", "VALUE_AT_MIN_DAYS": "extreme_days",
+        "VALUE_AT_MAX_DATES": "extreme_dates", "VALUE_AT_MIN_DATES": "extreme_dates",
     }
 
 
@@ -458,6 +462,8 @@ def test_historic_value_nav_section_lists_point_lookup_functions(qapp):
     assert "VALUE_ON_DATE" in items
     assert "VALUE_AT_MAX_DAYS" in items
     assert "VALUE_AT_MIN_DAYS" in items
+    assert "VALUE_AT_MAX_DATES" in items
+    assert "VALUE_AT_MIN_DATES" in items
 
 
 # ── VALUE_AT_MAX_DAYS(column, driver_column, days) / VALUE_AT_MIN_DAYS(...) ──
@@ -566,6 +572,121 @@ def test_extreme_days_picker_cancelled_driver_step_inserts_nothing(qapp):
         mod._ColumnPickerDialog = orig_col
 
     assert dlg._preview_edit.toPlainText() == ""
+
+
+# ── VALUE_AT_MAX_DATES(column, driver_column, date_from, date_to) / ────────
+# ── VALUE_AT_MIN_DATES(...) ──────────────────────────────────────────────
+
+def test_parse_value_at_max_dates_captures_both_columns_and_range_bracket_form():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_AT_MAX_DATES([High], [CWTO], 2026-08-10, 2026-08-14)")
+    assert tokens == [{"type": "func", "value": "VALUE_AT_MAX_DATES(",
+                       "col_arg": "High", "driver_col_arg": "CWTO",
+                       "date_from_arg": "2026-08-10", "date_to_arg": "2026-08-14"}]
+
+
+def test_parse_value_at_min_dates_captures_both_columns_and_range_bare_word_form():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_AT_MIN_DATES(Low, CWTO, 2026-08-10, 2026-08-14)")
+    assert tokens == [{"type": "func", "value": "VALUE_AT_MIN_DATES(",
+                       "col_arg": "Low", "driver_col_arg": "CWTO",
+                       "date_from_arg": "2026-08-10", "date_to_arg": "2026-08-14"}]
+
+
+def test_parse_value_at_max_dates_without_driver_falls_back_to_bare_func_token():
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_AT_MAX_DATES([High])")
+    assert tokens[0] == {"type": "func", "value": "VALUE_AT_MAX_DATES("}
+    assert {"type": "col", "value": "High"} in tokens
+
+
+def test_value_at_max_dates_token_renders_back_to_four_arg_text():
+    from screens.formula_editor import _tokens_to_text
+    tokens = [{"type": "func", "value": "VALUE_AT_MAX_DATES(", "col_arg": "High",
+               "driver_col_arg": "CWTO", "date_from_arg": "2026-08-10", "date_to_arg": "2026-08-14"}]
+    assert _tokens_to_text(tokens) == "VALUE_AT_MAX_DATES([High], [CWTO], 2026-08-10, 2026-08-14)"
+
+
+def test_value_at_extreme_dates_tokens_round_trip_through_dialog(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    original = [{"type": "func", "value": "VALUE_AT_MAX_DATES(", "col_arg": "High",
+                "driver_col_arg": "CWTO", "date_from_arg": "2026-08-10", "date_to_arg": "2026-08-14"}]
+    dlg = ExpressionEditorDialog(original, ["High", "CWTO"], [], {"High": 100.0, "CWTO": 0.01})
+    assert dlg.get_tokens() == original
+
+
+def test_extreme_dates_picker_inserts_full_call_text(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QDialog
+    import datetime
+
+    dlg = ExpressionEditorDialog([], ["High", "CWTO"], ["MyCol"], {"High": 100.0})
+
+    picks = iter(["High", "CWTO"])
+
+    class _FakeColDlg:
+        def __init__(self, *a, **k): pass
+        def setWindowTitle(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_column(self): return next(picks)
+
+    class _FakeRangeDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_range(self): return (datetime.date(2026, 8, 10), datetime.date(2026, 8, 14))
+
+    import screens.formula_editor as mod
+    orig_col, orig_range = mod._ColumnPickerDialog, mod._DateRangePickerDialog
+    mod._ColumnPickerDialog = _FakeColDlg
+    mod._DateRangePickerDialog = _FakeRangeDlg
+    try:
+        dlg._open_point_lookup_picker("VALUE_AT_MAX_DATES", "extreme_dates")
+    finally:
+        mod._ColumnPickerDialog = orig_col
+        mod._DateRangePickerDialog = orig_range
+
+    assert dlg._preview_edit.toPlainText() == "VALUE_AT_MAX_DATES([High], [CWTO], 2026-08-10, 2026-08-14)"
+
+
+def test_extreme_dates_picker_cancelled_range_step_inserts_nothing(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QDialog
+
+    dlg = ExpressionEditorDialog([], ["High", "CWTO"], [], {"High": 100.0})
+
+    class _FakeColDlg:
+        def __init__(self, *a, **k): pass
+        def setWindowTitle(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_column(self): return "High"
+
+    class _FakeRangeDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Rejected
+
+    import screens.formula_editor as mod
+    orig_col, orig_range = mod._ColumnPickerDialog, mod._DateRangePickerDialog
+    mod._ColumnPickerDialog = _FakeColDlg
+    mod._DateRangePickerDialog = _FakeRangeDlg
+    try:
+        dlg._open_point_lookup_picker("VALUE_AT_MAX_DATES", "extreme_dates")
+    finally:
+        mod._ColumnPickerDialog = orig_col
+        mod._DateRangePickerDialog = orig_range
+
+    assert dlg._preview_edit.toPlainText() == ""
+
+
+def test_date_range_picker_dialog_rejects_from_after_to(qapp):
+    from screens.formula_editor import _DateRangePickerDialog
+    from PySide6.QtCore import QDate
+
+    dlg = _DateRangePickerDialog(None)
+    dlg._from_edit.setDate(QDate(2026, 8, 20))
+    dlg._to_edit.setDate(QDate(2026, 8, 10))
+    dlg._on_ok()
+    assert dlg.result() != dlg.DialogCode.Accepted
+    assert "on or before" in dlg._error_lbl.text()
 
 
 # ── _open_point_lookup_picker: column + (N-days-back / date) picker ────────

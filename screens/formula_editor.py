@@ -10,8 +10,9 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QSplitter, QWidget,
     QListWidget, QListWidgetItem, QLabel, QLineEdit, QPushButton,
     QTextEdit, QFrame, QScrollArea, QSizePolicy, QMessageBox, QSpinBox,
+    QDateEdit,
 )
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QDate
 from PySide6.QtGui import QFont, QColor, QTextCursor, QTextCharFormat
 
 # ── Catalogues ────────────────────────────────────────────────────────────────
@@ -110,6 +111,8 @@ POINT_LOOKUP_CATALOGUE = [
     {"name": "VALUE_ON_DATE",  "signature": "VALUE_ON_DATE(column, date)",      "description": "This stock's own column value on one specific calendar date you pick — e.g. the High on a particular day.", "token": {"type": "func", "value": "VALUE_ON_DATE(", "needs_point_picker": "on_date"}},
     {"name": "VALUE_AT_MAX_DAYS", "signature": "VALUE_AT_MAX_DAYS(column, driver_column, days)", "description": "This stock's own column value on whichever of the last N historic trading days a second (driver) column was at its HIGHEST — e.g. High on the day CWTO peaked in the last 5 days. Either column can be a raw sheet column or another of this strategy's own columns.", "token": {"type": "func", "value": "VALUE_AT_MAX_DAYS(", "needs_point_picker": "extreme_days"}},
     {"name": "VALUE_AT_MIN_DAYS", "signature": "VALUE_AT_MIN_DAYS(column, driver_column, days)", "description": "Same as VALUE_AT_MAX_DAYS, but for whichever day the driver column was at its LOWEST — e.g. Low on the day CWTO bottomed in the last 5 days.", "token": {"type": "func", "value": "VALUE_AT_MIN_DAYS(", "needs_point_picker": "extreme_days"}},
+    {"name": "VALUE_AT_MAX_DATES", "signature": "VALUE_AT_MAX_DATES(column, driver_column, date_from, date_to)", "description": "Same as VALUE_AT_MAX_DAYS, but over an explicit calendar date range you pick instead of \"the last N trading days\" — e.g. the High on whichever day CWTO peaked during a specific week. The range is static (typed into the formula, not rolling) — re-edit it to point at a new range, e.g. every week.", "token": {"type": "func", "value": "VALUE_AT_MAX_DATES(", "needs_point_picker": "extreme_dates"}},
+    {"name": "VALUE_AT_MIN_DATES", "signature": "VALUE_AT_MIN_DATES(column, driver_column, date_from, date_to)", "description": "Same as VALUE_AT_MAX_DATES, but for whichever day in the range the driver column was at its LOWEST.", "token": {"type": "func", "value": "VALUE_AT_MIN_DATES(", "needs_point_picker": "extreme_dates"}},
 ]
 
 OPERATOR_CATALOGUE = [
@@ -244,6 +247,8 @@ def _token_insert_text(tok: dict) -> str:
         days_arg = tok.get("days_arg")
         date_arg = tok.get("date_arg")
         driver_col_arg = tok.get("driver_col_arg")
+        date_from_arg = tok.get("date_from_arg")
+        date_to_arg = tok.get("date_to_arg")
         # col_arg (and driver_col_arg) must round-trip back through the
         # parser (_DAYS_AGG_ARG_RE etc.) exactly as typed — its bare-
         # identifier alternative stops at the first space/dot/etc., so a
@@ -252,6 +257,8 @@ def _token_insert_text(tok: dict) -> str:
         # unbracketed here is what broke reopening a saved MAX_DAYS([DAY
         # TO], 10) for editing: it displayed as MAX_DAYS(DAY TO, 10), which
         # the parser then rejected.
+        if driver_col_arg is not None and date_from_arg and date_to_arg:
+            return f"{fname}([{col_arg}], [{driver_col_arg}], {date_from_arg}, {date_to_arg})"
         if driver_col_arg is not None and days_arg is not None:
             return f"{fname}([{col_arg}], [{driver_col_arg}], {days_arg})"
         if days_arg is not None:
@@ -296,6 +303,9 @@ _ON_DATE_FUNCS = {"value_on_date"}
 # days count. See services/strategy_engine.py's "Historic value at a window
 # extreme" docstring section.
 _VALUE_AT_EXTREME_FUNCS = {"value_at_max_days", "value_at_min_days"}
+# Same as above, but a "date_from, date_to" calendar range instead of a
+# days count — VALUE_AT_MAX_DATES paragraph of the same docstring section.
+_VALUE_AT_EXTREME_DATE_FUNCS = {"value_at_max_dates", "value_at_min_dates"}
 _WORD_OPS = {"and": " and ", "or": " or ", "not": " not "}
 _WORD_CONSTS = {"true": "True", "false": "False", "none": "None"}
 
@@ -342,6 +352,17 @@ _TWO_COL_DAYS_ARG_RE = re.compile(
     r"""\s*,\s*(\d+)\s*\)"""
 )
 
+# Same TWO column arguments as _TWO_COL_DAYS_ARG_RE, but a required
+# ", <date_from>, <date_to>" (each YYYY-MM-DD) before the closing paren
+# instead of a days count — e.g. "[High], [CWTO], 2026-08-10, 2026-08-14)".
+# Used by VALUE_AT_MAX_DATES(value_col, driver_col, date_from, date_to)/
+# VALUE_AT_MIN_DATES(...).
+_TWO_COL_DATE_RANGE_ARG_RE = re.compile(
+    r"""\s*(?:\[([^\]]*)\]|([A-Za-z_][A-Za-z0-9_]*)|"([^"]*)"|'([^']*)')"""
+    r"""\s*,\s*(?:\[([^\]]*)\]|([A-Za-z_][A-Za-z0-9_]*)|"([^"]*)"|'([^']*)')"""
+    r"""\s*,\s*(\d{4}-\d{2}-\d{2})\s*,\s*(\d{4}-\d{2}-\d{2})\s*\)"""
+)
+
 # Splits "[Open of Nifty]" bracket content on the LAST " of " (greedy left
 # group backtracks to the rightmost match), so "X of Y of Z" reads as
 # column "X of Y", stock "Z" — the stock name is what trails.
@@ -370,11 +391,14 @@ def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
     style functions, the column argument plus a required ", <days>"; for
     VALUE_ON_DATE(...), the column argument plus a required
     ", <YYYY-MM-DD>"; for VALUE_AT_MAX_DAYS(...)/VALUE_AT_MIN_DAYS(...), TWO
-    column arguments plus a required ", <days>". Returns (pos_after_close_
-    paren, col_name, extra) on success — extra is a dict of additional
-    token fields ({"days_arg": N} or {"date_arg": "..."} or
-    {"driver_col_arg": "...", "days_arg": N} or {}) — else (start, None, {})
-    so the caller falls back to normal tokens."""
+    column arguments plus a required ", <days>"; for VALUE_AT_MAX_DATES(...)/
+    VALUE_AT_MIN_DATES(...), TWO column arguments plus a required
+    ", <date_from>, <date_to>". Returns (pos_after_close_paren, col_name,
+    extra) on success — extra is a dict of additional token fields
+    ({"days_arg": N} or {"date_arg": "..."} or {"driver_col_arg": "...",
+    "days_arg": N} or {"driver_col_arg": "...", "date_from_arg": "...",
+    "date_to_arg": "..."} or {}) — else (start, None, {}) so the caller
+    falls back to normal tokens."""
     if func_name_lower in _AGG_FUNCS:
         m = _AGG_ARG_RE.match(text, start)
         if not m:
@@ -403,6 +427,14 @@ def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
         col = next(g for g in col_groups[:4] if g is not None)
         driver_col = next(g for g in col_groups[4:] if g is not None)
         return m.end(), col, {"driver_col_arg": driver_col, "days_arg": int(days)}
+    if func_name_lower in _VALUE_AT_EXTREME_DATE_FUNCS:
+        m = _TWO_COL_DATE_RANGE_ARG_RE.match(text, start)
+        if not m:
+            return start, None, {}
+        *col_groups, date_from, date_to = m.groups()
+        col = next(g for g in col_groups[:4] if g is not None)
+        driver_col = next(g for g in col_groups[4:] if g is not None)
+        return m.end(), col, {"driver_col_arg": driver_col, "date_from_arg": date_from, "date_to_arg": date_to}
     return start, None, {}
 
 
@@ -666,6 +698,72 @@ class _DaysCountPickerDialog(QDialog):
 
     def selected_n(self) -> int:
         return self._spin.value()
+
+
+class _DateRangePickerDialog(QDialog):
+    """Step 3 of building VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES: an explicit
+    From/To calendar range — plain QDateEdit fields (no availability dots;
+    unlike _OnDatePickerDialog's single-date pick, a range doesn't need
+    per-day "has data" markers to be usable) same as screens.inception_hmv's
+    own From/To pickers. Static, not rolling — the resulting formula embeds
+    these two exact dates and needs re-editing (this same dialog, reopened)
+    to point at a different range later, e.g. every week."""
+
+    def __init__(self, theme, parent=None):
+        super().__init__(parent)
+        self._theme = theme
+        self.setWindowTitle("Pick a Date Range")
+        self.setFixedWidth(320)
+        bg, txt = _t(theme, "background"), _t(theme, "text_primary")
+        self.setStyleSheet(
+            f"QDialog{{background:{bg};color:{txt};}}QWidget{{background:{bg};color:{txt};}}"
+            f"QLabel{{background:transparent;}}"
+        )
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+        lay.setContentsMargins(16, 16, 16, 16)
+
+        today = QDate.currentDate()
+        week_ago = today.addDays(-7)
+
+        from_row = QHBoxLayout()
+        from_row.addWidget(QLabel("From:"))
+        self._from_edit = QDateEdit()
+        self._from_edit.setCalendarPopup(True)
+        self._from_edit.setDisplayFormat("dd-MMM-yyyy")
+        self._from_edit.setDate(week_ago)
+        from_row.addWidget(self._from_edit)
+        lay.addLayout(from_row)
+
+        to_row = QHBoxLayout()
+        to_row.addWidget(QLabel("To:"))
+        self._to_edit = QDateEdit()
+        self._to_edit.setCalendarPopup(True)
+        self._to_edit.setDisplayFormat("dd-MMM-yyyy")
+        self._to_edit.setDate(today)
+        to_row.addWidget(self._to_edit)
+        lay.addLayout(to_row)
+
+        self._error_lbl = QLabel("")
+        self._error_lbl.setStyleSheet(f"color:{_t(theme, 'status_red')};")
+        self._error_lbl.setWordWrap(True)
+        lay.addWidget(self._error_lbl)
+
+        ok = QPushButton("OK")
+        ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok.clicked.connect(self._on_ok)
+        lay.addWidget(ok)
+
+    def _on_ok(self):
+        if self._from_edit.date() > self._to_edit.date():
+            self._error_lbl.setText("From date must be on or before To date.")
+            return
+        self.accept()
+
+    def selected_range(self) -> tuple[_dt.date, _dt.date]:
+        f, t = self._from_edit.date(), self._to_edit.date()
+        return (_dt.date(f.year(), f.month(), f.day()),
+                _dt.date(t.year(), t.month(), t.day()))
 
 
 class _OnDatePickerDialog(QDialog):
@@ -1194,12 +1292,15 @@ class ExpressionEditorDialog(QDialog):
 
     def _open_point_lookup_picker(self, fname: str, picker: str):
         """Column + (N-days-back / a calendar date / a 2nd driver column +
-        N) picker for a POINT_LOOKUP_CATALOGUE entry — builds and inserts
-        the complete call in one shot, e.g. VALUE_DAYS_AGO([High], 2),
-        VALUE_ON_DATE([High], 2026-07-15), or VALUE_AT_MAX_DAYS([High],
-        [CWTO], 5), instead of the plain "insert bare function name, fill in
-        the rest by hand" flow every other catalogue entry uses. *picker* is
-        "days_ago", "on_date", or "extreme_days" (see POINT_LOOKUP_CATALOGUE)."""
+        N / a 2nd driver column + a date range) picker for a
+        POINT_LOOKUP_CATALOGUE entry — builds and inserts the complete call
+        in one shot, e.g. VALUE_DAYS_AGO([High], 2), VALUE_ON_DATE([High],
+        2026-07-15), VALUE_AT_MAX_DAYS([High], [CWTO], 5), or
+        VALUE_AT_MAX_DATES([High], [CWTO], 2026-08-10, 2026-08-14), instead
+        of the plain "insert bare function name, fill in the rest by hand"
+        flow every other catalogue entry uses. *picker* is "days_ago",
+        "on_date", "extreme_days", or "extreme_dates" (see
+        POINT_LOOKUP_CATALOGUE)."""
         columns = self._lmv_headers + self._strategy_col_headers
         if not columns:
             QMessageBox.information(
@@ -1232,6 +1333,18 @@ class ExpressionEditorDialog(QDialog):
                 return
             self._insert_at_cursor(
                 f"{fname}([{column}], [{driver_column}], {n_dlg.selected_n()})")
+        elif picker == "extreme_dates":
+            driver_dlg = _ColumnPickerDialog(columns, self._theme, self)
+            driver_dlg.setWindowTitle("Pick the Driver Column (decides which day)")
+            if driver_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            driver_column = driver_dlg.selected_column()
+            range_dlg = _DateRangePickerDialog(self._theme, self)
+            if range_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            date_from, date_to = range_dlg.selected_range()
+            self._insert_at_cursor(
+                f"{fname}([{column}], [{driver_column}], {date_from.isoformat()}, {date_to.isoformat()})")
         else:
             from api import lmv_snapshot_api
             date_dlg = _OnDatePickerDialog(self._theme, lmv_snapshot_api.get_availability, self)

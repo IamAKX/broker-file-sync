@@ -275,10 +275,14 @@ def test_apply_strategies_drops_filtered_rows():
     headers = ["Sector", "LTP"]
     data = [["CG", "10"], ["IT", "20"], ["CG", "30"]]
     new_headers, new_data = apply_strategies([strat], headers, data)
-    assert new_headers == ["Sector", "LTP", "Out"]
+    # A strategy with a row filter also gets its own Days True/Since
+    # streak columns (see the "Row-filter streak" tests below) — assert
+    # "Out" by index rather than assuming it's the last header.
+    assert new_headers == ["Sector", "LTP", "Out", "Strategy — Days True", "Strategy — Since"]
+    out_idx = new_headers.index("Out")
     # Only the two CG rows survive
     assert [r[0] for r in new_data] == ["CG", "CG"]
-    assert [r[2] for r in new_data] == [10.0, 30.0]
+    assert [r[out_idx] for r in new_data] == [10.0, 30.0]
 
 def test_apply_strategies_no_filter_keeps_all_rows():
     from services.strategy_engine import apply_strategies
@@ -370,7 +374,9 @@ def test_row_filter_can_reference_strategy_own_column():
     headers = ["Sector", "LTP"]
     data = [["CG", "10"], ["IT", "20"], ["FIN", "12"]]
     new_headers, new_data = apply_strategies([strat], headers, data)
-    assert new_headers == ["Sector", "LTP", "Out"]
+    # A strategy with a row filter also gets its own Days True/Since
+    # streak columns (see the "Row-filter streak" tests below).
+    assert new_headers == ["Sector", "LTP", "Out", "Strategy — Days True", "Strategy — Since"]
     # LTP 10 and 12 pass (<=15); 20 dropped.
     assert [r[1] for r in new_data] == ["10", "12"]
     assert [r[2] for r in new_data] == [10.0, 12.0]
@@ -660,7 +666,13 @@ def test_collect_day_requests_deduplicates_across_sources():
         "row_filter": days_tok("AVG_DAYS", "High", 20) + [tok_op(">"), tok_num(0)],
     }
     requests = collect_day_requests([strategy])
-    assert requests == [("High", 20, [tok_col("High")])]
+    # Plus one synthetic streak request (see "Row-filter streak" tests
+    # below) since this strategy also has a row filter.
+    from services.strategy_engine import _streak_col_name, STREAK_LOOKBACK_DAYS
+    assert requests == [
+        ("High", 20, [tok_col("High")]),
+        (_streak_col_name("s1"), STREAK_LOOKBACK_DAYS, strategy["row_filter"]),
+    ]
 
 
 def test_collect_day_requests_scans_notification_config():
@@ -921,3 +933,252 @@ def test_collect_day_requests_resolves_both_value_at_extreme_columns():
     }
     requests = collect_day_requests([strategy])
     assert {(c, d) for c, d, _ in requests} == {("High", 5), ("CWTO", 5)}
+
+
+# ── VALUE_AT_MAX_DATES / VALUE_AT_MIN_DATES (explicit calendar range) ──────
+# Same resolution as VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS above, but window =
+# an explicit (date_from, date_to) tuple instead of an int — for a range
+# that doesn't cleanly line up to a trading-day count from today, e.g. a
+# specific calendar week. day_history/_value_at_extreme already treat
+# "window" as an opaque dict key either way, so this needed no new
+# resolution machinery, just the compilation path (_build_compiled/
+# scan_day_funcs) recognizing the new function names.
+
+def extreme_date_tok(fn, col, driver_col, date_from, date_to):
+    return [{"type": "func", "value": f"{fn}(", "col_arg": col,
+             "driver_col_arg": driver_col, "date_from_arg": date_from, "date_to_arg": date_to}]
+
+
+def test_value_at_max_dates_returns_value_col_on_drivers_peak_day():
+    window = ("2026-06-08", "2026-06-12")
+    day_history = {
+        ("CWTO", window): {"INFY": {"daily": [
+            ("2026-06-08", 0.005), ("2026-06-09", 0.001),
+            ("2026-06-10", 0.015), ("2026-06-11", 0.001), ("2026-06-12", 0.00125),
+        ]}},
+        ("High", window): {"INFY": {"daily": [
+            ("2026-06-08", 1001), ("2026-06-09", 1002),
+            ("2026-06-10", 1003), ("2026-06-11", 1004), ("2026-06-12", 1005),
+        ]}},
+    }
+    tokens = extreme_date_tok("VALUE_AT_MAX_DATES", "High", "CWTO", *window)
+    result = evaluate(tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL], day_history=day_history)
+    assert result == 1003  # CWTO peaked on 2026-06-10 -> that day's High
+
+
+def test_value_at_min_dates_returns_value_col_on_drivers_trough_day():
+    window = ("2026-06-08", "2026-06-12")
+    day_history = {
+        ("CWTO", window): {"INFY": {"daily": [
+            ("2026-06-08", 0.005), ("2026-06-09", 0.001),
+            ("2026-06-10", 0.015), ("2026-06-11", 0.001), ("2026-06-12", 0.00125),
+        ]}},
+        ("Low", window): {"INFY": {"daily": [
+            ("2026-06-08", 501), ("2026-06-09", 502),
+            ("2026-06-10", 503), ("2026-06-11", 504), ("2026-06-12", 505),
+        ]}},
+    }
+    tokens = extreme_date_tok("VALUE_AT_MIN_DATES", "Low", "CWTO", *window)
+    result = evaluate(tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL], day_history=day_history)
+    assert result == 502   # CWTO troughs on 2026-06-09 (first of the ties) -> that day's Low
+
+
+def test_value_at_extreme_dates_none_without_day_history():
+    tokens = extreme_date_tok("VALUE_AT_MAX_DATES", "High", "CWTO", "2026-06-08", "2026-06-12")
+    assert evaluate(tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL]) is None
+
+
+def test_value_at_extreme_dates_and_days_windows_are_distinct_cache_entries():
+    """A DAYS call and a DATES call referencing the same columns must not
+    collide in day_history — different window shapes (int vs tuple) are
+    different dict keys already, but the compiled-formula cache
+    (_formula_signature) must also tell them apart."""
+    day_history_days = {
+        ("High", 5): {"INFY": {"daily": [("2026-06-12", 999)]}},
+        ("CWTO", 5): {"INFY": {"daily": [("2026-06-12", 0.01)]}},
+    }
+    day_history_dates = {
+        ("High", ("2026-06-08", "2026-06-12")): {"INFY": {"daily": [("2026-06-12", 1005)]}},
+        ("CWTO", ("2026-06-08", "2026-06-12")): {"INFY": {"daily": [("2026-06-12", 0.02)]}},
+    }
+    days_tokens = extreme_tok("VALUE_AT_MAX_DAYS", "High", "CWTO", 5)
+    dates_tokens = extreme_date_tok("VALUE_AT_MAX_DATES", "High", "CWTO", "2026-06-08", "2026-06-12")
+    assert evaluate(days_tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL], day_history=day_history_days) == 999
+    assert evaluate(dates_tokens, ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL], day_history=day_history_dates) == 1005
+
+
+def test_compile_check_value_at_extreme_dates_uses_placeholder_not_hard_failure():
+    from services.strategy_engine import compile_check
+    tokens = extreme_date_tok("VALUE_AT_MAX_DATES", "High", "CWTO", "2026-06-08", "2026-06-12")
+    row_data = {"High": "100", "CWTO": "0.01"}
+    ok, msg = compile_check(tokens, row_data, [row_data])
+    assert ok is True
+    assert "historic" in msg.lower()
+
+
+def test_scan_day_funcs_finds_both_columns_for_value_at_extreme_dates():
+    from services.strategy_engine import scan_day_funcs
+    window = ("2026-06-08", "2026-06-12")
+    tokens = extreme_date_tok("VALUE_AT_MAX_DATES", "High", "CWTO", *window)
+    assert scan_day_funcs(tokens) == [("High", window), ("CWTO", window)]
+    tokens = extreme_date_tok("VALUE_AT_MIN_DATES", "Low", "CWTO", *window)
+    assert scan_day_funcs(tokens) == [("Low", window), ("CWTO", window)]
+
+
+def test_collect_day_requests_resolves_both_value_at_extreme_dates_columns():
+    from services.strategy_engine import collect_day_requests
+    window = ("2026-06-08", "2026-06-12")
+    strategy = {
+        "id": "s1", "active": True,
+        "columns": [
+            {"name": "HighAtMaxCWTO",
+             "formula": extreme_date_tok("VALUE_AT_MAX_DATES", "High", "CWTO", *window),
+             "fmt_rules": []},
+        ],
+        "row_filter": [],
+    }
+    requests = collect_day_requests([strategy])
+    assert {(c, d) for c, d, _ in requests} == {("High", window), ("CWTO", window)}
+
+
+# ── Row-filter streak ("Days True" / "Since") ───────────────────────────────
+# apply_strategies() adds two extra columns per active strategy that HAS a
+# row filter: "<name> — Days True" and "<name> — Since", reporting how many
+# of the most recent consecutive historic days that filter evaluated true
+# and the date the current run started — driven by compute_streak over a
+# synthetic day_history request collect_day_requests emits automatically.
+
+def test_compute_streak_empty_is_zero():
+    from services.strategy_engine import compute_streak
+    assert compute_streak([]) == (0, None, False)
+
+
+def test_compute_streak_most_recent_day_false_is_zero():
+    from services.strategy_engine import compute_streak
+    assert compute_streak([("d1", True), ("d2", False)]) == (0, None, False)
+
+
+def test_compute_streak_counts_back_to_the_last_false():
+    from services.strategy_engine import compute_streak
+    daily = [("d1", False), ("d2", True), ("d3", True), ("d4", True)]
+    assert compute_streak(daily) == (3, "d2", False)
+
+
+def test_compute_streak_treats_none_as_not_true():
+    from services.strategy_engine import compute_streak
+    daily = [("d1", True), ("d2", None), ("d3", True)]
+    assert compute_streak(daily) == (1, "d3", False)
+
+
+def test_compute_streak_at_window_ceiling_reports_none_since():
+    """Whole fetched window was true — days_true is a LOWER BOUND (display
+    as "≥N"), since_date is unknown (None) since the real start is
+    somewhere before what was fetched."""
+    from services.strategy_engine import compute_streak
+    daily = [("d1", True), ("d2", True), ("d3", True)]
+    days_true, since, at_ceiling = compute_streak(daily)
+    assert days_true == 3
+    assert since is None
+    assert at_ceiling is True
+
+
+def _streak_strategy(strategy_id="s1", name="Breakout"):
+    return {
+        "id": strategy_id, "name": name, "active": True,
+        "row_filter": [tok_col("CLOSE"), tok_op(">"), tok_col("OPEN")],
+        "columns": [],
+    }
+
+
+def test_collect_day_requests_emits_synthetic_streak_request():
+    from services.strategy_engine import collect_day_requests, _streak_col_name, STREAK_LOOKBACK_DAYS
+    strategy = _streak_strategy()
+    reqs = collect_day_requests([strategy])
+    assert reqs == [(_streak_col_name("s1"), STREAK_LOOKBACK_DAYS, strategy["row_filter"])]
+
+
+def test_collect_day_requests_no_streak_request_without_row_filter():
+    from services.strategy_engine import collect_day_requests
+    strategy = {"id": "s1", "name": "NoFilter", "active": True, "row_filter": [], "columns": []}
+    assert collect_day_requests([strategy]) == []
+
+
+def test_apply_strategies_adds_days_true_and_since_columns_for_row_filter_strategy():
+    from services.strategy_engine import apply_strategies, _streak_col_name, STREAK_LOOKBACK_DAYS
+    strategy = _streak_strategy()
+    day_history = {
+        (_streak_col_name("s1"), STREAK_LOOKBACK_DAYS): {
+            "NIFTY": {"daily": [
+                ("2026-08-01", 1), ("2026-08-02", 1), ("2026-08-03", 0),
+                ("2026-08-04", 1), ("2026-08-05", 1),
+            ]},
+        },
+    }
+    headers = ["Scrip Name", "OPEN", "CLOSE"]
+    data = [["NIFTY", 100.0, 105.0]]   # CLOSE > OPEN -> passes today
+    new_headers, new_data = apply_strategies([strategy], headers, data, day_history=day_history)
+    assert new_headers[-2:] == ["Breakout — Days True", "Breakout — Since"]
+    # 08-04/08-05 true, 08-03 breaks the streak -> 2 days, since 08-04
+    assert new_data[0][-2:] == [2, "2026-08-04"]
+
+
+def test_apply_strategies_days_true_at_ceiling_shows_gte_string():
+    from services.strategy_engine import apply_strategies, _streak_col_name, STREAK_LOOKBACK_DAYS
+    strategy = _streak_strategy()
+    day_history = {
+        (_streak_col_name("s1"), STREAK_LOOKBACK_DAYS): {
+            "NIFTY": {"daily": [("d1", 1), ("d2", 1), ("d3", 1)]},
+        },
+    }
+    headers = ["Scrip Name", "OPEN", "CLOSE"]
+    data = [["NIFTY", 100.0, 105.0]]
+    _, new_data = apply_strategies([strategy], headers, data, day_history=day_history)
+    assert new_data[0][-2:] == ["≥3", None]
+
+
+def test_apply_strategies_no_streak_columns_without_row_filter():
+    from services.strategy_engine import apply_strategies
+    strategy = {"id": "s2", "name": "NoFilter", "active": True, "row_filter": [], "columns": []}
+    headers = ["Scrip Name", "OPEN", "CLOSE"]
+    data = [["NIFTY", 100.0, 105.0]]
+    new_headers, new_data = apply_strategies([strategy], headers, data)
+    assert new_headers == headers
+    assert new_data == data
+
+
+def test_apply_strategies_streak_columns_none_when_row_does_not_pass():
+    """Row kept alive by a DIFFERENT (unfiltered) active strategy, but
+    doesn't pass this one's filter — Days True/Since blank out, same
+    convention this strategy's own computed columns already use."""
+    from services.strategy_engine import apply_strategies, _streak_col_name, STREAK_LOOKBACK_DAYS
+    strategy = _streak_strategy()
+    catch_all = {"id": "s3", "name": "All", "active": True, "row_filter": [], "columns": []}
+    day_history = {(_streak_col_name("s1"), STREAK_LOOKBACK_DAYS): {"NIFTY": {"daily": [("d1", 1)]}}}
+    headers = ["Scrip Name", "OPEN", "CLOSE"]
+    data = [["NIFTY", 110.0, 100.0]]   # CLOSE < OPEN -> fails s1's filter
+    new_headers, new_data = apply_strategies([strategy, catch_all], headers, data, day_history=day_history)
+    idx = new_headers.index("Breakout — Days True")
+    assert new_data[0][idx] is None
+    assert new_data[0][idx + 1] is None
+
+
+def test_apply_strategies_streak_columns_none_without_day_history():
+    from services.strategy_engine import apply_strategies
+    strategy = _streak_strategy()
+    headers = ["Scrip Name", "OPEN", "CLOSE"]
+    data = [["NIFTY", 100.0, 105.0]]
+    _, new_data = apply_strategies([strategy], headers, data)   # no day_history at all
+    assert new_data[0][-2:] == [0, None]
+
+
+def test_apply_strategies_include_streak_columns_false_suppresses_them():
+    """screens.inception_hmv/inception_view_by_date pass this — Inception
+    has no day_history support wired up, so these would always read
+    "0"/blank there; dead weight, not a useful feature."""
+    from services.strategy_engine import apply_strategies
+    strategy = _streak_strategy()
+    headers = ["Scrip Name", "OPEN", "CLOSE"]
+    data = [["NIFTY", 100.0, 105.0]]
+    new_headers, new_data = apply_strategies([strategy], headers, data, include_streak_columns=False)
+    assert new_headers == headers
+    assert new_data == data

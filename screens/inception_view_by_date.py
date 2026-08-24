@@ -209,14 +209,15 @@ class InceptionViewByDateScreen(QWidget):
         popup.show()
 
     def _on_strategies_applied(self, updated: list):
-        t = self._controller.theme
+        # Deliberately NOT persisted — see screens.inception_hmv's identical
+        # fix / screens.live_viewer's _on_strategies_applied for why: "active"
+        # here is this screen's own SESSION-local "applied right now" flag,
+        # not Strategy Builder's persisted one, even though they're the same
+        # dict key — persisting every strategy the picker showed (not just
+        # the ones actually toggled) would silently deactivate every other,
+        # unchecked strategy in Strategy Builder too.
         updated_by_id = {s["id"]: s for s in updated}
         self._strategies = [updated_by_id.get(s["id"], s) for s in self._strategies]
-        for s in updated:
-            try:
-                inception_strategy_store.save_strategy(s)
-            except (ApiError, NetworkError) as exc:
-                show_api_error(t, self, exc)
         self._update_strat_btn_label()
 
     def _update_strat_btn_label(self):
@@ -296,7 +297,11 @@ class InceptionViewByDateScreen(QWidget):
         self._strategies = inception_strategy_store.load_all()
         self._update_strat_btn_label()
         strategies = [s for s in self._strategies if s.get("active")]
-        headers, table_rows = apply_strategies(strategies, headers, table_rows)
+        # include_streak_columns=False — Inception has no day_history/
+        # historic-value support wired up (see inception_strategy_builder.
+        # py's module docstring), so the "Days True"/"Since" pair would
+        # always read "0"/blank here — dead weight, not a useful feature.
+        headers, table_rows = apply_strategies(strategies, headers, table_rows, include_streak_columns=False)
 
         viewer = HistoricDataViewer(
             headers, table_rows, self._selected_date.strftime("%d-%b-%Y"), theme=t,

@@ -91,6 +91,42 @@ daily list is read at that exact date. None if either day_history entry is
 missing, the driver has no numeric value on any day in the window, or the
 value column has none on the winning date specifically — same "blank rather
 than crash" fallback as everywhere else in this module.
+
+VALUE_AT_MAX_DATES([High], [CWTO], "2026-08-10", "2026-08-14") is the same
+lookup, but over an EXPLICIT calendar date range instead of "the last N
+trading days" — for when the window you actually mean doesn't cleanly line
+up to a trading-day count from today, e.g. "the previous calendar week" (a
+week that may have started mid-way through a trading-day count, or that
+isn't the most recent N days at all if today isn't the day right after it).
+VALUE_AT_MIN_DATES is the same for the lowest. Both dates are static, typed
+into the formula — this window does NOT roll forward on its own; re-edit
+the formula to point at a new range (e.g. every week) same as any other
+literal value in a formula. Resolution is otherwise identical to the DAYS
+family above: day_history's window key is a (date_from, date_to) tuple
+instead of an int — services.formula_stats_engine.fetch_range_response
+already resolves either shape into the same {"days": [...]} fetch (that
+tuple-window support was built generically for VALUE_ON_DATE's single-date
+case; a genuine multi-day range needed no new fetching machinery, just this
+compilation path).
+
+── Row-filter streak ("Days True" / "Since") ─────────────────────────────────
+apply_strategies() adds two extra columns per active strategy that HAS a row
+filter — "<name> — Days True" and "<name> — Since" — reporting how many of
+the most recent consecutive historic days that filter has evaluated true,
+and the date the current run started. Not a formula function a user writes;
+this is automatic, driven entirely by whether the strategy has a row filter
+at all (see compute_streak, and collect_day_requests' synthetic
+(_streak_col_name(id), STREAK_LOOKBACK_DAYS) request that fetches it through
+the exact same day_history pipeline as every _DAYS function above — same
+non-live refresh cadence, same STREAK_LOOKBACK_DAYS=60-day window).
+
+"Days True" is a lower bound, not a guarantee, when the streak covers the
+ENTIRE fetched window — there's no way to tell from a 60-day fetch whether
+day 61 back was also true, so that case reports "≥60" (a string) rather
+than a bare number that would misleadingly claim exactness, and "Since" is
+None (the real start is somewhere before what was fetched, unknown). A row
+that doesn't currently pass this strategy's filter gets None for both,
+same "doesn't apply to this row" convention the strategy's own columns use.
 """
 
 import math
@@ -308,7 +344,8 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
         elif t == "func":
             # aggregate functions have _ALL suffix; map to a single computed number
             fname = v.rstrip("(").upper()
-            if fname in _DAYS_AGG_BASE or fname in _POINT_LOOKUP_FUNCS or fname in _VALUE_AT_EXTREME_FUNCS:
+            if (fname in _DAYS_AGG_BASE or fname in _POINT_LOOKUP_FUNCS
+                    or fname in _VALUE_AT_EXTREME_FUNCS or fname in _VALUE_AT_EXTREME_DATE_FUNCS):
                 # No historic fetch happens at compile-test time (see the
                 # module docstring's "Historic (N days) aggregates"/
                 # "Historic value (point lookup)"/"Historic value at a
@@ -396,8 +433,13 @@ _POINT_LOOKUP_FUNCS = {"VALUE_DAYS_AGO", "VALUE_ON_DATE"}
 # Value-at-window-extreme lookups — see this module's "Historic value at a
 # window extreme" docstring section. True/False = whether the driver column
 # picks the day with the highest (VALUE_AT_MAX_DAYS) or lowest
-# (VALUE_AT_MIN_DAYS) value.
+# (VALUE_AT_MIN_DAYS) value. window = an int (last N trading days).
 _VALUE_AT_EXTREME_FUNCS = {"VALUE_AT_MAX_DAYS": True, "VALUE_AT_MIN_DAYS": False}
+
+# Same as above, but window = an explicit (date_from, date_to) calendar
+# range instead of a trading-day count — see this module's "Historic value
+# at a window extreme" docstring section, VALUE_AT_MAX_DATES paragraph.
+_VALUE_AT_EXTREME_DATE_FUNCS = {"VALUE_AT_MAX_DATES": True, "VALUE_AT_MIN_DATES": False}
 
 
 class _Compiled:
@@ -413,10 +455,12 @@ class _Compiled:
     [(placeholder, agg_key, col_name, days), ...] for _DAYS historic
     aggregate functions, resolved from the row's own stock symbol against a
     caller-supplied day_history (see the module docstring). ``extreme_specs``
-    is [(placeholder, col_name, driver_col_name, days, want_max), ...] for
-    VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS (see the module docstring's "Historic
-    value at a window extreme" section) — resolved the same way as
-    day_specs, against two day_history entries instead of one.
+    is [(placeholder, col_name, driver_col_name, window, want_max), ...] for
+    VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS (window = int) and VALUE_AT_MAX_DATES/
+    VALUE_AT_MIN_DATES (window = a (date_from, date_to) tuple) — see the
+    module docstring's "Historic value at a window extreme" section —
+    resolved the same way as day_specs, against two day_history entries
+    instead of one.
     """
     __slots__ = ("code", "col_vars", "col_of_vars", "uses_self", "agg_specs",
                 "day_specs", "extreme_specs")
@@ -453,10 +497,12 @@ def _formula_signature(tokens: list):
     # col_arg, days_arg=None, of=None) and incorrectly reuse each other's
     # compiled day_specs/window from the cache. driver_col_arg likewise, for
     # two VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS calls differing only in which
-    # column drives the day.
+    # column drives the day. date_from_arg/date_to_arg, same reasoning, for
+    # two VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES calls differing only in
+    # which date range they search.
     return tuple((tok.get("type"), tok.get("value"), tok.get("col_arg"),
                  tok.get("days_arg"), tok.get("of"), tok.get("date_arg"),
-                 tok.get("driver_col_arg"))
+                 tok.get("driver_col_arg"), tok.get("date_from_arg"), tok.get("date_to_arg"))
                  for tok in tokens)
 
 
@@ -498,6 +544,8 @@ def _build_compiled(tokens: list):
             fname = v.rstrip("(").upper()
             days_arg = tok.get("days_arg")
             date_arg = tok.get("date_arg")
+            date_from_arg = tok.get("date_from_arg")
+            date_to_arg = tok.get("date_to_arg")
             if fname in _DAYS_AGG_BASE and tok.get("col_arg") and days_arg is not None:
                 col_name = tok.get("col_arg", "")
                 agg_key = _DAYS_AGG_BASE[fname]
@@ -529,6 +577,19 @@ def _build_compiled(tokens: list):
                 want_max = _VALUE_AT_EXTREME_FUNCS[fname]
                 var = f"_e{len(extreme_specs)}"
                 extreme_specs.append((var, col_name, driver_col_name, int(days_arg), want_max))
+                parts.append(var)
+            elif (fname in _VALUE_AT_EXTREME_DATE_FUNCS and tok.get("col_arg")
+                  and tok.get("driver_col_arg") and date_from_arg and date_to_arg):
+                # Same resolution as the DAYS variant above — window is a
+                # (date_from, date_to) tuple instead of an int, which
+                # _value_at_extreme/day_history already treat as an opaque
+                # dict key either way (see this module's "Historic value at
+                # a window extreme" docstring, VALUE_AT_MAX_DATES paragraph).
+                col_name = tok.get("col_arg", "")
+                driver_col_name = tok.get("driver_col_arg", "")
+                want_max = _VALUE_AT_EXTREME_DATE_FUNCS[fname]
+                var = f"_e{len(extreme_specs)}"
+                extreme_specs.append((var, col_name, driver_col_name, (date_from_arg, date_to_arg), want_max))
                 parts.append(var)
             elif fname.endswith("_ALL"):
                 col_name = tok.get("col_arg", "")
@@ -741,12 +802,14 @@ def _referenced_columns(tokens: list) -> list:
 
 def _uses_day_funcs(tokens: list) -> bool:
     """True if any _DAYS historic aggregate function, VALUE_DAYS_AGO/
-    VALUE_ON_DATE point lookup, or VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS
-    window-extreme lookup appears in *tokens*."""
+    VALUE_ON_DATE point lookup, or VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS/
+    VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES window-extreme lookup appears in
+    *tokens*."""
     return any(
         tok.get("type") == "func"
         and tok.get("value", "").rstrip("(").upper() in (
-            _DAYS_AGG_BASE.keys() | _POINT_LOOKUP_FUNCS | _VALUE_AT_EXTREME_FUNCS.keys()
+            _DAYS_AGG_BASE.keys() | _POINT_LOOKUP_FUNCS
+            | _VALUE_AT_EXTREME_FUNCS.keys() | _VALUE_AT_EXTREME_DATE_FUNCS.keys()
         )
         for tok in tokens
     )
@@ -754,12 +817,14 @@ def _uses_day_funcs(tokens: list) -> bool:
 
 def scan_day_funcs(tokens: list) -> list:
     """[(col_name, window), ...] for every well-formed _DAYS, VALUE_DAYS_AGO,
-    VALUE_ON_DATE, or VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS function call in
-    *tokens* (col_arg + days_arg, or col_arg + date_arg — see
-    _build_compiled). window is an int for a _DAYS/VALUE_DAYS_AGO/
-    VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS call, or a (date, date) tuple for a
-    VALUE_ON_DATE call. A VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS call yields TWO
-    entries — (col_arg, days) and (driver_col_arg, days) — since both
+    VALUE_ON_DATE, VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS, or VALUE_AT_MAX_DATES/
+    VALUE_AT_MIN_DATES function call in *tokens* (col_arg + days_arg, col_arg
+    + date_arg, or col_arg + date_from_arg/date_to_arg — see _build_compiled).
+    window is an int for a _DAYS/VALUE_DAYS_AGO/VALUE_AT_MAX_DAYS/
+    VALUE_AT_MIN_DAYS call, or a (date, date) tuple for a VALUE_ON_DATE/
+    VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES call. A VALUE_AT_MAX_DAYS/
+    VALUE_AT_MIN_DAYS/VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES call yields TWO
+    entries — (col_arg, window) and (driver_col_arg, window) — since both
     columns need their own day_history entry over the same window (see
     services.strategy_engine's "Historic value at a window extreme"
     docstring). Used to figure out which historic data a formula needs
@@ -775,6 +840,8 @@ def scan_day_funcs(tokens: list) -> list:
         days_arg = tok.get("days_arg")
         date_arg = tok.get("date_arg")
         driver_col_arg = tok.get("driver_col_arg")
+        date_from_arg = tok.get("date_from_arg")
+        date_to_arg = tok.get("date_to_arg")
         if fname in _DAYS_AGG_BASE and col_arg and days_arg is not None:
             out.append((col_arg, int(days_arg)))
         elif fname == "VALUE_DAYS_AGO" and col_arg and days_arg is not None:
@@ -785,7 +852,60 @@ def scan_day_funcs(tokens: list) -> list:
               and days_arg is not None):
             out.append((col_arg, int(days_arg)))
             out.append((driver_col_arg, int(days_arg)))
+        elif (fname in _VALUE_AT_EXTREME_DATE_FUNCS and col_arg and driver_col_arg
+              and date_from_arg and date_to_arg):
+            window = (date_from_arg, date_to_arg)
+            out.append((col_arg, window))
+            out.append((driver_col_arg, window))
     return out
+
+
+# ── Row-filter streak ("Days True" / "Since") ────────────────────────────────
+# See the module docstring's own "Row-filter streak" section.
+
+STREAK_LOOKBACK_DAYS = 60
+
+
+def _streak_col_name(strategy_id: str) -> str:
+    """Synthetic day_history "column name" for a strategy's row-filter
+    streak request — never a real column, never shown to the user, just a
+    unique dict key routing through the same collect_day_requests/
+    compute_day_history pipeline every other historic function here uses."""
+    return f"__row_filter_streak__:{strategy_id}"
+
+
+def compute_streak(daily: list) -> tuple:
+    """*daily*: chronological-ascending [(date_str, value), ...] — a row
+    filter's own per-day evaluated value (see services.formula_stats_engine.
+    compute_stats' "daily" key), oldest first, most recent last.
+
+    Returns (days_true, since_date, at_ceiling):
+      - days_true (int): how many of the most recent consecutive days
+        evaluated truthy (same None/falsy -> not-true rule
+        evaluate_condition uses elsewhere) — 0 if the most recent day is
+        falsy or *daily* is empty.
+      - since_date (str | None): the date the current streak started (the
+        OLDEST day of that run) — None if the streak covers *daily*'s
+        entire window (at_ceiling=True in that case; the real start is
+        somewhere before what was fetched, unknown).
+      - at_ceiling (bool): True if the whole fetched window was truthy —
+        days_true is then a LOWER BOUND, not the actual streak length;
+        display it as "≥N", never a bare number, in that case.
+    """
+    if not daily:
+        return 0, None, False
+    count = 0
+    since = None
+    for d, v in reversed(daily):
+        is_true = bool(v) if v is not None else False
+        if not is_true:
+            break
+        count += 1
+        since = d
+    at_ceiling = count == len(daily)
+    if at_ceiling:
+        since = None
+    return count, since, at_ceiling
 
 
 def collect_day_requests(strategies: list, notif_configs: dict | None = None) -> list:
@@ -808,6 +928,12 @@ def collect_day_requests(strategies: list, notif_configs: dict | None = None) ->
 
     ``formula_tokens`` is what services.formula_stats_engine.compute_stats
     should evaluate per historic day to answer this request.
+
+    Also emits one synthetic request per active strategy that HAS a row
+    filter — (_streak_col_name(strategy_id), STREAK_LOOKBACK_DAYS,
+    row_filter) — so apply_strategies' "Days True"/"Since" columns (see
+    compute_streak) ride the exact same fetch pipeline as everything else
+    here, rather than needing their own.
     """
     notif_configs = notif_configs or {}
     seen: set = set()
@@ -840,6 +966,13 @@ def collect_day_requests(strategies: list, notif_configs: dict | None = None) ->
                 seen.add(key)
                 formula = cols_by_name.get(col_name, [{"type": "col", "value": col_name}])
                 out.append((col_name, window, formula))
+
+        row_filter = strat.get("row_filter", [])
+        if row_filter:
+            streak_key = (_streak_col_name(strat.get("id", "")), STREAK_LOOKBACK_DAYS)
+            if streak_key not in seen:
+                seen.add(streak_key)
+                out.append((streak_key[0], streak_key[1], row_filter))
     return out
 
 
@@ -856,7 +989,8 @@ def evaluate_condition(tokens: list, row_data: dict, all_data: list,
 
 
 def apply_strategies(strategies: list, headers: list, data: list[list],
-                     day_history: dict | None = None) -> tuple[list, list[list]]:
+                     day_history: dict | None = None,
+                     include_streak_columns: bool = True) -> tuple[list, list[list]]:
     """
     Append strategy columns to headers and data rows.
     Returns (new_headers, new_data).
@@ -867,6 +1001,15 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
     Callers precompute it (services.formula_stats_engine.compute_day_history)
     on their own cadence (e.g. strategy load/toggle, not every tick) rather
     than this function fetching it itself.
+
+    ``include_streak_columns`` (default True — LMV's own callers all want
+    this) adds the "Days True"/"Since" pair per row-filtered strategy (see
+    the module docstring's "Row-filter streak" section). screens.
+    inception_hmv/inception_view_by_date pass False: Inception has no
+    day_history/historic-value support wired up at all (a deliberate scope
+    cut — see inception_strategy_builder.py's module docstring), so these
+    would always read "0"/blank there — dead weight, not a useful feature,
+    for a strategy type this function is also shared with.
     """
     active = [s for s in strategies if s.get("active")]
     if not active:
@@ -885,6 +1028,10 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
     for strat in active:
         for col in strat.get("columns", []):
             extra_headers.append(col["name"])
+        if include_streak_columns and strat.get("row_filter"):
+            name = strat.get("name", "Strategy")
+            extra_headers.append(f"{name} — Days True")
+            extra_headers.append(f"{name} — Since")
 
     new_headers = list(headers) + extra_headers
 
@@ -922,6 +1069,24 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
             passed = (not row_filter) or evaluate_condition(
                 row_filter, enriched, all_dicts, agg_cache=agg_cache,
                 sym_index=sym_index, day_history=day_history)
+            # "Days True"/"Since" — see this module's "Row-filter streak"
+            # docstring section and compute_streak. Only computed for a row
+            # that currently passes; when it doesn't, the extra_vals loop
+            # below blanks out this whole strategy's slots (including these
+            # two) anyway, same "doesn't apply to this row" convention the
+            # strategy's own columns already use, so there's nothing to
+            # compute in that case.
+            if include_streak_columns and row_filter and passed:
+                symbol = row_dict.get(SYMBOL_COLUMN)
+                entry = None
+                if day_history is not None and symbol:
+                    entry = day_history.get(
+                        (_streak_col_name(strat.get("id", "")), STREAK_LOOKBACK_DAYS), {},
+                    ).get(symbol)
+                daily = entry.get("daily", []) if entry else []
+                days_true, since_date, at_ceiling = compute_streak(daily)
+                values.append(f"≥{days_true}" if at_ceiling else days_true)
+                values.append(since_date)
             per_strat.append((passed, values))
 
         # Drop rows excluded by every active filter (union of filters).
@@ -934,8 +1099,12 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
                 extra_vals.extend(values)
             else:
                 # Row is shown (matched another strategy) but this strategy's
-                # columns don't apply to it.
-                extra_vals.extend([None] * len(strat.get("columns", [])))
+                # columns (and, if it has a row filter, its Days True/Since
+                # streak columns too) don't apply to it.
+                slot_count = len(strat.get("columns", []))
+                if include_streak_columns and strat.get("row_filter"):
+                    slot_count += 2
+                extra_vals.extend([None] * slot_count)
         new_data.append(list(row) + extra_vals)
 
     return new_headers, new_data
