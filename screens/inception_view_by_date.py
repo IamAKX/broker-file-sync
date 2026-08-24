@@ -16,6 +16,13 @@ directly here.
 Unlike Historic Upload's Browse tab, there's no per-day Delete here —
 Inception's dataset is a shared, centrally-loaded market-data table (not
 something a user uploads/removes day by day), so this screen is read-only.
+
+Like screens.inception_hmv, a "⚡ Strategies" button (screens.live_viewer.
+StrategyPickerPopup, reused as-is) lets more than one strategy be picked and
+applied at once instead of silently unioning together every strategy marked
+"active" in Strategy Builder — see inception_hmv's module docstring for why
+that matters for row filters specifically. Sector + Symbol are frozen at the
+popup's left edge via components.frozen_table_columns, same as HMV's grid.
 """
 
 import calendar as _cal
@@ -30,8 +37,10 @@ from api.exceptions import ApiError, NetworkError
 from components.availability_calendar import AvailabilityCalendar, themed_calendar_stylesheet
 from components.error_popup import show_api_error
 from screens.historic_viewer import HistoricDataViewer
-from services import inception_bars_store, inception_compute_service, inception_strategy_store
+from services import inception_bars_store, inception_compute_service, inception_sector, inception_strategy_store
 from services.strategy_engine import apply_strategies
+
+_FROZEN_HEADERS = ["Sector", "Symbol"]
 
 # Local sync only ever pulls the canonical ('_I') roll series (see
 # services.inception_sync_service / the backend's get_bars default) — so
@@ -76,6 +85,7 @@ class InceptionViewByDateScreen(QWidget):
         self._available_days: set = set()
         self._viewers = []
         self._worker: _SnapshotLoadWorker | None = None
+        self._strategies: list = []
         self._build()
 
     def _build(self):
@@ -107,6 +117,14 @@ class InceptionViewByDateScreen(QWidget):
         self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         bottom_row.addWidget(self._status_lbl)
         bottom_row.addStretch()
+
+        self._strat_btn = QPushButton("⚡  Strategies")
+        self._strat_btn.setFixedHeight(32)
+        self._strat_btn.setFont(font_scale.font(font_scale.SMALL, False))
+        self._strat_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._strat_btn.clicked.connect(self._show_strategy_picker)
+        bottom_row.addWidget(self._strat_btn)
+        bottom_row.addSpacing(8)
 
         self._view_btn = QPushButton("View")
         self._view_btn.setFixedHeight(32)
@@ -174,6 +192,38 @@ class InceptionViewByDateScreen(QWidget):
     def _update_view_btn_enabled(self):
         self._view_btn.setEnabled(self._selected_date.day in self._available_days)
 
+    # ── strategies ───────────────────────────────────────────────────────────
+
+    def _show_strategy_picker(self):
+        from screens.live_viewer import StrategyPickerPopup
+        t = self._controller.theme
+        try:
+            self._strategies = inception_strategy_store.load_all()
+        except (ApiError, NetworkError):
+            pass   # best-effort refresh — picker still opens with whatever it already had
+        popup = StrategyPickerPopup(self._strategies, t, self)
+        popup.applied.connect(self._on_strategies_applied)
+        btn_pos = self._strat_btn.mapToGlobal(self._strat_btn.rect().bottomLeft())
+        popup.adjustSize()
+        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.show()
+
+    def _on_strategies_applied(self, updated: list):
+        t = self._controller.theme
+        updated_by_id = {s["id"]: s for s in updated}
+        self._strategies = [updated_by_id.get(s["id"], s) for s in self._strategies]
+        for s in updated:
+            try:
+                inception_strategy_store.save_strategy(s)
+            except (ApiError, NetworkError) as exc:
+                show_api_error(t, self, exc)
+        self._update_strat_btn_label()
+
+    def _update_strat_btn_label(self):
+        active = sum(1 for s in self._strategies if s.get("active"))
+        total = len(self._strategies)
+        self._strat_btn.setText("⚡  Strategies" if total == 0 else f"⚡  Strategies  {active}/{total}")
+
     # ── view popup ───────────────────────────────────────────────────────────
 
     def _on_view_clicked(self):
@@ -230,19 +280,28 @@ class InceptionViewByDateScreen(QWidget):
             [_display_symbol(r["symbol"])] + [r.get("values", {}).get(k) for k in metric_keys]
             for r in rows
         ]
+        headers, table_rows = inception_sector.inject_sector_rows(headers, table_rows)
 
         # Active Inception strategies are evaluated entirely here, on the
         # client — the snapshot response above is base (raw + precomputed)
         # values only. Same engine/appending shape LMV's own live/historical
-        # viewers use for their own strategy columns. load_all() already
+        # viewers use for their own strategy columns. Reloaded fresh here
+        # (same as before) so a strategy toggled in Strategy Builder since
+        # this screen last used the picker still takes effect without an
+        # extra step; the "⚡ Strategies" picker (see _show_strategy_picker)
+        # additionally lets more than one be selected and applied at once
+        # for this session, same as screens.inception_hmv. load_all() already
         # falls back to its local cache on a network error, so this can't
         # raise.
-        strategies = [s for s in inception_strategy_store.load_all() if s.get("active")]
+        self._strategies = inception_strategy_store.load_all()
+        self._update_strat_btn_label()
+        strategies = [s for s in self._strategies if s.get("active")]
         headers, table_rows = apply_strategies(strategies, headers, table_rows)
 
         viewer = HistoricDataViewer(
             headers, table_rows, self._selected_date.strftime("%d-%b-%Y"), theme=t,
             title=f"Inception — {self._selected_date.strftime('%d-%b-%Y')}",
+            frozen_headers=_FROZEN_HEADERS,
         )
         viewer.show()
         self._viewers.append(viewer)

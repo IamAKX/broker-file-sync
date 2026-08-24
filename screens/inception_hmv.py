@@ -1,16 +1,16 @@
 """Inception > HMV (Historic Master View) — the computed metric/column grid:
 pick a From/To date range, see one row per locally-synced instrument with
-raw + Group A/B computed columns (see services/inception_columns.py) as of
-the last synced trading day on or before To — same idea as the live LMV
-grid, but built from the locally-synced historical dataset instead of a
-live tick.
+raw + Group A/B + Formula Builder computed columns (see services.
+inception_columns, services.inception_formula_builder_columns) as of the
+last synced trading day on or before To — same idea as the live LMV grid,
+but built from the locally-synced historical dataset instead of a live tick.
 
 The date range isn't just a display window — a column whose formula needs
 more history than [from, to] actually contains comes back blank (e.g. 52WH
 needs ~52 weeks of data; a 6-month range leaves it blank) rather than
 silently reaching outside the range or always showing a value regardless of
-what the user selected. See services/inception_formula_engine.
-required_lookback_start and services/inception_compute_service.
+what the user selected. See services.inception_formula_engine.
+required_lookback_start and services.inception_compute_service.
 _apply_range_gate for where that's enforced — this screen just surfaces
 whatever comes back (a blank cell for a gated column, no separate
 "insufficient range" indicator needed since the row itself explains it —
@@ -29,6 +29,25 @@ background QThread (same pattern as screens.inception_settings._SyncWorker)
 so the UI never freezes, with a QProgressBar driven by inception_compute_
 service.hmv's progress_cb (one tick per instrument) standing in for "is
 this actually still working" during a slow cold load.
+
+── Strategies ────────────────────────────────────────────────────────────────
+Unlike View by Date/the rest, this screen keeps a live, in-memory strategy
+list (self._strategies) and a "⚡ Strategies" picker (screens.live_viewer.
+StrategyPickerPopup, reused as-is — it's already generic) so more than one
+strategy can be selected and applied at once, exactly like LMV's own picker.
+Before this existed, HMV silently applied EVERY strategy marked "active" in
+Strategy Builder, all unioned together (services.strategy_engine.
+apply_strategies: a row survives if it passes ANY active strategy's row
+filter) — with several strategies active by default and most having no
+filter at all, a filter on any ONE of them looked like it "did nothing" or
+behaved inconsistently, because the others (unfiltered) kept every row in
+regardless. The picker lets the user isolate exactly which strategies count
+for a given look, the same fix LMV already had.
+
+Sector + Symbol are frozen at the left edge via components.
+frozen_table_columns (see that module — generalizes screens.live_viewer's
+single-column Scrip Name freeze to two columns) and always stay visible
+regardless of the Columns filter, same convention LMV uses for Scrip Name.
 """
 
 import font_scale
@@ -40,10 +59,18 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal
 
+from api.exceptions import ApiError, NetworkError
 from components.column_filter_popup import ColumnFilterPopup
+from components.error_popup import show_api_error
+from components.frozen_table_columns import FrozenColumns
 from screens.inception_view_by_date import _display_symbol
-from services import inception_bars_store, inception_compute_service, inception_strategy_store
+from services import (
+    inception_bars_store, inception_compute_service, inception_formula_builder_columns,
+    inception_sector, inception_strategy_store,
+)
 from services.strategy_engine import apply_strategies
+
+_FROZEN_HEADERS = ["Sector", "Symbol"]
 
 
 class _HmvLoadWorker(QThread):
@@ -62,18 +89,40 @@ class _HmvLoadWorker(QThread):
                 self._date_from, self._date_to,
                 progress_cb=lambda done, total: self.progress.emit(done, total),
             )
+            if as_of_date is not None:
+                self._merge_formula_builder_columns(rows, as_of_date)
         except Exception as exc:
             self.failed.emit(str(exc))
             return
         self.succeeded.emit(as_of_date, rows)
+
+    @staticmethod
+    def _merge_formula_builder_columns(rows: list, as_of_date: date):
+        """Adds LMV's ~56 Formula Builder columns (MT, MB, DT, DB, PMH, the
+        camarilla pivot ladders, ...) to every row's values dict, computed
+        from that same instrument's local bar history — see services.
+        inception_formula_builder_columns. Runs on this background thread
+        (bars_for_symbol is a cheap indexed query; the calendar-bucket
+        arithmetic itself is pure Python but still adds up across ~213
+        instruments) so it never blocks the GUI thread. HMV-only for now
+        (View by Date / Strategy Builder don't offer these columns yet) —
+        scoped here rather than in services.inception_compute_service so it
+        doesn't leak into those other call sites.
+        """
+        for row in rows:
+            bars = inception_bars_store.bars_for_symbol(row["symbol"], date_to=as_of_date)
+            row["values"].update(inception_formula_builder_columns.compute_for_bars(row["symbol"], bars))
 
 
 class InceptionHmvScreen(QWidget):
     def __init__(self, controller):
         super().__init__()
         self._controller = controller
-        self._headers: list = []
-        self._data: list = []
+        self._headers: list = []       # display headers (raw + sector + strategy columns)
+        self._data: list = []          # display rows
+        self._raw_headers: list = []   # headers before strategy columns were appended
+        self._raw_data: list = []      # rows before strategy columns were appended
+        self._strategies: list = []
         self._visible_cols: set = set()
         self._worker: _HmvLoadWorker | None = None
         self._build()
@@ -128,6 +177,14 @@ class InceptionHmvScreen(QWidget):
         toolbar.addWidget(self._load_btn)
 
         toolbar.addSpacing(8)
+        self._strat_btn = QPushButton("⚡  Strategies")
+        self._strat_btn.setFixedHeight(30)
+        self._strat_btn.setFont(font_scale.font(font_scale.SMALL, False))
+        self._strat_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._strat_btn.clicked.connect(self._show_strategy_picker)
+        toolbar.addWidget(self._strat_btn)
+
+        toolbar.addSpacing(8)
         self._filter_btn = QPushButton("⊞  Columns")
         self._filter_btn.setFixedHeight(30)
         self._filter_btn.setFont(font_scale.font(font_scale.SMALL, False))
@@ -159,6 +216,7 @@ class InceptionHmvScreen(QWidget):
         hdr.setSectionsMovable(True)
         self._table.setShowGrid(True)
         layout.addWidget(self._table, 1)
+        self._freeze = FrozenColumns(self._table)
 
         bottom = QHBoxLayout()
         self._status_lbl = QLabel("")
@@ -176,6 +234,16 @@ class InceptionHmvScreen(QWidget):
             cal = date_edit.calendarWidget()
             if cal is not None:
                 cal.setStyleSheet(stylesheet)
+
+    def _freeze_style(self) -> str:
+        t = self._controller.theme
+        bg = t.get("card_bg")
+        txt = t.get("text_primary")
+        border = t.get("border")
+        return (
+            f"QTableView {{ background: {bg}; color: {txt}; border-right: 2px solid {border}; }}"
+            f"QTableView QHeaderView::section {{ background: {bg}; color: {txt}; }}"
+        )
 
     # ── date range ───────────────────────────────────────────────────────────
 
@@ -233,6 +301,7 @@ class InceptionHmvScreen(QWidget):
 
         if not rows:
             self._headers, self._data = [], []
+            self._raw_headers, self._raw_data = [], []
             self._table.setRowCount(0)
             self._table.setColumnCount(0)
             self._status_lbl.setText(f"No synced data for {date_from.isoformat()} to {date_to.isoformat()}.")
@@ -240,23 +309,26 @@ class InceptionHmvScreen(QWidget):
             return
 
         metric_keys = sorted({k for r in rows for k in r.get("values", {})})
-        self._headers = ["Symbol"] + metric_keys
-        self._data = [
+        headers = ["Symbol"] + metric_keys
+        data = [
             [_display_symbol(r["symbol"])] + [r.get("values", {}).get(k) for k in metric_keys]
             for r in rows
         ]
+        headers, data = inception_sector.inject_sector_rows(headers, data)
 
-        # Active Inception strategies are evaluated entirely here, on the
-        # client — the hmv response above is base (raw + precomputed) values
-        # only. A strategy column referencing a range-gated (blank) field
-        # naturally comes back blank too (evaluate() already treats a None
-        # field that way). load_all() falls back to its local cache on a
-        # network error, so this can't raise.
-        strategies = [s for s in inception_strategy_store.load_all() if s.get("active")]
-        self._headers, self._data = apply_strategies(strategies, self._headers, self._data)
+        self._raw_headers, self._raw_data = headers, data
+        # A fresh Load is a wholly new dataset — reset column visibility to
+        # "everything shown" rather than trying to carry over indices from
+        # whatever the previous load's column layout happened to be.
+        self._visible_cols = set(range(len(self._raw_headers)))
 
-        self._visible_cols = set(range(len(self._headers)))
-        self._populate_table()
+        # Reloaded fresh on every Load, same as before — the "⚡ Strategies"
+        # picker (see _show_strategy_picker) can further narrow this down to
+        # a specific subset for the current session without needing another
+        # Load; that picker also re-syncs from the store on open, so a
+        # strategy just edited in Strategy Builder always shows up promptly.
+        self._strategies = inception_strategy_store.load_all()
+        self._recompute_display()
         self._status_lbl.setText(
             f"{len(rows)} instruments. Blank cells mean this range doesn't cover enough "
             f"history for that column (e.g. 52WH needs ~52 weeks)."
@@ -270,6 +342,60 @@ class InceptionHmvScreen(QWidget):
         self._progress_bar.setVisible(False)
         self._status_lbl.setText(f"Load failed: {message}")
         self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
+
+    # ── strategies ───────────────────────────────────────────────────────────
+
+    def _show_strategy_picker(self):
+        from screens.live_viewer import StrategyPickerPopup
+        t = self._controller.theme
+        try:
+            self._strategies = inception_strategy_store.load_all()
+        except (ApiError, NetworkError):
+            pass   # best-effort refresh — picker still opens with whatever it already had
+        popup = StrategyPickerPopup(self._strategies, t, self)
+        popup.applied.connect(self._on_strategies_applied)
+        btn_pos = self._strat_btn.mapToGlobal(self._strat_btn.rect().bottomLeft())
+        popup.adjustSize()
+        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.show()
+
+    def _on_strategies_applied(self, updated: list):
+        t = self._controller.theme
+        updated_by_id = {s["id"]: s for s in updated}
+        self._strategies = [updated_by_id.get(s["id"], s) for s in self._strategies]
+        for s in updated:
+            try:
+                inception_strategy_store.save_strategy(s)
+            except (ApiError, NetworkError) as exc:
+                show_api_error(t, self, exc)
+        self._recompute_display()
+
+    def _update_strat_btn_label(self):
+        active = sum(1 for s in self._strategies if s.get("active"))
+        total = len(self._strategies)
+        self._strat_btn.setText("⚡  Strategies" if total == 0 else f"⚡  Strategies  {active}/{total}")
+
+    def _recompute_display(self):
+        """Re-derives the displayed headers/data from the cached raw (no
+        strategy columns) rows + self._strategies — cheap, client-side, no
+        recompute of Group A/B/Formula Builder needed. Used both right after
+        a Load and whenever the Strategies picker applies a new selection."""
+        if not self._raw_headers:
+            self._update_strat_btn_label()
+            return
+        headers, data = apply_strategies(self._strategies, self._raw_headers, self._raw_data)
+        # Keep any strategy-appended column (beyond the raw/base set)
+        # visible by default, without undoing a column-visibility choice the
+        # user already made for existing columns (same top-up-not-reset rule
+        # screens.live_viewer's _populate_table uses). Compared against
+        # len(self._raw_headers) — the authoritative "how many base columns
+        # exist right now" — rather than the previous self._headers, which
+        # could be stale from a completely different prior render.
+        if len(headers) > len(self._raw_headers):
+            self._visible_cols |= set(range(len(self._raw_headers), len(headers)))
+        self._headers, self._data = headers, data
+        self._populate_table()
+        self._update_strat_btn_label()
 
     # ── table ────────────────────────────────────────────────────────────────
 
@@ -293,6 +419,7 @@ class InceptionHmvScreen(QWidget):
         for c in range(len(self._headers)):
             self._table.setColumnHidden(c, c not in self._visible_cols)
         self._table.resizeColumnsToContents()
+        self._freeze.configure(self._headers, _FROZEN_HEADERS, self._freeze_style())
 
     def _show_col_filter(self):
         if not self._headers:
@@ -306,11 +433,13 @@ class InceptionHmvScreen(QWidget):
         popup.show()
 
     def _apply_col_filter(self, visible: set):
-        if "Symbol" in self._headers:
-            visible.add(self._headers.index("Symbol"))
+        for must in _FROZEN_HEADERS:
+            if must in self._headers:
+                visible.add(self._headers.index(must))
         self._visible_cols = visible
         for c in range(len(self._headers)):
             self._table.setColumnHidden(c, c not in self._visible_cols)
+        self._freeze.configure(self._headers, _FROZEN_HEADERS, self._freeze_style())
 
     # ── theme ────────────────────────────────────────────────────────────────
 
@@ -321,3 +450,5 @@ class InceptionHmvScreen(QWidget):
             self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         self._style_calendar_popups()
         self._table.repaint()
+        if self._headers:
+            self._freeze.configure(self._headers, _FROZEN_HEADERS, self._freeze_style())

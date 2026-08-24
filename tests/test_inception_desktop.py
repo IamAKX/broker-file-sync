@@ -632,6 +632,150 @@ def test_snapshot_and_hmv_progress_cb_called_once_per_instrument(bars_db):
     assert ticks == [(1, 2), (2, 2)]
 
 
+# ── services.inception_sector ────────────────────────────────────────────
+
+def test_sector_for_known_and_unknown_symbol():
+    from services import inception_sector
+
+    known = next(iter(inception_sector._MAP))
+    assert inception_sector.sector_for(known) == inception_sector._MAP[known]
+    assert inception_sector.sector_for(known.lower()) == inception_sector._MAP[known]  # case-insensitive
+    assert inception_sector.sector_for("NOT_A_REAL_SYMBOL_XYZ") == "—"
+
+
+def test_inject_sector_rows_prepends_sector_looked_up_by_symbol_column():
+    from services import inception_sector
+
+    known = next(iter(inception_sector._MAP))
+    headers = ["Symbol", "CLOSE"]
+    data = [[known, 100.0], ["NOT_A_REAL_SYMBOL_XYZ", 200.0]]
+    new_headers, new_data = inception_sector.inject_sector_rows(headers, data)
+    assert new_headers == ["Sector", "Symbol", "CLOSE"]
+    assert new_data[0] == [inception_sector._MAP[known], known, 100.0]
+    assert new_data[1] == ["—", "NOT_A_REAL_SYMBOL_XYZ", 200.0]
+
+
+# ── components.frozen_table_columns ──────────────────────────────────────
+
+def test_frozen_columns_pins_named_headers_at_visual_zero_and_one(qapp):
+    from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+    from components.frozen_table_columns import FrozenColumns
+
+    headers = ["Symbol", "Sector", "CLOSE"]
+    table = QTableWidget(2, 3)
+    table.setHorizontalHeaderLabels(headers)
+    for r in range(2):
+        for c, h in enumerate(headers):
+            table.setItem(r, c, QTableWidgetItem(f"{h}{r}"))
+
+    freeze = FrozenColumns(table)
+    freeze.configure(headers, ["Sector", "Symbol"])
+
+    hdr = table.horizontalHeader()
+    assert hdr.logicalIndex(0) == headers.index("Sector")
+    assert hdr.logicalIndex(1) == headers.index("Symbol")
+    assert freeze._frozen_cols == [headers.index("Sector"), headers.index("Symbol")]
+
+
+def test_frozen_columns_unfreeze_hides_overlay(qapp):
+    from PySide6.QtWidgets import QTableWidget
+    from components.frozen_table_columns import FrozenColumns
+
+    headers = ["Symbol", "Sector"]
+    table = QTableWidget(1, 2)
+    table.setHorizontalHeaderLabels(headers)
+
+    freeze = FrozenColumns(table)
+    freeze.configure(headers, ["Sector", "Symbol"])
+    assert freeze._frozen_cols
+
+    freeze.configure(headers, [])
+    assert freeze._frozen_cols == []
+    assert freeze._overlay.isHidden()
+
+
+# ── services.inception_formula_builder_columns ───────────────────────────
+
+def _daily_bars(symbol, start, n, close_fn=lambda i: 100 + i, skip=frozenset()):
+    """n consecutive weekday bars starting at *start*, skipping any offset
+    in *skip* (to simulate a holiday gap for _holidays_for tests)."""
+    from datetime import timedelta
+    bars = []
+    d, made = start, 0
+    i = 0
+    while made < n:
+        if d.weekday() < 5:
+            if i not in skip:
+                c = close_fn(i)
+                bars.append(_bar(symbol, d, c, c + 5, c - 5, c))
+                made += 1
+            i += 1
+        d += timedelta(days=1)
+    return bars
+
+
+def test_compute_for_bars_empty_returns_empty_dict():
+    from services import inception_formula_builder_columns as fbc
+
+    assert fbc.compute_for_bars("ABB_I", []) == {}
+
+
+def test_compute_for_bars_computes_month_top_bottom_from_close_only():
+    """MT/MB (MONTH TOP/BOTTOM) only need Close — see services.formula_engine
+    — so they should compute for real from Inception's OHLC-only bars."""
+    from services import inception_formula_builder_columns as fbc
+
+    bars = _daily_bars("ABB_I", date(2026, 1, 1), 160)   # ~7.5 months of daily bars
+    values = fbc.compute_for_bars("ABB_I", bars)
+    assert values["MT"] is not None
+    assert values["MB"] is not None
+    assert values["MT"] >= values["MB"]
+
+
+def test_compute_for_bars_avgrate_dependent_codes_are_none_not_crash():
+    """Inception bars carry no AvgRate/DiffPcnt — turnover/ATP codes must
+    come back None (services.formula_engine's own "blank rather than crash"
+    fallback for missing input), not raise."""
+    from services import inception_formula_builder_columns as fbc
+
+    bars = _daily_bars("ABB_I", date(2026, 1, 1), 40)
+    values = fbc.compute_for_bars("ABB_I", bars)
+    for code in ("PATP", "CWATP", "PWATP", "CMATP", "PMATP", "DAY TO", "PDTO", "CWTO", "PWTO"):
+        assert values[code] is None
+
+
+def test_compute_for_bars_caches_and_clear_cache_forces_recompute(monkeypatch):
+    from services import inception_formula_builder_columns as fbc
+    from services import formula_engine
+
+    fbc.clear_cache()
+    bars = _daily_bars("ABB_I", date(2026, 1, 1), 40)
+
+    calls = []
+    real = formula_engine.compute_for_symbol
+    monkeypatch.setattr(formula_engine, "compute_for_symbol", lambda *a, **kw: (calls.append(1) or real(*a, **kw)))
+
+    fbc.compute_for_bars("ABB_I", bars)
+    fbc.compute_for_bars("ABB_I", bars)
+    assert len(calls) == 1   # second call hit the cache
+
+    fbc.clear_cache()
+    fbc.compute_for_bars("ABB_I", bars)
+    assert len(calls) == 2   # cache cleared -> recomputed
+
+
+def test_holidays_for_treats_missing_weekday_as_holiday_not_gap():
+    from services import inception_formula_builder_columns as fbc
+
+    # A 2-week run of weekday bars with one weekday (offset 2) missing.
+    bars = _daily_bars("ABB_I", date(2026, 1, 5), 9, skip={2})  # Jan 5 is a Monday
+    holidays = fbc._holidays_for(bars)
+    assert len(holidays) == 1
+    missing_date = next(iter(holidays))
+    assert missing_date.weekday() < 5
+    assert missing_date not in {b["trade_date"] for b in bars}
+
+
 # ── screens: view by date ────────────────────────────────────────────────
 
 def test_view_by_date_display_symbol_strips_roll_suffix():
@@ -680,6 +824,35 @@ def test_view_by_date_applies_active_strategies_locally(qapp, controller, monkey
     assert "Day Range" in headers
     assert rows[0][headers.index("Day Range")] == 10.0
     assert rows[0][headers.index("Symbol")] == "ABB"
+    assert "Sector" in headers   # see services.inception_sector
+    assert fake_viewer_cls.call_args.kwargs["frozen_headers"] == ["Sector", "Symbol"]
+    assert screen._strat_btn.text() == "⚡  Strategies  1/1"
+
+
+def test_view_by_date_strategy_picker_lets_multiple_strategies_be_selected(qapp, controller, monkeypatch, bars_db):
+    """The picker (screens.live_viewer.StrategyPickerPopup, reused as-is)
+    replaces the old "no way to pick which strategies apply" gap — Apply
+    persists the chosen subset and updates the button label, same shape
+    LMV's own picker uses."""
+    from screens.inception_view_by_date import InceptionViewByDateScreen
+    from services import inception_strategy_store
+
+    strategies = [
+        {"id": "s1", "name": "A", "active": False, "row_filter": [], "columns": []},
+        {"id": "s2", "name": "B", "active": False, "row_filter": [], "columns": []},
+    ]
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: strategies)
+    saved = []
+    monkeypatch.setattr(inception_strategy_store, "save_strategy", lambda s: saved.append(dict(s)))
+
+    screen = InceptionViewByDateScreen(controller)
+    screen._show_strategy_picker()
+    assert screen._strategies == strategies
+
+    updated = [dict(s1, active=True) for s1 in strategies]  # both picked on
+    screen._on_strategies_applied(updated)
+    assert len(saved) == 2 and all(s["active"] for s in saved)
+    assert screen._strat_btn.text() == "⚡  Strategies  2/2"
 
 
 def test_view_by_date_screen_constructs(qapp, controller):
@@ -759,6 +932,66 @@ def test_hmv_screen_applies_active_strategies_locally(qapp, controller, monkeypa
     _run_worker(qapp, screen)
     assert "Day Range" in screen._headers
     assert screen._data[0][screen._headers.index("Day Range")] == 10.0
+    assert "Sector" in screen._headers   # see services.inception_sector
+    assert screen._strat_btn.text() == "⚡  Strategies  1/1"
+
+
+def test_hmv_screen_includes_formula_builder_columns(qapp, controller, bars_db):
+    """MT/MB and friends (services.inception_formula_builder_columns) are
+    HMV-only per product decision — merged into every row alongside Group
+    A/B, computed from that same instrument's local bars."""
+    from screens.inception_hmv import InceptionHmvScreen
+    from PySide6.QtCore import QDate
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2026, 1, 1))
+    screen._to_date.setDate(QDate(2026, 8, 18))
+
+    screen._on_load()
+    _run_worker(qapp, screen)
+    assert "MT" in screen._headers and "MB" in screen._headers
+    assert "DT" in screen._headers and "DB" in screen._headers
+
+
+def test_hmv_strategy_picker_lets_multiple_strategies_be_selected_and_applied(qapp, controller, monkeypatch, bars_db):
+    """Before the picker, HMV silently unioned every persisted-active
+    strategy together (services.strategy_engine.apply_strategies) with no
+    way to isolate one — a row filter on any single strategy looked broken
+    whenever another active strategy had none. The picker (screens.
+    live_viewer.StrategyPickerPopup) fixes both: pick exactly which
+    strategies apply, Apply persists that choice and re-renders without
+    another Load."""
+    from screens.inception_hmv import InceptionHmvScreen
+    from services import inception_strategy_store
+    from PySide6.QtCore import QDate
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2026, 1, 1))
+    screen._to_date.setDate(QDate(2026, 8, 18))
+
+    strategies = [{
+        "id": "s1", "name": "Range", "active": True, "row_filter": [],
+        "columns": [{
+            "name": "Day Range",
+            "formula": [{"type": "col", "value": "CLOSE"}, {"type": "op", "value": "-"}, {"type": "col", "value": "OPEN"}],
+        }],
+    }]
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: strategies)
+    saved = []
+    monkeypatch.setattr(inception_strategy_store, "save_strategy", lambda s: saved.append(dict(s)))
+
+    screen._on_load()
+    _run_worker(qapp, screen)
+    assert "Day Range" in screen._headers
+
+    # Toggle it off via the picker's apply path (no re-Load needed) — the
+    # column should disappear from the re-derived display immediately.
+    screen._on_strategies_applied([dict(strategies[0], active=False)])
+    assert saved and saved[-1]["active"] is False
+    assert "Day Range" not in screen._headers
+    assert screen._strat_btn.text() == "⚡  Strategies  0/1"
 
 
 # ── screens: strategy builder ────────────────────────────────────────────
@@ -791,6 +1024,85 @@ def test_strategy_builder_fields_come_from_local_catalogue_no_network(qapp, cont
     assert "OPEN" in screen._fields
     assert "52WH" in screen._fields
     assert "DAY UF GUP 1" in screen._fields
+
+
+def test_strategy_builder_sample_data_placeholder_when_nothing_synced(qapp, controller, monkeypatch, bars_db):
+    from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
+
+    monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
+
+    screen = InceptionStrategyBuilderScreen(controller)
+    screen._start_sample_load()
+    assert screen._sample_rows == []
+    assert screen._sample_worker is None
+    assert "synced" in screen._sample_status_lbl.text()
+
+
+def test_strategy_builder_sample_data_loads_real_rows_in_background(qapp, controller, monkeypatch, bars_db):
+    """See this module's "Real sample data" docstring section — a background
+    snapshot load feeds real per-instrument rows into the formula editor
+    instead of every field reading the all-1.0 dummy."""
+    from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
+
+    monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+
+    screen = InceptionStrategyBuilderScreen(controller)
+    screen._start_sample_load()
+    assert screen._sample_worker is not None
+    assert screen._sample_progress.isHidden() is False
+    assert screen._sample_worker.wait(5000)
+    qapp.processEvents()
+
+    assert screen._sample_rows
+    assert screen._sample_rows[0].get("CLOSE") == 100
+    assert screen._sample_progress.isHidden() is True
+    assert "2026-08-18" in screen._sample_status_lbl.text()
+
+
+def test_open_expression_editor_uses_real_sample_row_when_given(qapp, controller, monkeypatch):
+    """_open_expression_editor should feed a real row (not the all-1.0
+    dummy) once sample data has loaded."""
+    from screens import inception_strategy_builder as isb
+    from PySide6.QtWidgets import QDialog
+
+    sample_rows = [{"OPEN": 90.0, "CLOSE": 100.0}, {"OPEN": 190.0, "CLOSE": 200.0}]
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, *args, **kwargs):
+            captured["row_arg"] = args[3]
+            captured.update(kwargs)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(isb, "ExpressionEditorDialog", _FakeDlg)
+
+    isb._open_expression_editor([], ["OPEN", "CLOSE"], None, "value", sample_rows=sample_rows)
+    assert captured["row_arg"] in sample_rows
+    assert captured["all_lmv_data"] == sample_rows
+
+
+def test_open_expression_editor_falls_back_to_dummy_row_without_sample_data(qapp, controller, monkeypatch):
+    from screens import inception_strategy_builder as isb
+    from PySide6.QtWidgets import QDialog
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, *args, **kwargs):
+            captured["row_arg"] = args[3]
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(isb, "ExpressionEditorDialog", _FakeDlg)
+
+    isb._open_expression_editor([], ["OPEN", "CLOSE"], None, "value", sample_rows=None)
+    assert captured["row_arg"] == {"OPEN": 1.0, "CLOSE": 1.0}
 
 
 def test_strategy_builder_new_strategy_opens_editor(qapp, controller, monkeypatch):

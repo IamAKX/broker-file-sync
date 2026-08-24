@@ -27,27 +27,60 @@ displayed rows (services.strategy_engine.apply_strategies, the same local
 engine LMV's live/historical views use), and this module's own
 "Test Formula" (ExpressionEditorDialog's built-in Compile & Test, via
 services.strategy_engine.compile_check — also local) for validating a
-formula against a dummy row (every offered field set to 1.0) while editing.
+formula against a real row of Inception data when one's available.
+
+── Real sample data ─────────────────────────────────────────────────────────
+Unlike LMV's Strategy Builder (screens.strategy_builder), which gets real
+sheet rows pushed in from DataImportScreen the moment a file loads
+(set_lmv_data), Inception's has nothing pushing data in — so this screen
+kicks off its OWN background load (_start_sample_load, same
+_SnapshotLoadWorker screens.inception_view_by_date's View action uses, as of
+whatever this device's most recently synced trading day is), with a
+progress bar + "Inception data is loading…" message while it runs. Once it
+lands, every field the offered *fields* list a real per-instrument row
+(self._sample_rows) is threaded down into every ExpressionEditorDialog/
+VariablesManagerDialog this screen opens (see _open_expression_editor),
+so "Test Formula"/field previews reflect real values instead of every field
+reading 1.0. Falls back to the old all-1.0 dummy row when nothing's synced
+locally yet (_dummy_row) — same "blank/placeholder rather than crash"
+convention used everywhere else in Inception.
+
+Triggered from showEvent (guarded to run once), not __init__ — every screen
+is constructed once at app startup (app_window._register_screens) whether
+or not the user ever opens it, long before it's actually shown; spawning a
+real background QThread that early/eagerly would be wasted work for a
+screen nobody's visited yet, and (worse, the reason this specifically isn't
+a bare QTimer.singleShot(0, ...) in __init__ the way the cheap, threadless
+_reload_all is) a bound-method singleShot keeps its receiver alive only
+until it fires — construct-many/never-show-them-all patterns (exactly what
+a test suite does) can end up firing it against an otherwise-abandoned
+screen and starting an unmonitored QThread with nothing left holding a
+reference to it once that single call returns, which Qt aborts hard on if
+the thread is still running when it's garbage-collected. showEvent only
+fires when something actually calls .show() on this widget (or shows an
+ancestor it's inside), which normal navigation does but construction alone
+never does — sidestepping that failure mode entirely.
 """
 
 import copy
 import font_scale
+
 from PySide6.QtCore import Qt, QSize, QTimer, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QFrame, QScrollArea,
-    QDialog, QComboBox, QColorDialog, QMessageBox, QPushButton,
+    QDialog, QComboBox, QColorDialog, QMessageBox, QPushButton, QProgressBar,
 )
 
 from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
-from services import inception_columns
+from services import inception_bars_store, inception_columns
 from services import inception_strategy_store as store
 from services import inception_formula_variable_store as var_store
 from screens.strategy_builder import (
     StrategyCard, _CategorySection, _AddCategoryDialog,
     _ADD_CATEGORY_SENTINEL, _tokens_to_display, _btn, _sep, _apply_dialog_bg,
-    _svg_icon, _t,
+    _svg_icon, _t, _pick_compile_test_row,
 )
 from screens.formula_editor import ExpressionEditorDialog, VariablesManagerDialog
 
@@ -62,12 +95,23 @@ def _dummy_row(fields: list) -> dict:
 
 
 def _open_expression_editor(tokens: list, fields: list, theme, mode: str,
-                             self_value=None, parent=None) -> list | None:
+                             self_value=None, parent=None, sample_rows: list = None) -> list | None:
     """Opens the real Expression Editor scoped to Inception's fields/store —
-    returns the resulting token list, or None if the user cancelled."""
-    row = _dummy_row(fields)
+    returns the resulting token list, or None if the user cancelled.
+
+    *sample_rows*, when given (a non-empty list of {field: value} dicts —
+    see this module's "Real sample data" docstring section), is used both as
+    the Compile & Test row and as the aggregate-function data set instead of
+    the all-1.0 dummy row.
+    """
+    if sample_rows:
+        row = _pick_compile_test_row(sample_rows)
+        all_data = sample_rows
+    else:
+        row = _dummy_row(fields)
+        all_data = [row]
     dlg = ExpressionEditorDialog(
-        tokens, fields, [], row, all_lmv_data=[row], theme=theme, mode=mode,
+        tokens, fields, [], row, all_lmv_data=all_data, theme=theme, mode=mode,
         self_value=self_value, real_lmv_headers=fields,
         sections=INCEPTION_SECTIONS, variable_store=var_store, parent=parent,
     )
@@ -79,12 +123,13 @@ def _open_expression_editor(tokens: list, fields: list, theme, mode: str,
 # ── column editor dialog (name + formula + conditional formatting) ──────────
 
 class _InceptionColumnEditorDialog(QDialog):
-    def __init__(self, col_def: dict, fields: list, theme=None, parent=None):
+    def __init__(self, col_def: dict, fields: list, theme=None, parent=None, sample_rows: list = None):
         super().__init__(parent)
         self._col = copy.deepcopy(col_def)
         self._col.setdefault("fmt_rules", [])
         self._fields = fields
         self._theme = theme
+        self._sample_rows = sample_rows
         self.setWindowTitle("Edit Column")
         self.resize(680, 600)
         _apply_dialog_bg(self, theme)
@@ -173,6 +218,7 @@ class _InceptionColumnEditorDialog(QDialog):
     def _open_formula_editor(self):
         tokens = _open_expression_editor(
             list(self._col.get("formula", [])), self._fields, self._theme, "value", parent=self,
+            sample_rows=self._sample_rows,
         )
         if tokens is not None:
             self._col["formula"] = tokens
@@ -297,7 +343,7 @@ class _InceptionColumnEditorDialog(QDialog):
         # compile-testing here (see module docstring).
         tokens = _open_expression_editor(
             list(rule.get("condition", [])), self._fields, self._theme, "condition",
-            self_value=1.0, parent=self,
+            self_value=1.0, parent=self, sample_rows=self._sample_rows,
         )
         if tokens is not None:
             rule["condition"] = tokens
@@ -330,11 +376,12 @@ def _colorbutton(color: str):
 class _InceptionStrategyEditor(QWidget):
     saved = Signal(dict)
 
-    def __init__(self, strategy: dict, fields: list, theme=None, parent=None):
+    def __init__(self, strategy: dict, fields: list, theme=None, parent=None, sample_rows: list = None):
         super().__init__(parent)
         self._strategy = copy.deepcopy(strategy)
         self._fields = fields
         self._theme = theme
+        self._sample_rows = sample_rows
         self._last_valid_category = self._strategy.get("category", "Daily")
         self._build()
 
@@ -444,7 +491,8 @@ class _InceptionStrategyEditor(QWidget):
 
     def _add_column(self):
         col = store.new_column(f"Col{len(self._strategy['columns']) + 1}")
-        dlg = _InceptionColumnEditorDialog(col, self._field_names(), self._theme, parent=self)
+        dlg = _InceptionColumnEditorDialog(col, self._field_names(), self._theme, parent=self,
+                                            sample_rows=self._sample_rows)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["columns"].append(dlg.result_col())
             self._refresh_columns()
@@ -453,7 +501,8 @@ class _InceptionStrategyEditor(QWidget):
         col = self._strategy["columns"][idx]
         # This column can't reference its own formula.
         fields = [f for f in self._field_names() if f != col.get("name")]
-        dlg = _InceptionColumnEditorDialog(col, fields, self._theme, parent=self)
+        dlg = _InceptionColumnEditorDialog(col, fields, self._theme, parent=self,
+                                            sample_rows=self._sample_rows)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["columns"][idx] = dlg.result_col()
             self._refresh_columns()
@@ -534,7 +583,7 @@ class _InceptionStrategyEditor(QWidget):
     def _open_filter_editor(self):
         tokens = _open_expression_editor(
             list(self._strategy.get("row_filter", [])), self._field_names(), self._theme,
-            "condition", parent=self,
+            "condition", parent=self, sample_rows=self._sample_rows,
         )
         if tokens is not None:
             self._strategy["row_filter"] = tokens
@@ -583,11 +632,23 @@ class InceptionStrategyBuilderScreen(QWidget):
         self._theme = controller.theme
         self._strategies: list = []
         self._fields: list = []
+        self._sample_rows: list = []
+        self._sample_as_of = None
+        self._sample_worker = None
+        self._sample_load_started = False
         self._active_editor = None
         self._search_query = ""
         self._expanded_categories: set = set()
         self._build()
         QTimer.singleShot(0, self._reload_all)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        # See this module's "Real sample data" docstring section for why
+        # this is triggered here (once, guarded) rather than from __init__.
+        if not self._sample_load_started:
+            self._sample_load_started = True
+            self._start_sample_load()
 
     def _build(self):
         t = self._theme
@@ -622,6 +683,23 @@ class InceptionStrategyBuilderScreen(QWidget):
         top_lay.addSpacing(8)
         top_lay.addWidget(new_btn)
         root.addWidget(topbar)
+
+        sample_row = QFrame()
+        sample_row.setObjectName("inceptionSampleRow")
+        sample_row.setStyleSheet(f"QFrame#inceptionSampleRow{{background:{card};}}")
+        sample_lay = QVBoxLayout(sample_row)
+        sample_lay.setContentsMargins(20, 6, 20, 6)
+        sample_lay.setSpacing(4)
+        self._sample_status_lbl = QLabel("")
+        self._sample_status_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._sample_status_lbl.setStyleSheet(f"color:{txts};")
+        sample_lay.addWidget(self._sample_status_lbl)
+        self._sample_progress = QProgressBar()
+        self._sample_progress.setFixedHeight(4)
+        self._sample_progress.setTextVisible(False)
+        self._sample_progress.setVisible(False)
+        sample_lay.addWidget(self._sample_progress)
+        root.addWidget(sample_row)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -698,6 +776,65 @@ class InceptionStrategyBuilderScreen(QWidget):
         self._strategies = store.load_all()
         self._refresh_list()
 
+    # ── real sample data (background load) ──────────────────────────────────
+
+    def _start_sample_load(self):
+        """Kicks off a background snapshot load — see this module's "Real
+        sample data" docstring section. No-ops (leaving formula testing on
+        the all-1.0 dummy row) when nothing's synced to this device yet;
+        there's nothing to load in that case, same message screens.
+        inception_hmv/inception_view_by_date show."""
+        t = self._theme
+        as_of = inception_bars_store.last_synced_date()
+        if as_of is None:
+            self._sample_status_lbl.setText(
+                "No Inception data synced to this device yet — formula testing will use "
+                "placeholder values until you sync (Inception > Data & Settings)."
+            )
+            self._sample_status_lbl.setStyleSheet(f"color:{_t(t,'text_secondary')};")
+            return
+
+        self._sample_as_of = as_of
+        self._sample_status_lbl.setText("Inception data is loading…")
+        self._sample_status_lbl.setStyleSheet(f"color:{_t(t,'text_secondary')};")
+        self._sample_progress.setRange(0, 0)   # busy/indeterminate until the first progress tick arrives
+        self._sample_progress.setValue(0)
+        self._sample_progress.setVisible(True)
+
+        from screens.inception_view_by_date import _SnapshotLoadWorker
+        self._sample_worker = _SnapshotLoadWorker(as_of, parent=self)
+        self._sample_worker.progress.connect(self._on_sample_progress)
+        self._sample_worker.succeeded.connect(self._on_sample_succeeded)
+        self._sample_worker.failed.connect(self._on_sample_failed)
+        self._sample_worker.start()
+
+    def _on_sample_progress(self, done: int, total: int):
+        self._sample_progress.setRange(0, total)
+        self._sample_progress.setValue(done)
+        self._sample_status_lbl.setText(f"Inception data is loading… {done}/{total} instruments")
+
+    def _on_sample_succeeded(self, rows: list):
+        t = self._theme
+        self._sample_progress.setVisible(False)
+        self._sample_rows = [r.get("values", {}) for r in rows if r.get("values")]
+        if self._sample_rows:
+            self._sample_status_lbl.setText(
+                f"Testing formulas against real Inception data as of "
+                f"{self._sample_as_of.isoformat()} ({len(self._sample_rows)} instruments)."
+            )
+            self._sample_status_lbl.setStyleSheet(f"color:{_t(t,'text_secondary')};")
+        else:
+            self._sample_status_lbl.setText(
+                "No rows available yet to test formulas against — using placeholder values."
+            )
+            self._sample_status_lbl.setStyleSheet(f"color:{_t(t,'text_secondary')};")
+
+    def _on_sample_failed(self, message: str):
+        t = self._theme
+        self._sample_progress.setVisible(False)
+        self._sample_status_lbl.setText(f"Couldn't load Inception data ({message}) — using placeholder values.")
+        self._sample_status_lbl.setStyleSheet(f"color:{_t(t,'status_red')};")
+
     # ── strategy list ────────────────────────────────────────────────────────
 
     def _on_search_changed(self, text: str):
@@ -773,7 +910,8 @@ class InceptionStrategyBuilderScreen(QWidget):
         if self._active_editor is not None:
             self._editor_slot.removeWidget(self._active_editor)
             self._active_editor.deleteLater()
-        editor = _InceptionStrategyEditor(strategy, self._fields, self._theme, parent=self._editor_container)
+        editor = _InceptionStrategyEditor(strategy, self._fields, self._theme, parent=self._editor_container,
+                                           sample_rows=self._sample_rows)
         editor.saved.connect(self._on_strategy_saved)
         self._editor_slot.addWidget(editor)
         self._active_editor = editor
@@ -840,9 +978,14 @@ class InceptionStrategyBuilderScreen(QWidget):
             self._refresh_list()
 
     def _open_variables_manager(self):
-        row = _dummy_row(self._fields)
+        if self._sample_rows:
+            row = _pick_compile_test_row(self._sample_rows)
+            all_data = self._sample_rows
+        else:
+            row = _dummy_row(self._fields)
+            all_data = [row]
         dlg = VariablesManagerDialog(
-            self._fields, row, all_lmv_data=[row], theme=self._theme,
+            self._fields, row, all_lmv_data=all_data, theme=self._theme,
             sections=INCEPTION_SECTIONS, variable_store=var_store, parent=self,
         )
         dlg.exec()

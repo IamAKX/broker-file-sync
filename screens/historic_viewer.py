@@ -6,19 +6,30 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from components.column_filter_popup import ColumnFilterPopup
+from components.frozen_table_columns import FrozenColumns
 
 
 class HistoricDataViewer(QWidget):
-    """Read-only popup showing the saved historic rows/columns for one date."""
+    """Read-only popup showing the saved historic rows/columns for one date.
+
+    *frozen_headers*, backward-compatible (defaults to None — no freeze,
+    exactly today's behavior for the existing Data > Historic Upload > Browse
+    by Date caller), pins the named columns at the left edge via
+    components.frozen_table_columns — used by screens.inception_view_by_date
+    to keep Sector + Symbol in view while scrolling through Inception's wider
+    computed-column set, same idea as screens.live_viewer's Scrip Name
+    freeze on the live grid.
+    """
 
     def __init__(self, headers: list, rows: list, date_str: str, theme=None,
-                 parent=None, title: str = None):
+                 parent=None, title: str = None, frozen_headers: list = None):
         super().__init__(parent)
         self._theme = theme
         self._headers = headers
         self._date_str = date_str
         self._symbol_col = headers.index("Symbol") if "Symbol" in headers else -1
         self._visible_cols = set(range(len(headers)))
+        self._frozen_headers = list(frozen_headers) if frozen_headers else []
         self.setWindowTitle(title if title is not None else f"Historic Data — {date_str}")
         self.resize(1000, 600)
         self._build(headers, rows)
@@ -102,6 +113,20 @@ class HistoricDataViewer(QWidget):
         bottom.addStretch()
         layout.addLayout(bottom)
 
+        self._freeze = FrozenColumns(self._table)
+        if self._frozen_headers:
+            self._freeze.configure(headers, self._frozen_headers, self._freeze_style())
+
+    def _freeze_style(self) -> str:
+        t = self._theme
+        bg = t.get("card_bg") if t else "#1c2128"
+        txt = t.get("text_primary") if t else "#e6edf3"
+        border = t.get("border") if t else "#30363d"
+        return (
+            f"QTableView {{ background: {bg}; color: {txt}; border-right: 2px solid {border}; }}"
+            f"QTableView QHeaderView::section {{ background: {bg}; color: {txt}; }}"
+        )
+
     def _show_col_filter(self):
         if not self._headers:
             return
@@ -115,9 +140,14 @@ class HistoricDataViewer(QWidget):
     def _apply_col_filter(self, visible: set):
         if self._symbol_col >= 0:
             visible.add(self._symbol_col)
+        for name in self._frozen_headers:
+            if name in self._headers:
+                visible.add(self._headers.index(name))
         self._visible_cols = visible
         for c in range(len(self._headers)):
             self._table.setColumnHidden(c, c not in self._visible_cols)
+        if self._frozen_headers:
+            self._freeze.configure(self._headers, self._frozen_headers, self._freeze_style())
 
     def _on_search(self, text: str):
         query = text.strip().lower()
@@ -138,3 +168,5 @@ class HistoricDataViewer(QWidget):
 
     def refresh_theme(self):
         self._table.repaint()
+        if self._frozen_headers:
+            self._freeze.configure(self._headers, self._frozen_headers, self._freeze_style())

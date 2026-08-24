@@ -33,7 +33,10 @@ from PySide6.QtWidgets import (
     QSpinBox, QFrame, QMessageBox, QProgressBar,
 )
 
-from services import inception_bars_store, inception_compute_service, inception_settings, inception_sync_service
+from services import (
+    inception_bars_store, inception_compute_service, inception_formula_builder_columns,
+    inception_settings, inception_sync_service,
+)
 
 
 class _SyncWorker(QThread):
@@ -334,8 +337,11 @@ class InceptionSettingsScreen(QWidget):
         # New/changed bars already self-invalidate inception_compute_
         # service's row cache (the fingerprint includes bar count + last
         # date) — this just frees the now-unused pre-sync entries rather
-        # than letting them sit in memory until the app restarts.
+        # than letting them sit in memory until the app restarts. Same for
+        # the HMV-only Formula Builder column cache (services.
+        # inception_formula_builder_columns), keyed the same way.
         inception_compute_service.clear_cache()
+        inception_formula_builder_columns.clear_cache()
         self._refresh_sync_status()
 
     def _on_sync_failed(self, message: str):
