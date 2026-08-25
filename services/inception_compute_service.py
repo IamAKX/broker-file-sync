@@ -120,35 +120,109 @@ def _row_for_symbol(symbol: str, as_of_date: date, settings: dict) -> tuple[dict
 
 def _compute_row(bars: list[dict], settings: dict) -> dict:
     last = bars[-1]
-    values = {
-        "OPEN": last["open"], "HIGH": last["high"], "LOW": last["low"], "CLOSE": last["close"],
-        "VOL": last["volume"], "OPENINT": last["open_interest"],
-    }
+    return _compute_rows_for_days(bars, settings, [last])[last["trade_date"]]
 
+
+def _compute_rows_for_days(bars: list[dict], settings: dict, target_bars: list[dict]) -> dict:
+    """{trade_date: values} for every bar in *target_bars* (each must
+    already be one of *bars*) — the same OHLC+Group A/B+Group B-alias
+    shape _compute_row returns for a single day, generalized to several.
+    Used by both _compute_row (target_bars = [the last bar]) and
+    range_rows below (target_bars = every bar within the caller's
+    requested date range) — compute_group_a/compute_group_b already
+    return a value for EVERY date in one forward pass over *bars*
+    regardless of how many dates the caller actually wants, so asking for
+    more days here costs nothing beyond this dict-building loop."""
     group_a = compute_group_a(bars, week_window_days=settings["week_window_days"])
     group_b = compute_group_b(bars, threshold_pct=settings["gap_threshold_pct"], fifo_cap=settings["fifo_cap"])
-    d = last["trade_date"]
-    values.update(group_a.get(d, {}))
 
-    for gap_code, area in group_b.get(d, {}).items():
-        low_name, high_name, date_name = inception_columns.gap_metric_names(gap_code)
-        if area is None:
-            values[low_name] = values[high_name] = values[date_name] = None
-        else:
-            low, high, opened_on = area
-            values[low_name] = low
-            values[high_name] = high
-            values[date_name] = opened_on.isoformat()
+    out = {}
+    for bar in target_bars:
+        d = bar["trade_date"]
+        values = {
+            "OPEN": bar["open"], "HIGH": bar["high"], "LOW": bar["low"], "CLOSE": bar["close"],
+            "VOL": bar["volume"], "OPENINT": bar["open_interest"],
+        }
+        values.update(group_a.get(d, {}))
 
-    # Bare Group B code (e.g. "DAY UF GUP 1") aliases its HIGH bound — the
-    # single number most formulas want — matching what the backend used to
-    # do in _build_rows before this moved client-side.
-    for code in inception_columns.GROUP_B:
-        high_key = f"{code} HIGH"
-        if high_key in values:
-            values[code] = values[high_key]
+        for gap_code, area in group_b.get(d, {}).items():
+            low_name, high_name, date_name = inception_columns.gap_metric_names(gap_code)
+            if area is None:
+                values[low_name] = values[high_name] = values[date_name] = None
+            else:
+                low, high, opened_on = area
+                values[low_name] = low
+                values[high_name] = high
+                values[date_name] = opened_on.isoformat()
 
-    return values
+        # Bare Group B code (e.g. "DAY UF GUP 1") aliases its HIGH bound —
+        # the single number most formulas want — matching what the backend
+        # used to do in _build_rows before this moved client-side.
+        for code in inception_columns.GROUP_B:
+            high_key = f"{code} HIGH"
+            if high_key in values:
+                values[code] = values[high_key]
+
+        out[d] = values
+    return out
+
+
+def range_rows(date_from: date, date_to: date, progress_cb=None) -> dict:
+    """{"days": [{"trade_date": iso, "stocks": [{"symbol", "display_name",
+    "metrics"}, ...]}, ...]} for every locally-synced instrument, for every
+    trading day within [date_from, date_to] inclusive that instrument has a
+    bar for — the exact shape api/lmv_snapshot_api.get_range returns, so it
+    can be handed straight to services.formula_stats_engine.compute_stats
+    unchanged. Powers Inception's Formula Stats screen (screens.
+    inception_formula_stats): a strategy's own column formulas need a raw
+    OHLC+Group A/B value PER DAY to aggregate Min/Max/Average/etc. across,
+    the same way Live Master View's own Formula Stats screen aggregates
+    over LmvDailySnapshot days. "display_name" is left equal to "symbol"
+    (the raw, "_I"-suffixed canonical roll series name) — stripping that
+    suffix for display is a screens-layer concern (screens.
+    inception_view_by_date._display_symbol), not this service's.
+
+    Reuses the SAME per-instrument compute_group_a/compute_group_b full-
+    history forward pass snapshot()/hmv() already run (via
+    _compute_rows_for_days) — extracting every day in the requested window
+    from that already-computed date-keyed dict costs nothing extra (the
+    forward pass walks every bar up to date_to regardless of how many
+    days' worth of output get kept), so a wide date_from..date_to range is
+    NOT N separate per-day walks, just a wider slice of a walk already
+    being paid for. Not cached (unlike snapshot()/hmv()'s _row_cache) — a
+    Formula Stats query's date range is arbitrary and reused far less
+    predictably than "the current as-of-date", so a cache here is more
+    likely to sit unused than to pay for itself. progress_cb(done, total),
+    when given, is called once per instrument processed.
+
+    No range-gate (see hmv()'s _apply_range_gate) applied here — that gate
+    exists to keep a single as-of-date snapshot's shown value consistent
+    with what the user's chosen window can justify; there's no equivalent
+    reading of "the window" when the whole point is to aggregate a
+    column's value ACROSS every day in it, so each day's value is simply
+    whatever compute_group_a/b actually produced for it (None where an
+    instrument's own history is too short, same as always). Flagged as a
+    judgment call, not confirmed with the user, same footing as this
+    module's other unconfirmed interpretations."""
+    settings = inception_settings.load()
+    symbols = inception_bars_store.available_symbols()
+    by_date: dict = {}
+    for i, symbol in enumerate(symbols):
+        bars = inception_bars_store.bars_for_symbol(symbol, date_to=date_to)
+        in_range = [b for b in bars if date_from <= b["trade_date"] <= date_to]
+        if in_range:
+            for d, values in _compute_rows_for_days(bars, settings, in_range).items():
+                by_date.setdefault(d, []).append(
+                    {"symbol": symbol, "display_name": symbol, "metrics": values}
+                )
+        if progress_cb:
+            progress_cb(i + 1, len(symbols))
+    return {
+        "days": [
+            {"trade_date": d.isoformat(), "stocks": stocks}
+            for d, stocks in sorted(by_date.items())
+        ]
+    }
 
 
 def _apply_range_gate(

@@ -35,6 +35,7 @@ from components.error_popup import show_api_error
 from services.formula_stats_engine import (
     AGGREGATES, DEFAULT_AGGREGATES, compute_stats, fetch_range_response,
 )
+from services.strategy_engine import expand_columns_for_stats
 
 MAX_DAYS = 90
 
@@ -212,7 +213,19 @@ class FormulaStatsPanel(QWidget):
         self._compute_btn.setEnabled(True)
         self._compute_btn.setText("Compute")
 
-        self._computed = compute_stats(self._columns, range_response)
+        # A column's formula can reference another of THIS SAME strategy's
+        # own columns by name (e.g. "Trigger Price" = [Floor_10D] * 1.01) —
+        # an already-supported pattern for live Live Master View rendering
+        # (services.strategy_engine.apply_strategies enriches each row with
+        # every earlier column's value as it goes). compute_stats has no
+        # such enrichment — its per-day row_dict is raw historic-snapshot
+        # metrics only — so an unexpanded sibling reference would silently
+        # evaluate to None on every day. expand_columns_for_stats resolves
+        # those references first (scoped to self._columns only — the
+        # live_viewer.py caller passes just the one clicked column, where
+        # this is a no-op) — see services.strategy_engine._expand_col_refs
+        # for the full "why", including why it must be paren-wrapped.
+        self._computed = compute_stats(expand_columns_for_stats(self._columns), range_response)
         self._populate_table()
 
     def _populate_table(self):

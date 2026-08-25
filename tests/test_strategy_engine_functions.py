@@ -634,6 +634,30 @@ def test_collect_day_requests_resolves_own_strategy_column_formula():
     assert requests == [("MyCol", 20, inner_formula)]
 
 
+def test_collect_day_requests_resolves_nested_sibling_column_chain():
+    """AVG_DAYS([TriggerPrice], 20) where TriggerPrice = [Floor_10D] * 1.01
+    and Floor_10D is itself ANOTHER of this strategy's own columns (not a
+    raw sheet column) — the single-level substitution used to stop at
+    TriggerPrice's own formula, leaving the nested [Floor_10D] reference
+    unresolved (None on every historic day, same failure mode the
+    row-filter streak bug had). Must resolve the full chain."""
+    from services.strategy_engine import collect_day_requests
+    strategy = {
+        "id": "s1", "active": True,
+        "columns": [
+            {"name": "Floor_10D", "formula": [tok_col("Low")], "fmt_rules": []},
+            {"name": "TriggerPrice", "formula": [tok_col("Floor_10D"), tok_op("*"), tok_num(1.01)], "fmt_rules": []},
+            {"name": "AvgTrigger", "formula": days_tok("AVG_DAYS", "TriggerPrice", 20), "fmt_rules": []},
+        ],
+        "row_filter": [],
+    }
+    requests = collect_day_requests([strategy])
+    assert requests == [("TriggerPrice", 20, [tok_paren("("), tok_col("Low"), tok_paren(")"), tok_op("*"), tok_num(1.01)])]
+    # And it actually evaluates correctly, not just token-shape-correct.
+    formula = requests[0][2]
+    assert evaluate(formula, {"Low": 100.0}, [{"Low": 100.0}]) == 101.0
+
+
 def test_collect_day_requests_falls_back_to_raw_column():
     from services.strategy_engine import collect_day_requests
     strategy = {
@@ -1082,6 +1106,68 @@ def test_compute_streak_at_window_ceiling_reports_none_since():
     assert at_ceiling is True
 
 
+def tok_paren(v):  return {"type": "paren", "value": v}
+
+
+def test_expand_col_refs_substitutes_own_column_wrapped_in_parens():
+    from services.strategy_engine import _expand_col_refs
+    cols_by_name = {"MyCol": [tok_col("High"), tok_op("-"), tok_col("Low")]}
+    result = _expand_col_refs([tok_col("MyCol")], cols_by_name)
+    assert result == [tok_paren("("), tok_col("High"), tok_op("-"), tok_col("Low"), tok_paren(")")]
+
+
+def test_expand_col_refs_recurses_through_chained_columns():
+    from services.strategy_engine import _expand_col_refs
+    cols_by_name = {
+        "A": [tok_col("B"), tok_op("+"), tok_num(1)],
+        "B": [tok_col("High")],
+    }
+    # B (inside A's formula) is itself expanded and gets its own paren pair.
+    assert _expand_col_refs([tok_col("A")], cols_by_name) == [
+        tok_paren("("), tok_paren("("), tok_col("High"), tok_paren(")"), tok_op("+"), tok_num(1), tok_paren(")"),
+    ]
+
+
+def test_expand_col_refs_leaves_raw_columns_and_of_refs_alone():
+    from services.strategy_engine import _expand_col_refs
+    tokens = [tok_col("High"), tok_col_of("Open", "NIFTY")]
+    # Neither "High" (not one of this strategy's own columns) nor the "of"
+    # reference is touched.
+    assert _expand_col_refs(tokens, {"MyCol": [tok_col("Low")]}) == tokens
+    # "of" always names a raw sheet column on another row, never one of
+    # this strategy's own columns, even if the names happen to collide.
+    assert _expand_col_refs(tokens, {"Open": [tok_col("Low")]}) == tokens
+
+
+def test_expand_col_refs_guards_against_self_reference_cycle():
+    from services.strategy_engine import _expand_col_refs
+    # A column whose own formula (accidentally) references itself must not
+    # recurse forever.
+    cols_by_name = {"A": [tok_col("A"), tok_op("+"), tok_num(1)]}
+    assert _expand_col_refs([tok_col("A")], cols_by_name) == [
+        tok_paren("("), tok_col("A"), tok_op("+"), tok_num(1), tok_paren(")"),
+    ]
+
+
+def test_expand_col_refs_parens_prevent_chained_comparison_misread():
+    """The exact bug reported live: row_filter `[MTLTPBuy] == True` where
+    MTLTPBuy's own formula is `[Current] > [MT]`. Naively inlining the
+    substitution unparenthesized would produce the token sequence for
+    `Current > MT == True` — Python reads consecutive comparison operators
+    as a CHAINED comparison (`a > b == c` means `(a > b) and (b == c)`),
+    not `(a > b) == c`, so it'd compare MT itself to True (almost always
+    False, MT is a price) instead of the intended boolean. Parens make it
+    `(Current > MT) == True`, which is what the user's formula means."""
+    from services.strategy_engine import _expand_col_refs
+    cols_by_name = {"MTLTPBuy": [tok_col("Current"), tok_op(">"), tok_col("MT")]}
+    row_filter = [tok_col("MTLTPBuy"), tok_op("=="), tok_num("True")]
+    expanded = _expand_col_refs(row_filter, cols_by_name)
+    row_data = {"Current": 105.0, "MT": 100.0}   # Current > MT is True
+    assert evaluate(expanded, row_data, [row_data]) is True
+    row_data_false = {"Current": 95.0, "MT": 100.0}   # Current > MT is False
+    assert evaluate(expanded, row_data_false, [row_data_false]) is False
+
+
 def _streak_strategy(strategy_id="s1", name="Breakout"):
     return {
         "id": strategy_id, "name": name, "active": True,
@@ -1101,6 +1187,63 @@ def test_collect_day_requests_no_streak_request_without_row_filter():
     from services.strategy_engine import collect_day_requests
     strategy = {"id": "s1", "name": "NoFilter", "active": True, "row_filter": [], "columns": []}
     assert collect_day_requests([strategy]) == []
+
+
+def test_expand_columns_for_stats_resolves_sibling_reference():
+    from services.strategy_engine import expand_columns_for_stats
+    columns = [
+        {"name": "Floor_10D", "formula": [tok_col("Low")], "fmt_rules": []},
+        {"name": "Trigger Price", "formula": [tok_col("Floor_10D"), tok_op("*"), tok_num(1.01)], "fmt_rules": []},
+    ]
+    expanded = expand_columns_for_stats(columns)
+    assert expanded[0]["formula"] == columns[0]["formula"]   # no sibling ref — untouched
+    assert expanded[1]["formula"] == [tok_paren("("), tok_col("Low"), tok_paren(")"), tok_op("*"), tok_num(1.01)]
+    # original list/dicts untouched (compute_stats gets a copy, not a mutation)
+    assert columns[1]["formula"] == [tok_col("Floor_10D"), tok_op("*"), tok_num(1.01)]
+    assert evaluate(expanded[1]["formula"], {"Low": 100.0}, [{"Low": 100.0}]) == 101.0
+
+
+def test_collect_day_requests_streak_expands_row_filter_own_column_ref():
+    """Row filter is `[MyBuySignal]` — the strategy's OWN computed column,
+    not a raw sheet column (the exact pattern
+    test_row_filter_can_reference_strategy_own_column already covers for
+    the live apply_strategies path). The synthetic streak request must
+    carry MyBuySignal's actual formula, not a bare [MyBuySignal] token —
+    otherwise the historic fetch resolves it to None every day (raw
+    snapshot data has no notion of a strategy's own computed columns) and
+    compute_streak always reports 0, regardless of the real streak."""
+    from services.strategy_engine import collect_day_requests, _streak_col_name, STREAK_LOOKBACK_DAYS
+    inner_formula = [tok_col("Current"), tok_op(">"), tok_col("MT")]
+    strategy = {
+        "id": "s1", "active": True,
+        "columns": [{"name": "MyBuySignal", "formula": inner_formula, "fmt_rules": []}],
+        "row_filter": [tok_col("MyBuySignal")],
+    }
+    requests = collect_day_requests([strategy])
+    assert requests == [(_streak_col_name("s1"), STREAK_LOOKBACK_DAYS, [
+        tok_paren("("), tok_col("Current"), tok_op(">"), tok_col("MT"), tok_paren(")"),
+    ])]
+
+
+def test_collect_day_requests_streak_expands_row_filter_with_comparison_suffix():
+    """The exact reported bug: row_filter is `[MTLTPBuy] == True`, not a
+    bare column reference — MTLTPBuy itself must still expand, and the
+    result must stay correct once compiled/evaluated (see
+    test_expand_col_refs_parens_prevent_chained_comparison_misread for the
+    unparenthesized failure mode this guards against)."""
+    from services.strategy_engine import collect_day_requests, _streak_col_name, STREAK_LOOKBACK_DAYS
+    inner_formula = [tok_col("Current"), tok_op(">"), tok_col("MT")]
+    strategy = {
+        "id": "s1", "active": True,
+        "columns": [{"name": "MTLTPBuy", "formula": inner_formula, "fmt_rules": []}],
+        "row_filter": [tok_col("MTLTPBuy"), tok_op("=="), tok_num("True")],
+    }
+    requests = collect_day_requests([strategy])
+    expanded_formula = requests[0][2]
+    row_data = {"Current": 105.0, "MT": 100.0}
+    assert evaluate(expanded_formula, row_data, [row_data]) is True
+    row_data_false = {"Current": 95.0, "MT": 100.0}
+    assert evaluate(expanded_formula, row_data_false, [row_data_false]) is False
 
 
 def test_apply_strategies_adds_days_true_and_since_columns_for_row_filter_strategy():

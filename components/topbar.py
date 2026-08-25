@@ -100,6 +100,7 @@ class TopBar(QWidget):
                 ("View by Date",      lambda: self.navigate.emit("inception_view_by_date")),
                 ("Strategy Builder",  lambda: self.navigate.emit("inception_strategy_builder")),
                 ("HMV",               lambda: self.navigate.emit("inception_hmv")),
+                ("Formula Stats",     lambda: self.navigate.emit("inception_formula_stats")),
                 ("---",               None),
                 ("Data & Settings",   lambda: self.navigate.emit("inception_settings")),
             ]),

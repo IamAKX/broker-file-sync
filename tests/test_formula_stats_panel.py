@@ -84,6 +84,36 @@ def test_compute_with_no_columns_shows_message_without_calling_api(qapp, monkeyp
     assert "No formula columns" in panel._status_lbl.text()
 
 
+def test_compute_resolves_sibling_column_reference(qapp, monkeypatch):
+    """A column's formula referencing another of the SAME strategy's own
+    columns (e.g. "Trigger Price" = [Floor_10D] * 1.01, an already-supported
+    live-rendering pattern) must resolve correctly here too — compute_stats'
+    per-day row_dict is raw historic-snapshot metrics only, with no notion
+    of a strategy's own computed columns, so an unexpanded sibling
+    reference used to silently evaluate to None on every day."""
+    from components.formula_stats_panel import FormulaStatsPanel
+    from api import lmv_snapshot_api
+
+    monkeypatch.setattr(lmv_snapshot_api, "get_range", lambda days: {
+        "days": [_day("2026-01-05", [_stock("INFY", {"Low": 100.0})])]
+    })
+    columns = [
+        {"name": "Floor_10D", "formula": [{"type": "col", "value": "Low"}]},
+        {"name": "Trigger Price", "formula": [
+            {"type": "col", "value": "Floor_10D"}, {"type": "op", "value": "*"},
+            {"type": "num", "value": "1.01"},
+        ]},
+    ]
+    panel = FormulaStatsPanel(None, columns=columns)
+    panel.compute()
+
+    trigger_daily = panel._computed["INFY"]["columns"]["Trigger Price"]["daily"]
+    assert trigger_daily == [("2026-01-05", 101.0)]
+    # set_columns' working list itself must stay untouched (unexpanded) —
+    # only the copy handed to compute_stats is expanded.
+    assert panel._columns[1]["formula"] == columns[1]["formula"]
+
+
 def test_build_daily_popup_sorts_dates_descending(qapp):
     from components.formula_stats_panel import build_daily_popup
     daily = [("2026-01-05", 100.0), ("2026-01-07", 120.0), ("2026-01-06", 110.0)]

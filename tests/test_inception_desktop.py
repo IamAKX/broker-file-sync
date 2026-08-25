@@ -118,7 +118,7 @@ def test_topbar_has_inception_menu_before_help(qapp, controller):
 
     inception_btn = next(b for b in buttons if b.text() == "Inception")
     actions = [a.text() for a in inception_btn.menu().actions()]
-    assert actions == ["View by Date", "Strategy Builder", "HMV", "", "Data & Settings"]
+    assert actions == ["View by Date", "Strategy Builder", "HMV", "Formula Stats", "", "Data & Settings"]
 
 
 # ── services.inception_columns ────────────────────────────────────────────
@@ -679,6 +679,65 @@ def test_snapshot_and_hmv_progress_cb_called_once_per_instrument(bars_db):
     assert ticks == [(1, 2), (2, 2)]
 
 
+# ── services.inception_compute_service.range_rows (Formula Stats) ────────────
+
+def test_range_rows_returns_one_day_entry_per_trading_day_in_range(bars_db):
+    from services import inception_compute_service
+
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2025, 1, 1), 100, 105, 95, 102),
+        _bar("ABB_I", date(2025, 1, 2), 103, 110, 100, 108),
+        _bar("ABB_I", date(2025, 1, 3), 108, 112, 104, 109),
+    ])
+    result = inception_compute_service.range_rows(date(2025, 1, 2), date(2025, 1, 3))
+    assert [d["trade_date"] for d in result["days"]] == ["2025-01-02", "2025-01-03"]
+    day1 = result["days"][0]
+    assert day1["stocks"] == [{
+        "symbol": "ABB_I", "display_name": "ABB_I",
+        "metrics": day1["stocks"][0]["metrics"],
+    }]
+    assert day1["stocks"][0]["metrics"]["CLOSE"] == 108
+    assert day1["stocks"][0]["metrics"]["P.CLOSE"] == 102
+
+
+def test_range_rows_matches_hmv_for_the_same_single_day(bars_db):
+    """range_rows' per-day values must be identical to what hmv()/snapshot()
+    would compute for that same as-of-date — same underlying forward pass,
+    just not discarding every day but the last."""
+    from services import inception_compute_service
+
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2024, 1, 1), 100, 500, 50, 100),
+        _bar("ABB_I", date(2025, 6, 1), 100, 110, 90, 100),
+    ])
+    range_result = inception_compute_service.range_rows(date(2025, 6, 1), date(2025, 6, 1))
+    snapshot_rows = inception_compute_service.snapshot(date(2025, 6, 1))
+    assert range_result["days"][0]["stocks"][0]["metrics"] == snapshot_rows[0]["values"]
+
+
+def test_range_rows_excludes_instruments_with_no_bar_in_range(bars_db):
+    from services import inception_compute_service
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2025, 1, 1), 100, 101, 99, 100)])
+    result = inception_compute_service.range_rows(date(2025, 2, 1), date(2025, 2, 28))
+    assert result["days"] == []
+
+
+def test_range_rows_progress_cb_called_once_per_instrument(bars_db):
+    from services import inception_compute_service
+
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100),
+        _bar("TCS_I", date(2026, 8, 18), 190, 205, 185, 200),
+    ])
+    ticks = []
+    inception_compute_service.range_rows(
+        date(2026, 8, 1), date(2026, 8, 18),
+        progress_cb=lambda done, total: ticks.append((done, total)),
+    )
+    assert ticks == [(1, 2), (2, 2)]
+
+
 # ── services.inception_sector ────────────────────────────────────────────
 
 def test_sector_for_known_and_unknown_symbol():
@@ -1145,6 +1204,157 @@ def test_hmv_strategies_applied_never_deactivates_unchecked_ones_server_side(qap
 
     assert saved_server["s2"]["active"] is True   # never touched server-side
     assert any(s["id"] == "s2" and s.get("active") for s in store.load_all())
+
+
+# ── screens: Formula Stats ────────────────────────────────────────────────
+
+def test_formula_stats_screen_current_range_reads_the_date_pickers(qapp, controller):
+    from PySide6.QtCore import QDate
+    from screens.inception_formula_stats import InceptionFormulaStatsScreen
+
+    screen = InceptionFormulaStatsScreen(controller)
+    screen._from_date.setDate(QDate(2025, 1, 1))
+    screen._to_date.setDate(QDate(2025, 12, 31))
+    assert screen._current_range() == (date(2025, 1, 1), date(2025, 12, 31))
+
+
+def test_formula_stats_screen_rejects_from_after_to_without_computing(qapp, controller, monkeypatch):
+    from PySide6.QtCore import QDate
+    from screens.inception_formula_stats import InceptionFormulaStatsScreen
+    from services import inception_strategy_store
+
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "Range", "active": True, "row_filter": [],
+        "columns": [{"name": "C", "formula": [{"type": "col", "value": "CLOSE"}]}],
+    }])
+    screen = InceptionFormulaStatsScreen(controller)
+    screen._from_date.setDate(QDate(2025, 12, 31))
+    screen._to_date.setDate(QDate(2025, 1, 1))
+
+    screen._on_compute()
+    assert screen._worker is None
+    assert "must be on or before" in screen._status_lbl.text()
+
+
+def test_formula_stats_screen_shows_sync_prompt_when_nothing_synced(qapp, controller, bars_db, monkeypatch):
+    from screens.inception_formula_stats import InceptionFormulaStatsScreen
+    from services import inception_strategy_store
+
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "Range", "active": True, "row_filter": [],
+        "columns": [{"name": "C", "formula": [{"type": "col", "value": "CLOSE"}]}],
+    }])
+    screen = InceptionFormulaStatsScreen(controller)
+    screen._on_compute()
+    assert "Sync" in screen._status_lbl.text()
+
+
+def test_formula_stats_screen_disables_compute_with_no_strategies(qapp, controller, monkeypatch):
+    from screens.inception_formula_stats import InceptionFormulaStatsScreen
+    from services import inception_strategy_store
+
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [])
+    screen = InceptionFormulaStatsScreen(controller)
+    assert screen._compute_btn.isEnabled() is False
+    assert "No strategies" in screen._status_lbl.text()
+
+
+def test_formula_stats_screen_reports_no_columns_for_empty_strategy(qapp, controller, monkeypatch):
+    from screens.inception_formula_stats import InceptionFormulaStatsScreen
+    from services import inception_strategy_store
+
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "Empty", "active": True, "row_filter": [], "columns": [],
+    }])
+    screen = InceptionFormulaStatsScreen(controller)
+    screen._on_compute()
+    assert screen._worker is None
+    assert "no formula columns" in screen._status_lbl.text()
+
+
+def test_formula_stats_screen_computes_aggregates_over_the_range(qapp, controller, monkeypatch, bars_db):
+    from PySide6.QtCore import QDate
+    from screens.inception_formula_stats import InceptionFormulaStatsScreen
+    from services import inception_strategy_store
+
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2025, 1, 1), 100, 105, 95, 102),
+        _bar("ABB_I", date(2025, 1, 2), 103, 110, 100, 108),
+        _bar("ABB_I", date(2025, 1, 3), 108, 112, 104, 109),
+    ])
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "CloseStat", "active": True, "row_filter": [],
+        "columns": [{"name": "C", "formula": [{"type": "col", "value": "CLOSE"}], "fmt_rules": []}],
+    }])
+
+    screen = InceptionFormulaStatsScreen(controller)
+    screen._from_date.setDate(QDate(2025, 1, 1))
+    screen._to_date.setDate(QDate(2025, 1, 3))
+    screen._on_compute()
+    _run_worker(qapp, screen)
+
+    assert screen._table.rowCount() == 1
+    assert screen._table.item(0, 0).text() == "ABB_I"
+    assert screen._table.item(0, 1).text() == "ABB"
+    headers = [screen._table.horizontalHeaderItem(c).text() for c in range(screen._table.columnCount())]
+    assert "C (Min)" in headers and "C (Max)" in headers
+    assert screen._table.item(0, headers.index("C (Min)")).text() == "102"
+    assert screen._table.item(0, headers.index("C (Max)")).text() == "109"
+    assert "3 day(s) of data" in screen._status_lbl.text()
+
+
+def test_formula_stats_screen_resolves_sibling_column_reference(qapp, controller, monkeypatch, bars_db):
+    """The exact fix from earlier this session (services.strategy_engine.
+    expand_columns_for_stats), reused verbatim by this screen's worker —
+    a column referencing another of the SAME strategy's own columns must
+    resolve correctly here too, not just in LMV's Formula Stats screen."""
+    from PySide6.QtCore import QDate
+    from screens.inception_formula_stats import InceptionFormulaStatsScreen
+    from services import inception_strategy_store
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2025, 1, 1), 100, 105, 95, 102)])
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "Chain", "active": True, "row_filter": [],
+        "columns": [
+            {"name": "Floor", "formula": [{"type": "col", "value": "LOW"}], "fmt_rules": []},
+            {"name": "Trigger", "formula": [
+                {"type": "col", "value": "Floor"}, {"type": "op", "value": "*"}, {"type": "num", "value": "1.01"},
+            ], "fmt_rules": []},
+        ],
+    }])
+
+    screen = InceptionFormulaStatsScreen(controller)
+    screen._from_date.setDate(QDate(2025, 1, 1))
+    screen._to_date.setDate(QDate(2025, 1, 1))
+    screen._on_compute()
+    _run_worker(qapp, screen)
+
+    headers = [screen._table.horizontalHeaderItem(c).text() for c in range(screen._table.columnCount())]
+    assert screen._table.item(0, headers.index("Trigger (Min)")).text() == "95.95"
+
+
+def test_formula_stats_screen_day_by_day_popup_shows_saved_daily_values(qapp, controller, monkeypatch, bars_db):
+    from PySide6.QtCore import QDate
+    from screens.inception_formula_stats import InceptionFormulaStatsScreen
+    from services import inception_strategy_store
+
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2025, 1, 1), 100, 105, 95, 102),
+        _bar("ABB_I", date(2025, 1, 2), 103, 110, 100, 108),
+    ])
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "CloseStat", "active": True, "row_filter": [],
+        "columns": [{"name": "C", "formula": [{"type": "col", "value": "CLOSE"}], "fmt_rules": []}],
+    }])
+
+    screen = InceptionFormulaStatsScreen(controller)
+    screen._from_date.setDate(QDate(2025, 1, 1))
+    screen._to_date.setDate(QDate(2025, 1, 2))
+    screen._on_compute()
+    _run_worker(qapp, screen)
+
+    daily = screen._computed["ABB_I"]["columns"]["C"]["daily"]
+    assert sorted(daily) == [("2025-01-01", 102), ("2025-01-02", 108)]
 
 
 # ── screens: strategy builder ────────────────────────────────────────────

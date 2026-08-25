@@ -118,7 +118,14 @@ this is automatic, driven entirely by whether the strategy has a row filter
 at all (see compute_streak, and collect_day_requests' synthetic
 (_streak_col_name(id), STREAK_LOOKBACK_DAYS) request that fetches it through
 the exact same day_history pipeline as every _DAYS function above — same
-non-live refresh cadence, same STREAK_LOOKBACK_DAYS=60-day window).
+non-live refresh cadence, same STREAK_LOOKBACK_DAYS=60-day window). If the
+row filter references one of the strategy's OWN columns by name (a common
+pattern — see _expand_col_refs), that reference is expanded to the
+column's real formula before the historic fetch, same as the _DAYS
+functions' col_name substitution above — the raw historic snapshot has no
+notion of a strategy's own computed columns, only real sheet/metric
+fields, so an unexpanded self-reference would resolve to None on every
+day and report a streak of 0 regardless of the real data.
 
 "Days True" is a lower bound, not a guarantee, when the streak covers the
 ENTIRE fetched window — there's no way to tell from a 60-day fetch whether
@@ -874,6 +881,76 @@ def _streak_col_name(strategy_id: str) -> str:
     return f"__row_filter_streak__:{strategy_id}"
 
 
+def _expand_col_refs(tokens: list, cols_by_name: dict, _seen: frozenset = frozenset()) -> list:
+    """Recursively substitute every plain {"type": "col"} token whose value
+    names one of THIS strategy's own columns (a key in *cols_by_name*) with
+    that column's own formula tokens, so the result can be evaluated against
+    raw historic-snapshot data alone — which has no notion of a strategy's
+    own computed columns, only real sheet/metric fields.
+
+    Used before handing a Row Filter to collect_day_requests' synthetic
+    streak request: filtering on the strategy's own boolean column by name
+    (e.g. row_filter = `[MyBuySignal] == True`) is an already-supported,
+    common pattern in apply_strategies' live path (it evaluates against
+    `enriched`, which carries every earlier column's value — see
+    test_row_filter_can_reference_strategy_own_column) but without this
+    expansion the historic streak fetch would resolve `[MyBuySignal]` to
+    None on every day (compute_stats' row_dict is built purely from raw
+    snapshot metrics), making compute_streak report 0 for every stock
+    regardless of the real streak.
+
+    The substituted formula is wrapped in parens, same as
+    _expand_var_tokens above — inlining unparenthesized tokens into a
+    larger expression is unsafe whenever the substituted formula itself
+    ends in a comparison (e.g. [MyBuySignal] = `[Current] > [MT]`
+    inlined into `[MyBuySignal] == True` must become
+    `(Current > MT) == True`, NOT the unparenthesized `Current > MT ==
+    True` — Python treats consecutive comparison operators as a CHAINED
+    comparison (`a > b == c` means `a > b AND b == c`), not left-to-right
+    evaluation, so the unparenthesized form silently compares the wrong
+    operands and is false almost always).
+
+    ``_seen`` (column names already expanded on this path) guards against
+    infinite recursion on a self- or circularly-referencing column. A
+    "[Col of Symbol]" token (the ``of`` key) never names a strategy's own
+    column — passed through unchanged."""
+    out = []
+    for tok in tokens:
+        name = tok.get("value")
+        if (tok.get("type") == "col" and not tok.get("of")
+                and name in cols_by_name and name not in _seen):
+            inner = _expand_col_refs(cols_by_name[name], cols_by_name, _seen | {name})
+            if inner:
+                out.append({"type": "paren", "value": "("})
+                out.extend(inner)
+                out.append({"type": "paren", "value": ")"})
+        else:
+            out.append(tok)
+    return out
+
+
+def expand_columns_for_stats(columns: list) -> list:
+    """[{"name", "formula", ...}, ...] — same shape as *columns*, but each
+    column's own formula run through _expand_col_refs against ITS OWN
+    siblings (this same list). For any caller (LMV's and Inception's
+    Formula Stats screens, both — components.formula_stats_panel.
+    FormulaStatsPanel.compute/render_range_response, screens.
+    inception_formula_stats) about to hand a strategy's raw column list to
+    services.formula_stats_engine.compute_stats, which evaluates each
+    formula independently against raw historic-snapshot data with none of
+    apply_strategies' row-by-row enrichment. Without this, a column
+    referencing another of the SAME strategy's own columns by name (e.g.
+    "Trigger Price" = [Floor_10D] * 1.01, an already-supported live-
+    rendering pattern) would silently evaluate to None on every historic
+    day — see _expand_col_refs for the full "why", including why the
+    substitution must be paren-wrapped."""
+    cols_by_name = {c["name"]: c.get("formula", []) for c in columns}
+    return [
+        {**c, "formula": _expand_col_refs(c.get("formula", []), cols_by_name, {c["name"]})}
+        for c in columns
+    ]
+
+
 def compute_streak(daily: list) -> tuple:
     """*daily*: chronological-ascending [(date_str, value), ...] — a row
     filter's own per-day evaluated value (see services.formula_stats_engine.
@@ -924,7 +1001,12 @@ def collect_day_requests(strategies: list, notif_configs: dict | None = None) ->
     over the last N days" works: AVG_DAYS([MyComputedCol], 20) aggregates
     MyComputedCol's own (arbitrary) formula, not a literal column named
     "MyComputedCol". Anything else is assumed to be a raw sheet/historic
-    column and passed through as a bare column reference.
+    column and passed through as a bare column reference. That resolved
+    formula is itself run through _expand_col_refs (paren-wrapped) too, so
+    a *chain* of sibling references resolves fully — e.g. AVG_DAYS(
+    [TriggerPrice], 20) where TriggerPrice = [Floor_10D] * 1.01 and
+    Floor_10D is itself another of this strategy's own columns needs BOTH
+    levels expanded, not just the outer one.
 
     ``formula_tokens`` is what services.formula_stats_engine.compute_stats
     should evaluate per historic day to answer this request.
@@ -964,7 +1046,18 @@ def collect_day_requests(strategies: list, notif_configs: dict | None = None) ->
                 if key in seen:
                     continue
                 seen.add(key)
-                formula = cols_by_name.get(col_name, [{"type": "col", "value": col_name}])
+                raw_formula = cols_by_name.get(col_name)
+                if raw_formula is not None:
+                    # col_name is this SAME strategy's own column — expand
+                    # any further sibling column references inside ITS
+                    # formula too (e.g. AVG_DAYS([TriggerPrice], 20) where
+                    # TriggerPrice = [Floor_10D] * 1.01 needs Floor_10D
+                    # resolved as well, not just TriggerPrice), same reason
+                    # and same helper as the row-filter streak expansion
+                    # below.
+                    formula = _expand_col_refs(raw_formula, cols_by_name, {col_name})
+                else:
+                    formula = [{"type": "col", "value": col_name}]
                 out.append((col_name, window, formula))
 
         row_filter = strat.get("row_filter", [])
@@ -972,7 +1065,8 @@ def collect_day_requests(strategies: list, notif_configs: dict | None = None) ->
             streak_key = (_streak_col_name(strat.get("id", "")), STREAK_LOOKBACK_DAYS)
             if streak_key not in seen:
                 seen.add(streak_key)
-                out.append((streak_key[0], streak_key[1], row_filter))
+                expanded_filter = _expand_col_refs(row_filter, cols_by_name)
+                out.append((streak_key[0], streak_key[1], expanded_filter))
     return out
 
 
