@@ -77,6 +77,28 @@ def test_reload_cache_forces_a_fresh_fetch(monkeypatch):
     assert len(calls) == 2
 
 
+def test_peek_configs_returns_empty_without_touching_network_when_cold(monkeypatch):
+    from api import settings_api
+
+    calls = []
+    monkeypatch.setattr(settings_api, "get_setting", lambda key: calls.append(key) or {})
+    alerts_config_store.reload_cache()   # force cold state
+
+    assert alerts_config_store.peek_configs() == {}
+    assert calls == []   # never hit the network
+
+
+def test_peek_configs_returns_cache_once_warm(monkeypatch):
+    alerts_config_store.save_config("strat-1", new_notification_config())   # warms the cache
+
+    from api import settings_api
+    calls = []
+    monkeypatch.setattr(settings_api, "get_setting", lambda key: calls.append(key) or {})
+
+    assert set(alerts_config_store.peek_configs().keys()) == {"strat-1"}
+    assert calls == []   # already warm — still no network hit
+
+
 def test_save_config_updates_cache_without_extra_fetch(monkeypatch):
     from api import settings_api
 

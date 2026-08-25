@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QTableWidget, QTableWidgetItem, QTableView, QHeaderView, QAbstractItemView, QFrame,
     QCheckBox, QSizePolicy, QComboBox, QScrollArea, QLineEdit, QColorDialog,
-    QDialog, QListWidget, QListWidgetItem
+    QDialog, QListWidget, QListWidgetItem, QProgressBar
 )
 from PySide6.QtCore import (
     Qt, QTimer, QFileSystemWatcher, Signal, QObject, QThread, QEvent, QByteArray, QSize
@@ -226,56 +226,80 @@ class _LiveDataWorker(QObject):
             return
         self.recompute_result.emit(disp_headers, disp_data)
 
-    def refresh_day_history(self, strategies: list, notif_configs: dict,
-                            selected_category: str) -> None:
-        """Reloads strategy definitions from the store, then recomputes the
-        _DAYS historic-aggregate cache (see
-        LiveViewerWindow._refresh_day_history_from_store) — entirely on this
-        worker thread, since services.strategy_store.load_all() tries the
-        server first (a network call) on top of compute_day_history's own
-        historic-snapshot fetch. Keeping both off the GUI thread is what
-        lets this stay non-blocking regardless of how slow either call is.
+    def refresh_day_history(self, strategies: list, selected_category: str,
+                            reload_from_store: bool) -> None:
+        """Recomputes the _DAYS historic-aggregate cache (see
+        LiveViewerWindow._refresh_day_history/_refresh_day_history_from_store)
+        entirely on this worker thread — collect_day_requests' notif_configs
+        input (services.strategy_alerts.config_store.load_configs(), a
+        network call the first time it's called after login/reload_cache())
+        AND compute_day_history's own historic-snapshot fetch AND (when
+        *reload_from_store* is set) services.strategy_store.load_all()'s own
+        network call all happen here, off the GUI thread, so a strategy
+        toggle/category change/initial load/"↻ N-Day Data" click never
+        blocks the window regardless of how slow any of them are — see the
+        module docstring's own note on why this used to be split into a
+        "cheap, synchronous-on-the-GUI-thread" path (no store reload) and
+        this worker-routed one (with a reload): a row-filter's automatic
+        "Days True" streak (services.strategy_engine's Row-Filter Streak)
+        made a day_history recompute fire on nearly every active-strategy
+        toggle, not just the rare "this strategy uses AVG_DAYS" case the
+        synchronous path's "acceptable, only runs occasionally" reasoning
+        depended on — so BOTH paths now route through here.
 
-        Reloading from the store (rather than trusting *strategies*, LMV's
-        own in-memory copy) is what picks up a column/formula added or
-        edited in Strategy Builder since this window was opened or last
-        raised — see LiveViewerWindow.set_strategies' docstring: that copy
-        is only ever injected once and nothing else keeps it in sync. Each
-        reloaded strategy's "active" flag is overwritten with *strategies*'
-        own per-session value — disk's copy isn't authoritative for that
-        flag (LMV forces every strategy inactive on open regardless of what
-        was last saved — see app_window.py's _on_lmv_ready), so trusting
-        disk here would silently turn a strategy the user just toggled on
-        back off.
+        *reload_from_store* (False = the toggle/category-change path,
+        True = initial load / "↻ N-Day Data") controls only whether
+        strategy definitions are reloaded from services.strategy_store
+        first — see LiveViewerWindow._refresh_day_history_from_store's own
+        docstring for why that reload matters (picks up a column/formula
+        added or edited in Strategy Builder since this window opened) and
+        why the toggle/category-change path deliberately skips it (so those
+        more frequent interactions don't gain an extra server round trip on
+        top of the day-history fetch itself). *strategies* is the window's
+        full (unfiltered) list either way; when *reload_from_store* is
+        False it's returned unchanged (nothing to merge) — the result
+        signal's shape stays identical for both callers regardless.
 
-        *strategies* is the window's full (unfiltered) list — *selected_category*
-        is applied only when deciding which _DAYS requests to fetch (mirroring
-        LiveViewerWindow._filtered_strategies()), not to what's returned, so a
-        strategy outside the current category filter keeps its real active
-        flag instead of being reported back as inactive.
+        Each reloaded strategy's "active" flag is overwritten with
+        *strategies*' own per-session value — disk's copy isn't
+        authoritative for that flag (LMV forces every strategy inactive on
+        open regardless of what was last saved — see app_window.py's
+        _on_lmv_ready), so trusting disk here would silently turn a
+        strategy the user just toggled on back off.
+
+        *selected_category* is applied only when deciding which _DAYS
+        requests to fetch (mirroring LiveViewerWindow._filtered_strategies()),
+        not to what's returned, so a strategy outside the current category
+        filter keeps its real active flag instead of being reported back as
+        inactive.
         """
         from services import strategy_store
+        from services.strategy_alerts import config_store as alerts_config_store
         from services.strategy_engine import collect_day_requests
         from services.formula_stats_engine import compute_day_history
         from api import lmv_snapshot_api
         from api.exceptions import ApiError, NetworkError
 
         try:
-            try:
-                fresh = strategy_store.load_all()
-            except (ApiError, NetworkError):
-                # A store-refresh hiccup shouldn't block a day-history
-                # recompute for whatever strategies/columns were already
-                # known to this window.
-                merged = strategies
+            if reload_from_store:
+                try:
+                    fresh = strategy_store.load_all()
+                except (ApiError, NetworkError):
+                    # A store-refresh hiccup shouldn't block a day-history
+                    # recompute for whatever strategies/columns were already
+                    # known to this window.
+                    merged = strategies
+                else:
+                    merged = strategy_store.merge_session_active(fresh, strategies)
             else:
-                merged = strategy_store.merge_session_active(fresh, strategies)
+                merged = strategies
 
             in_view = [
                 s for s in merged
                 if selected_category == "All" or s.get("category", "Daily") == selected_category
             ]
             active = [s for s in in_view if s.get("active")]
+            notif_configs = alerts_config_store.load_configs()
             requests = collect_day_requests(active, notif_configs)
             if not requests:
                 self.day_history_result.emit({}, merged)
@@ -897,9 +921,13 @@ class LiveViewerWindow(QWidget):
     _request_recompute = Signal(list, list, list, object)   # headers, data, strategies, day_history
     _request_shutdown  = Signal()              # release COM on the worker thread
     _request_or_refresh = Signal()             # re-pull today's Opening Range snapshot
-    # strategies, notif_configs, selected_category — see
-    # _refresh_day_history_from_store / _LiveDataWorker.refresh_day_history
-    _request_day_history_from_store = Signal(list, object, str)
+    # strategies, selected_category, reload_from_store — see
+    # _refresh_day_history/_refresh_day_history_from_store and
+    # _LiveDataWorker.refresh_day_history. Drives BOTH the toggle/category-
+    # change path (reload_from_store=False) and the initial-load/"↻ N-Day
+    # Data" path (True) — notif_configs is no longer a GUI-thread input,
+    # the worker fetches it itself (see refresh_day_history's docstring).
+    _request_day_history = Signal(list, str, bool)
     data_updated       = Signal(list, list)    # headers, data — for downstream consumers
     # self._day_history, whenever it's (re)computed — for downstream
     # consumers (Strategy Builder's compile-test) that need the same
@@ -947,10 +975,21 @@ class LiveViewerWindow(QWidget):
         # refresh is a historic-snapshot network fetch) — see
         # _refresh_day_history.
         self._day_history: dict = {}
-        # Guards _refresh_day_history_from_store the way self._refreshing
-        # guards _request_refresh — a store reload + historic-snapshot fetch
-        # in flight shouldn't queue a second one behind it.
+        # Guards _refresh_day_history/_refresh_day_history_from_store (both
+        # route through the same worker-thread call — see
+        # _request_day_history_refresh) the way self._refreshing guards
+        # _request_refresh — a day-history fetch in flight shouldn't launch
+        # a second, concurrent one. A request that arrives while one's
+        # already running is remembered (_day_history_pending), not
+        # dropped, and re-issued once the in-flight one lands — same
+        # "coalesce, don't queue, don't drop" pattern _recompute_pending
+        # uses for the recompute side of this exact same user action (a
+        # strategy toggle triggers both). _day_history_pending_reload
+        # tracks whether any of the coalesced requests needed
+        # reload_from_store=True (a superset of the False case — it wins).
         self._day_history_refreshing = False
+        self._day_history_pending = False
+        self._day_history_pending_reload = False
 
         # Column sort — a snapshot of row order (by "Scrip Name") captured
         # at the moment the user clicks a header, not a live re-sort every
@@ -1166,6 +1205,22 @@ class LiveViewerWindow(QWidget):
 
         self._setup_frozen_column()
 
+        # ── Busy indicator ───────────────────────────────────────────────────
+        # A thin, otherwise-invisible strip that appears only while a
+        # strategy toggle/category change's background work (day-history
+        # refresh and/or recompute — both run entirely on the worker thread,
+        # see _request_day_history_refresh/_recompute_display) is in flight.
+        # Indeterminate (setRange(0, 0) — no meaningful "% done" for this),
+        # just enough to tell the user something's happening instead of the
+        # table appearing to sit there doing nothing for however long a
+        # large sheet/strategy set takes. See _update_busy_indicator.
+        self._busy_bar = QProgressBar()
+        self._busy_bar.setFixedHeight(3)
+        self._busy_bar.setTextVisible(False)
+        self._busy_bar.setRange(0, 0)
+        self._busy_bar.setVisible(False)
+        root.addWidget(self._busy_bar)
+
         # ── Bottom bar ────────────────────────────────────────────────────────
         bottom = QHBoxLayout()
         self._stock_count_lbl = QLabel("Stocks : 0")
@@ -1222,7 +1277,7 @@ class LiveViewerWindow(QWidget):
         self._request_recompute.connect(self._worker.recompute)
         self._request_shutdown.connect(self._worker.shutdown)
         self._request_or_refresh.connect(self._worker.refresh_opening_range)
-        self._request_day_history_from_store.connect(self._worker.refresh_day_history)
+        self._request_day_history.connect(self._worker.refresh_day_history)
         self._worker.result.connect(self._on_data_ready)
         self._worker.failed.connect(self._on_read_failed)
         self._worker.recompute_result.connect(self._on_recompute_ready)
@@ -1387,95 +1442,102 @@ class LiveViewerWindow(QWidget):
         self._refreshing = False
         self._status_lbl.setText(msg)
 
+    def _update_busy_indicator(self):
+        """Shows/hides self._busy_bar (the thin strip at the bottom of the
+        window, see _build) based on whether a strategy toggle/category
+        change's background work — a day-history refresh
+        (_day_history_refreshing) and/or a recompute (_recomputing), plus
+        anything coalesced behind either while it was running
+        (_day_history_pending/_recompute_pending) — is currently in flight.
+        Both now run entirely on the worker thread (see
+        _request_day_history_refresh/_recompute_display's own docstrings on
+        why that used to freeze the window), so without this a user
+        applying a strategy on a large sheet/strategy set would see the
+        table just sit there for however long that takes, with nothing on
+        screen indicating anything is actually happening. Called from every
+        point any of those four flags changes."""
+        busy = (self._recomputing or self._recompute_pending
+                or self._day_history_refreshing or self._day_history_pending)
+        self._busy_bar.setVisible(busy)
+
+    def _request_day_history_refresh(self, reload_from_store: bool):
+        """Shared trigger for _refresh_day_history/_refresh_day_history_from_store
+        below — both route through the same worker-thread call
+        (_LiveDataWorker.refresh_day_history) now. This USED to be split
+        into a "cheap, synchronous-on-the-GUI-thread" path (no store
+        reload, for the strategy-toggle/category-change case) and a
+        worker-routed one (with a reload, for initial load/"↻ N-Day Data")
+        on the reasoning that the synchronous one only ran "occasionally,
+        not per tick" — invalidated by services.strategy_engine's Row-Filter
+        Streak feature, which made a day-history recompute fire on nearly
+        every active-strategy toggle (any row-filtered strategy, not just
+        the rare "uses AVG_DAYS" case), turning "occasionally" into "on
+        pretty much every strategy toggle" and making that synchronous path
+        the actual cause of "LMV strategy apply/load is laggy, sometimes
+        Not Responding" reports.
+
+        One request in flight at a time; a request that arrives while one's
+        already running is remembered (not dropped) and re-issued once the
+        in-flight one lands — same "coalesce, don't queue, don't drop"
+        pattern _recompute_display uses for the recompute side of this
+        exact same user action (a strategy toggle triggers both).
+        reload_from_store=True "wins" if requests of both kinds pile up
+        before the in-flight one finishes — it's a superset of the work
+        the False case does.
+        """
+        if self._worker is None:
+            # Shouldn't happen once the window is visible — nothing sensible
+            # to fall back to for a network-touching call; just skip it.
+            return
+        if self._day_history_refreshing:
+            self._day_history_pending = True
+            self._day_history_pending_reload = self._day_history_pending_reload or reload_from_store
+            return
+        self._day_history_refreshing = True
+        self._update_busy_indicator()
+        # The full (unfiltered) list, not _filtered_strategies() — the
+        # worker applies self._selected_category itself just to decide which
+        # requests to fetch, but still needs every strategy's real "active"
+        # flag (including ones outside the current category filter — see
+        # refresh_day_history's docstring). A snapshot, not a live
+        # reference — the worker thread must never touch GUI-thread-owned
+        # state concurrently (same rationale as _request_refresh/
+        # _recompute_display).
+        self._request_day_history.emit(
+            list(self._strategies), self._selected_category, reload_from_store)
+
     def _refresh_day_history(self):
         """Recompute self._day_history — the lookup _DAYS historic aggregate
         functions (services.strategy_engine) resolve against — from scratch,
-        then re-render. A historic-snapshot network fetch per distinct N
-        days referenced across active strategies' formulas (columns, row
-        filter, fmt-rule conditions) and their notification configs (trigger
-        condition, risk:reward, metrics), so this runs on a strategy toggle
-        and a category change — never on every live tick, unlike everything
-        else this window recomputes. Synchronous (like the Data menu's own
-        Formula Stats screen) rather than routed through the worker thread —
-        acceptable since it only runs on those occasions, not per tick.
+        then re-render. Runs on a strategy toggle and a category change.
 
         Resolves requests against self._strategies as already known to this
-        window — it won't notice a _DAYS column added/edited in Strategy
-        Builder after the fact (self._strategies is a one-time snapshot, see
-        set_strategies' docstring). Initial load and the "↻ N-Day Data"
-        button use _refresh_day_history_from_store instead, which reloads
-        strategy definitions first so a newly-added request isn't invisible
-        to it.
+        window, NOT reloaded from services.strategy_store first (see
+        _refresh_day_history_from_store below for the reloading variant,
+        used on initial load and by "↻ N-Day Data") — so this won't notice
+        a _DAYS column added/edited in Strategy Builder since this window
+        opened, trading that for one less server round trip on every
+        toggle/category-change, the more frequent of the two occasions.
         """
-        from services.strategy_engine import collect_day_requests
-        from services.formula_stats_engine import compute_day_history
-        from services.strategy_alerts import config_store as alerts_config_store
-        from api import lmv_snapshot_api
-        from api.exceptions import ApiError, NetworkError
-
-        active = [s for s in self._filtered_strategies() if s.get("active")]
-        notif_configs = alerts_config_store.load_configs()
-        requests = collect_day_requests(active, notif_configs)
-        if not requests:
-            # Common case (no _DAYS functions anywhere) — cheap scan, no
-            # network call, and nothing to re-render if the cache was
-            # already empty (callers that also need a normal-column
-            # recompute, e.g. a strategy toggle, trigger their own).
-            if self._day_history:
-                self._day_history = {}
-                self.day_history_updated.emit(self._day_history)
-                self._recompute_display()
-            return
-        try:
-            self._day_history = compute_day_history(requests, lmv_snapshot_api.get_range)
-        except (ApiError, NetworkError) as exc:
-            # Keep whatever was cached before — a failed refresh shouldn't
-            # blank out a previously-good one.
-            self._status_lbl.setText(f"N-day column refresh failed: {exc}")
-            return
-        self.day_history_updated.emit(self._day_history)
-        self._recompute_display()
+        self._request_day_history_refresh(reload_from_store=False)
 
     def _refresh_day_history_from_store(self):
         """Like _refresh_day_history, but also reloads strategy definitions
-        from services.strategy_store first, entirely on the worker thread
-        (see _LiveDataWorker.refresh_day_history) — that reload is itself a
-        network call, on top of the historic-snapshot fetch, so both stay
-        off the GUI thread regardless of how slow either is.
-
-        This is what makes a new/edited AVG_DAYS/MIN_DAYS/etc. column show
-        up without closing and reopening Live Master View: self._strategies
-        is otherwise only ever injected once (set_strategies, called when
-        this window is first built) and nothing keeps it in sync with
-        Strategy Builder afterward — plain _refresh_day_history() above
-        can't see a request that isn't in that stale copy yet.
+        from services.strategy_store first (see _LiveDataWorker.
+        refresh_day_history) — this is what makes a new/edited AVG_DAYS/
+        MIN_DAYS/etc. column show up without closing and reopening Live
+        Master View: self._strategies is otherwise only ever injected once
+        (set_strategies, called when this window is first built) and
+        nothing keeps it in sync with Strategy Builder afterward — plain
+        _refresh_day_history() above can't see a request that isn't in that
+        stale copy yet.
 
         Used on initial load and by the "↻ N-Day Data" button only — not by
         the strategy-toggle/category-change paths, which stay on the
         cheaper _refresh_day_history() above so those more frequent
         interactions don't gain an extra server round trip.
         """
-        if self._worker is None:
-            # Shouldn't happen once the window is visible (the worker
-            # starts before this is ever scheduled) — fall back to the
-            # no-reload path rather than doing nothing.
-            self._refresh_day_history()
-            return
-        if self._day_history_refreshing:
-            return
-        self._day_history_refreshing = True
-        from services.strategy_alerts import config_store as alerts_config_store
-        notif_configs = alerts_config_store.load_configs()
-        # The full (unfiltered) list, not _filtered_strategies() — the
-        # worker applies self._selected_category itself just to decide which
-        # requests to fetch, but still needs every strategy's real "active"
-        # flag to merge against the fresh store copy, including ones outside
-        # the current category filter (see refresh_day_history's docstring).
-        # A snapshot, not a live reference — the worker thread must never
-        # touch GUI-thread-owned state concurrently (same rationale as
-        # _request_refresh/_recompute_display).
-        self._request_day_history_from_store.emit(
-            list(self._strategies), notif_configs, self._selected_category)
+        self._request_day_history_refresh(reload_from_store=True)
 
     def _on_day_history_from_store_ready(self, day_history: dict, strategies: list):
         self._day_history_refreshing = False
@@ -1484,6 +1546,8 @@ class LiveViewerWindow(QWidget):
         self._strategies = strategies
         self._update_strat_btn_label()
         self._recompute_display()
+        self._run_pending_day_history_refresh()
+        self._update_busy_indicator()
 
     def _on_day_history_from_store_failed(self, msg: str, strategies: list):
         self._day_history_refreshing = False
@@ -1497,6 +1561,19 @@ class LiveViewerWindow(QWidget):
         self._update_strat_btn_label()
         self._status_lbl.setText(msg)
         self._recompute_display()
+        self._run_pending_day_history_refresh()
+        self._update_busy_indicator()
+
+    def _run_pending_day_history_refresh(self):
+        """See _request_day_history_refresh's docstring on why a request
+        that arrived while one was already in flight is coalesced here
+        rather than dropped."""
+        if not self._day_history_pending:
+            return
+        reload_from_store = self._day_history_pending_reload
+        self._day_history_pending = False
+        self._day_history_pending_reload = False
+        self._request_day_history_refresh(reload_from_store)
 
     def _recompute_display(self):
         """Re-render the table after a strategy toggle or category change.
@@ -1524,6 +1601,7 @@ class LiveViewerWindow(QWidget):
             self._recompute_pending = True
             return
         self._recomputing = True
+        self._update_busy_indicator()
         # Snapshots, not live references — the worker thread must never touch
         # GUI-thread-owned state concurrently (same rationale as _request_refresh).
         self._request_recompute.emit(
@@ -1547,6 +1625,7 @@ class LiveViewerWindow(QWidget):
             if self._recompute_pending:
                 self._recompute_pending = False
                 self._recompute_display()
+            self._update_busy_indicator()
 
     def _on_recompute_failed(self, msg: str):
         self._recomputing = False
@@ -1554,6 +1633,7 @@ class LiveViewerWindow(QWidget):
         if self._recompute_pending:
             self._recompute_pending = False
             self._recompute_display()
+        self._update_busy_indicator()
 
     def _on_data_ready(self, headers: list, new_data: list,
                       disp_headers: list, disp_data: list):
@@ -1643,7 +1723,14 @@ class LiveViewerWindow(QWidget):
         from services.strategy_alerts import state_store as alerts_state_store
         from services.strategy_alerts.engine import evaluate_tick
 
-        configs = alerts_config_store.load_configs()
+        # peek_configs(), not load_configs() — this runs on the GUI thread,
+        # on EVERY render pass (every live tick), so it must never risk a
+        # live network round trip (see peek_configs' own docstring for the
+        # "first tick after login/reload_cache()" scenario that used to
+        # block here). Worst case with peek_configs is one tick with no
+        # live-alert coverage while the cache is still cold, not a frozen
+        # window.
+        configs = alerts_config_store.peek_configs()
         if not configs:
             return
         events = evaluate_tick(active_strategies, configs, all_dicts, sym_index,

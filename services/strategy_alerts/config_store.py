@@ -40,6 +40,25 @@ def load_configs() -> dict:
     return dict(_cache)
 
 
+def peek_configs() -> dict:
+    """Like load_configs(), but NEVER touches the network — {} if the cache
+    hasn't been warmed yet (right after reload_cache(), before anything else
+    has called load_configs()), the cached dict otherwise. For a caller on
+    the GUI thread with no business blocking on a server round trip — see
+    screens.live_viewer.LiveViewerWindow._run_strategy_alert_checks, called
+    from every render pass (every live tick): before this existed it called
+    load_configs() directly, which was safe on the (documented) assumption
+    that the cache was already warm by the time any tick fires, but nothing
+    actually guaranteed that — a strategy toggle/category change or the
+    window's own initial render could be the very first load_configs() call
+    after a reload_cache() (e.g. right after login), synchronously blocking
+    the GUI thread on a live network fetch. Worst case here is just one
+    render pass with no live-alert coverage while the cache is still cold
+    (something else — e.g. that same window's own day-history refresh —
+    warms it moments later off the GUI thread), not a frozen window."""
+    return dict(_cache) if _cache is not None else {}
+
+
 def load_config(strategy_id: str) -> dict | None:
     return load_configs().get(strategy_id)
 

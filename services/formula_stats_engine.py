@@ -24,7 +24,7 @@ days, filter client-side) instead of needing a dedicated date-lookup API.
 from datetime import date
 import statistics
 
-from services.strategy_engine import SYMBOL_COLUMN, build_symbol_index, evaluate
+from services.strategy_engine import SYMBOL_COLUMN, build_symbol_index, evaluate_compiled, get_compiled
 
 
 def _average(values: list) -> float:
@@ -86,6 +86,16 @@ def compute_stats(columns: list, range_response: dict) -> dict:
     """
     by_symbol: dict = {}
 
+    # Pre-compile every column's formula ONCE, outside the day/stock loop
+    # below, rather than calling evaluate() (which re-derives a cache-key
+    # signature from the token list on every single call) once per day per
+    # stock. Profiling a realistic 215-stock/7-strategy/60-day batch found
+    # that per-call signature rebuild costing more than the actual formula
+    # evaluation combined — this loop can run tens of thousands of times for
+    # a single Formula Stats/day-history request, so the saving is real, not
+    # theoretical. See services.strategy_engine.evaluate_compiled.
+    compiled_by_name = {c["name"]: get_compiled(c["formula"]) for c in columns}
+
     for day in range_response.get("days", []):
         trade_date = day["trade_date"]
         stocks = day.get("stocks", [])
@@ -115,8 +125,8 @@ def compute_stats(columns: list, range_response: dict) -> dict:
                 "columns": {c["name"]: {"daily": []} for c in columns},
             })
             for col in columns:
-                value = evaluate(col["formula"], row_dict, all_dicts,
-                                 agg_cache=agg_cache, sym_index=sym_index)
+                value = evaluate_compiled(compiled_by_name[col["name"]], row_dict, all_dicts,
+                                          agg_cache=agg_cache, sym_index=sym_index)
                 entry["columns"][col["name"]]["daily"].append((trade_date, value))
 
     for entry in by_symbol.values():

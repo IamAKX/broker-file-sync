@@ -487,7 +487,7 @@ _compile_cache: dict = {}
 
 
 def clear_compile_cache():
-    """Drop every cached compiled formula. _get_compiled's cache key is the
+    """Drop every cached compiled formula. get_compiled's cache key is the
     signature of the *raw* (un-expanded) tokens — cheap, and unaffected by a
     "var" token's own referenced variable being edited — so an edit to a
     formula variable (see services.formula_variable_store) can't invalidate
@@ -617,7 +617,12 @@ def _build_compiled(tokens: list):
     return _Compiled(code, col_vars, col_of_vars, uses_self, agg_specs, day_specs, extreme_specs)
 
 
-def _get_compiled(tokens: list):
+def get_compiled(tokens: list):
+    """Public entry point to the compile cache — for a caller that wants to
+    pre-compile a formula ONCE and reuse the result via evaluate_compiled()
+    across many rows/days, rather than calling evaluate(tokens, ...) (which
+    calls this on every single invocation) repeatedly. See
+    evaluate_compiled's own docstring for why that matters at scale."""
     sig = _formula_signature(tokens)
     if sig not in _compile_cache:
         _compile_cache[sig] = _build_compiled(tokens)
@@ -685,7 +690,32 @@ def evaluate(tokens: list, row_data: dict, all_data: list,
     """
     if not tokens:
         return None
-    compiled = _get_compiled(tokens)
+    compiled = get_compiled(tokens)
+    return evaluate_compiled(compiled, row_data, all_data, self_value,
+                             agg_cache, sym_index, day_history)
+
+
+def evaluate_compiled(compiled, row_data: dict, all_data: list,
+                      self_value=None, agg_cache: dict | None = None,
+                      sym_index: dict | None = None, day_history: dict | None = None):
+    """Same as evaluate() above, but takes an already-get_compiled() result
+    directly instead of raw tokens — for a hot loop that evaluates the SAME
+    formula over many rows/days (e.g. services.formula_stats_engine.
+    compute_stats, iterating every historic day for every stock) and can
+    afford to compile once outside the loop, rather than paying evaluate()'s
+    per-call get_compiled() -> _formula_signature() cost every single time.
+
+    Profiling a realistic 215-stock/7-strategy/60-day Formula Stats-style
+    batch found _formula_signature's tuple-of-tuples rebuild (needed just to
+    check the compile cache, even on a guaranteed hit) costing more than the
+    actual eval() calls combined — the exact "LMV strategy apply is slow"
+    report this traces to, worsened by the Row-Filter Streak feature making
+    that kind of batch fire on nearly every strategy toggle instead of only
+    when a formula explicitly used an _DAYS function. evaluate() itself is
+    unchanged/still the right call for anything evaluating a formula once
+    (or a handful of times) per call site — this is purely an opt-in fast
+    path for callers that already know they're about to call the same
+    compiled formula repeatedly."""
     if compiled is None:
         return None
     ns = _EVAL_BUILTINS.copy()
@@ -1133,6 +1163,21 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
     # present, a row is kept if it passes ANY active strategy's filter (union).
     any_unfiltered = any(not s.get("row_filter") for s in active)
 
+    # Pre-compile every active strategy's columns + row filter ONCE, outside
+    # the O(rows) loop below, instead of letting evaluate()/evaluate_condition()
+    # re-derive a compile-cache signature from the same token list on every
+    # single row — see evaluate_compiled's docstring for the profiling that
+    # motivated this (the identical fix already applied to services.
+    # formula_stats_engine.compute_stats' own hot loop). Parallel to `active`
+    # — one entry per strategy, in the same order.
+    compiled_per_strat = [
+        (
+            [(col["name"], get_compiled(col["formula"])) for col in strat.get("columns", [])],
+            get_compiled(strat["row_filter"]) if strat.get("row_filter") else None,
+        )
+        for strat in active
+    ]
+
     new_data = []
     for row in data:
         row_dict = dict(zip(headers, row))
@@ -1150,19 +1195,19 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
         # earlier sibling silently came back blank here even though testing
         # it in the editor showed a real value).
         per_strat = []   # (passed, [computed values in column order])
-        for strat in active:
+        for strat, (col_compiled, row_filter_compiled) in zip(active, compiled_per_strat):
             enriched = dict(row_dict)
             values = []
-            for col in strat.get("columns", []):
-                val = evaluate(col["formula"], enriched, all_dicts,
-                               agg_cache=agg_cache, sym_index=sym_index,
-                               day_history=day_history)
-                enriched[col["name"]] = val
+            for col_name, compiled in col_compiled:
+                val = evaluate_compiled(compiled, enriched, all_dicts,
+                                        agg_cache=agg_cache, sym_index=sym_index,
+                                        day_history=day_history)
+                enriched[col_name] = val
                 values.append(val)
             row_filter = strat.get("row_filter", [])
-            passed = (not row_filter) or evaluate_condition(
-                row_filter, enriched, all_dicts, agg_cache=agg_cache,
-                sym_index=sym_index, day_history=day_history)
+            passed = row_filter_compiled is None or bool(evaluate_compiled(
+                row_filter_compiled, enriched, all_dicts, agg_cache=agg_cache,
+                sym_index=sym_index, day_history=day_history))
             # "Days True"/"Since" — see this module's "Row-filter streak"
             # docstring section and compute_streak. Only computed for a row
             # that currently passes; when it doesn't, the extra_vals loop
