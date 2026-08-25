@@ -50,8 +50,9 @@ class ApiClient:
     def get(self, path: str, params: dict | None = None, auth: bool = True) -> dict:
         return self._request("GET", path, params=params, auth=auth)
 
-    def post(self, path: str, json_body: dict | None = None, auth: bool = True) -> dict:
-        return self._request("POST", path, json_body=json_body, auth=auth)
+    def post(self, path: str, json_body: dict | None = None, auth: bool = True,
+             timeout: int | None = None) -> dict:
+        return self._request("POST", path, json_body=json_body, auth=auth, timeout=timeout)
 
     def patch(self, path: str, json_body: dict | None = None, auth: bool = True) -> dict:
         return self._request("PATCH", path, json_body=json_body, auth=auth)
@@ -69,8 +70,15 @@ class ApiClient:
         params: dict | None = None,
         json_body: dict | None = None,
         auth: bool = True,
+        timeout: int | None = None,
         _retried: bool = False,
     ) -> dict:
+        # Per-call override for the rare request that's expected to take
+        # much longer than everything else this app talks to (e.g.
+        # api.inception_api.sync_vendor_data — a real vendor fetch + DB
+        # write on the server, not a quick CRUD round trip) — defaults to
+        # the normal ceiling unchanged for every existing caller.
+        request_timeout = timeout if timeout is not None else _TIMEOUT_SECONDS
         headers = {}
         if auth:
             token = token_manager.get_access_token()
@@ -89,7 +97,7 @@ class ApiClient:
                 params=params,
                 json=json_body,
                 headers=headers,
-                timeout=_TIMEOUT_SECONDS,
+                timeout=request_timeout,
             )
         except requests.RequestException as exc:
             api_logger.warning(
@@ -104,7 +112,7 @@ class ApiClient:
             if self._refresh():
                 return self._request(
                     method, path, params=params, json_body=json_body,
-                    auth=auth, _retried=True,
+                    auth=auth, timeout=timeout, _retried=True,
                 )
 
         if not response.ok:

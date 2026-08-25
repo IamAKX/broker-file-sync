@@ -8,7 +8,18 @@ from api.endpoints import (
     INCEPTION_FORMULA_VARIABLES,
     INCEPTION_INSTRUMENTS,
     INCEPTION_STRATEGIES,
+    INCEPTION_VENDOR_SYNC,
 )
+
+# A real vendor fetch + DB write on the server (app/services/
+# inception_vendor_sync_service.py in broker-sync-api), not a quick CRUD
+# round trip — the normal 15s ceiling (api.client._TIMEOUT_SECONDS) would
+# abort a legitimate multi-day/chunked catch-up before the server even
+# finishes. Generous, not unbounded: screens.inception_settings' worker
+# thread is what actually keeps the desktop UI responsive while this runs
+# (see that screen's own docstring), this is just "don't give up too
+# early" on the HTTP side.
+_VENDOR_SYNC_TIMEOUT_SECONDS = 600
 
 
 def get_availability(date_from: date, date_to: date) -> dict:
@@ -66,3 +77,21 @@ def upsert_variable(variable_id: str, name: str, formula: list) -> dict:
 
 def delete_variable(variable_id: str) -> None:
     api_client.delete(f"{INCEPTION_FORMULA_VARIABLES}/{variable_id}")
+
+
+def sync_vendor_data(email: str, password: str, exchange: str) -> dict:
+    """Triggers the "fetch from Equal Solution" — see screens.
+    inception_settings' "Fetch from Equal Solution" section, whose
+    Username/Password/Exchange fields these three come from directly, sent
+    as typed on every click. The server still determines the date range
+    itself (its own last-available date through today) — that's not
+    something to type in. A blank field falls back to the server's own
+    env config for that piece (see app/services/
+    inception_vendor_sync_service.py in broker-sync-api). Returns
+    {"status", "exchange", "date_from", "date_to", "last_available_before",
+    "last_available_after", "instruments_added", "bars_written"}."""
+    return api_client.post(
+        INCEPTION_VENDOR_SYNC,
+        json_body={"email": email, "password": password, "exchange": exchange},
+        timeout=_VENDOR_SYNC_TIMEOUT_SECONDS,
+    )

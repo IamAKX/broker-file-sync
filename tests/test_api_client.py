@@ -166,3 +166,36 @@ def test_put_sends_put_method_with_json_body(monkeypatch):
     assert captured["url"].endswith("/strategies/abc")
     assert captured["json"] == {"name": "Test"}
     assert result == {"ok": True}
+
+
+def test_post_default_timeout_matches_the_normal_ceiling(monkeypatch):
+    from api.client import ApiClient, _TIMEOUT_SECONDS
+
+    client = ApiClient()
+    captured = {}
+    monkeypatch.setattr(
+        client._session, "request",
+        lambda method, url, **kwargs: (captured.update(kwargs) or _FakeResponse(200, {})),
+    )
+
+    client.post("/some/path", json_body={})
+
+    assert captured["timeout"] == _TIMEOUT_SECONDS
+
+
+def test_post_accepts_a_longer_per_call_timeout(monkeypatch):
+    """api.inception_api.sync_vendor_data needs this — a real vendor fetch +
+    DB write on the server side, not a quick CRUD round trip; the normal
+    15s ceiling would abort it before the server even finishes."""
+    from api.client import ApiClient
+
+    client = ApiClient()
+    captured = {}
+    monkeypatch.setattr(
+        client._session, "request",
+        lambda method, url, **kwargs: (captured.update(kwargs) or _FakeResponse(200, {})),
+    )
+
+    client.post("/inception/vendor-sync", json_body={}, timeout=300)
+
+    assert captured["timeout"] == 300
