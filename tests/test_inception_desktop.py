@@ -83,6 +83,27 @@ def test_upsert_strategy_hits_expected_path_and_body(monkeypatch):
     assert captured["body"]["columns"] == [{"name": "c1"}]
 
 
+def test_sync_vendor_data_sends_email_password_exchange_from_caller(monkeypatch):
+    """Confirms the request carries whatever the caller passes — see
+    screens.inception_settings, which reads its Username/Password/Exchange
+    fields and passes them straight through (api.inception_api.
+    sync_vendor_data's docstring)."""
+    captured = {}
+    monkeypatch.setattr(
+        api_client, "post",
+        lambda path, json_body=None, timeout=None: captured.update(path=path, body=json_body, timeout=timeout) or {
+            "status": "ok", "exchange": "NFOFUT", "date_from": "2026-08-18", "date_to": "2026-08-25",
+            "last_available_before": "2026-08-17", "last_available_after": "2026-08-24",
+            "instruments_added": 0, "bars_written": 428,
+        },
+    )
+    result = inception_api.sync_vendor_data("e@x.com", "pw123", "NFOFUT")
+    assert captured["path"] == "/inception/vendor-sync"
+    assert captured["body"] == {"email": "e@x.com", "password": "pw123", "exchange": "NFOFUT"}
+    assert captured["timeout"] >= 300   # generous — a real vendor fetch, not a quick CRUD call
+    assert result["bars_written"] == 428
+
+
 # ── FormulaBuilder: new params default to prior behavior ────────────────────
 
 def test_formula_builder_defaults_preserve_lmv_label_and_aggregates(qapp, controller):
@@ -1660,3 +1681,188 @@ def test_settings_screen_buttons_explain_sync_now_vs_full_resync(qapp, controlle
 
     assert "since your last sync" in screen._sync_now_btn.toolTip()
     assert "ENTIRE historical dataset" in screen._resync_btn.toolTip()
+
+
+# ── screens: settings — "Fetch from Equal Solution" ──────────────────────
+
+def test_settings_screen_vendor_fields_are_readonly_and_prefilled(qapp, controller, monkeypatch, bars_db):
+    """Username/Password/Exchange are all prefilled with the real reference
+    values, editable-looking plain text (no masking) — see screens.
+    inception_settings' module docstring: these ARE sent as typed on every
+    click, so there's no "real secret" being hidden here to begin with."""
+    from screens.inception_settings import InceptionSettingsScreen
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    screen = InceptionSettingsScreen(controller)
+
+    assert screen._vendor_username_field.text() == "fukulens@gmail.com"
+    assert screen._vendor_username_field.isReadOnly() is True
+    assert screen._vendor_exchange_field.text() == "NFOFUT"
+    assert screen._vendor_exchange_field.isReadOnly() is True
+    assert screen._vendor_password_field.text() == "12345678"
+    assert screen._vendor_password_field.isReadOnly() is True
+    from PySide6.QtWidgets import QLineEdit
+    assert screen._vendor_password_field.echoMode() == QLineEdit.EchoMode.Normal
+
+
+def test_settings_screen_vendor_sync_sends_field_values(qapp, controller, monkeypatch, bars_db):
+    """The worker calls api.inception_api.sync_vendor_data() with exactly
+    what's in the Username/Password/Exchange fields — confirms the UI
+    fields actually feed the request now."""
+    from screens.inception_settings import InceptionSettingsScreen
+    from api import inception_api
+    from services import inception_sync_service
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    # A successful vendor fetch auto-follows with the local "Sync Now" pull
+    # (explicitly requested — see _on_vendor_sync_succeeded) — stub it out
+    # so this test doesn't make a real network call via a real background
+    # QThread.
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", lambda progress_cb=None, today=None: 0)
+    captured = {}
+    monkeypatch.setattr(
+        inception_api, "sync_vendor_data",
+        lambda email, password, exchange: captured.update(email=email, password=password, exchange=exchange) or {
+            "status": "ok", "exchange": "NFOFUT", "date_from": "2026-08-18", "date_to": "2026-08-25",
+            "last_available_before": "2026-08-17", "last_available_after": "2026-08-24",
+            "instruments_added": 0, "bars_written": 10,
+        },
+    )
+
+    screen = InceptionSettingsScreen(controller)
+    screen._start_vendor_sync()
+    assert screen._vendor_worker.wait(2000)
+    qapp.processEvents()
+    assert screen._worker.wait(2000)   # the auto-triggered local sync worker
+    qapp.processEvents()
+
+    assert captured == {"email": "fukulens@gmail.com", "password": "12345678", "exchange": "NFOFUT"}
+    assert "10 bar row(s) written" in screen._vendor_status_lbl.text()
+    assert "Pulling this into this device's local cache" in screen._vendor_status_lbl.text()
+
+
+def test_settings_screen_vendor_sync_reports_already_up_to_date(qapp, controller, monkeypatch, bars_db):
+    from screens.inception_settings import InceptionSettingsScreen
+    from services import inception_sync_service
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", lambda progress_cb=None, today=None: 0)
+    screen = InceptionSettingsScreen(controller)
+
+    screen._on_vendor_sync_succeeded({
+        "status": "already_up_to_date", "exchange": "NFOFUT",
+        "last_available_after": "2026-08-24",
+    })
+    assert screen._worker.wait(2000)   # the auto-triggered local sync worker
+    qapp.processEvents()
+
+    assert "Already up to date" in screen._vendor_status_lbl.text()
+    assert "2026-08-24" in screen._vendor_status_lbl.text()
+
+
+def test_settings_screen_vendor_sync_treats_zero_bars_written_as_up_to_date(qapp, controller, monkeypatch, bars_db):
+    """A real vendor call that succeeded but found nothing new (e.g. the
+    vendor's EOD batch for today hasn't run yet — see app.services.
+    eqldata_client.fetch_eod_range_rows's 404-means-"no data yet" handling
+    on the backend) must read the same calm "up to date" way as
+    already_up_to_date, not the "0 bar row(s) written" phrasing."""
+    from screens.inception_settings import InceptionSettingsScreen
+    from services import inception_sync_service
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", lambda progress_cb=None, today=None: 0)
+    screen = InceptionSettingsScreen(controller)
+
+    screen._on_vendor_sync_succeeded({
+        "status": "ok", "exchange": "NFOFUT", "date_from": "2026-08-25", "date_to": "2026-08-25",
+        "last_available_before": "2026-08-24", "last_available_after": "2026-08-24",
+        "instruments_added": 0, "bars_written": 0,
+    })
+    assert screen._worker.wait(2000)
+    qapp.processEvents()
+
+    assert "Already up to date" in screen._vendor_status_lbl.text()
+    assert "2026-08-24" in screen._vendor_status_lbl.text()
+    assert "0 bar row(s)" not in screen._vendor_status_lbl.text()
+
+
+def test_settings_screen_vendor_sync_shows_server_error_message(qapp, controller, monkeypatch, bars_db):
+    from screens.inception_settings import InceptionSettingsScreen
+    from api import inception_api
+    from api.exceptions import ApiError
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    monkeypatch.setattr(
+        inception_api, "sync_vendor_data",
+        lambda email, password, exchange: (_ for _ in ()).throw(
+            ApiError("Equal Solution rate/quota limit hit", "vendor_api_failed", 502)
+        ),
+    )
+
+    screen = InceptionSettingsScreen(controller)
+    screen._start_vendor_sync()
+    assert screen._vendor_worker.wait(2000)
+    qapp.processEvents()
+
+    assert "rate/quota limit hit" in screen._vendor_status_lbl.text()
+    assert screen._vendor_fetch_btn.isEnabled() is True
+
+
+def test_settings_screen_vendor_progress_bar_shown_during_fetch_hidden_after(qapp, controller, monkeypatch, bars_db):
+    """isHidden(), not isVisible() — same rationale as the Local Data Sync
+    progress-bar test above (this screen is never .show()n in tests)."""
+    from screens.inception_settings import InceptionSettingsScreen
+    from api import inception_api
+    from services import inception_sync_service
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", lambda progress_cb=None, today=None: 0)
+    monkeypatch.setattr(inception_api, "sync_vendor_data", lambda email, password, exchange: {"status": "already_up_to_date"})
+
+    screen = InceptionSettingsScreen(controller)
+    assert screen._vendor_progress_bar.isHidden() is True
+
+    screen._start_vendor_sync()
+    assert screen._vendor_progress_bar.isHidden() is False
+    assert screen._vendor_fetch_btn.isEnabled() is False
+
+    assert screen._vendor_worker.wait(2000)
+    qapp.processEvents()
+    assert screen._worker.wait(2000)   # the auto-triggered local sync worker
+    qapp.processEvents()
+
+    assert screen._vendor_progress_bar.isHidden() is True
+    assert screen._vendor_fetch_btn.isEnabled() is True
+
+
+def test_settings_screen_vendor_sync_skipped_while_already_running(qapp, controller, monkeypatch, bars_db):
+    from screens.inception_settings import InceptionSettingsScreen
+    from api import inception_api
+    from services import inception_sync_service
+    import threading
+
+    monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", lambda progress_cb=None, today=None: 0)
+    release = threading.Event()
+    calls = []
+
+    def _slow_sync(email, password, exchange):
+        calls.append(1)
+        release.wait(2)
+        return {"status": "already_up_to_date"}
+
+    monkeypatch.setattr(inception_api, "sync_vendor_data", _slow_sync)
+
+    screen = InceptionSettingsScreen(controller)
+    screen._start_vendor_sync()
+    first_worker = screen._vendor_worker
+    screen._start_vendor_sync()   # ignored — first is still running
+
+    release.set()
+    assert first_worker.wait(2000)
+    qapp.processEvents()
+    assert screen._worker.wait(2000)   # the auto-triggered local sync worker
+    qapp.processEvents()
+
+    assert len(calls) == 1
+    assert screen._vendor_worker is first_worker

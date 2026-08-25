@@ -1,10 +1,11 @@
 """Inception > Data & Settings — where the local raw-bar sync
-(services.inception_sync_service/inception_bars_store) and the Group A/B
-formula parameters (services.inception_settings, read by services.
-inception_formula_engine) live, now that both moved entirely to this
-client. View by Date and HMV both depend on a sync having run at least
-once; this screen is where that first sync (and any later "Sync Now") gets
-triggered.
+(services.inception_sync_service/inception_bars_store), the "Fetch from
+Equal Solution" vendor pull (api.inception_api.sync_vendor_data), and the
+Group A/B formula parameters (services.inception_settings, read by
+services.inception_formula_engine) live, now that all three moved entirely
+to this client. View by Date and HMV both depend on a sync having run at
+least once; this screen is where that first sync (and any later "Sync
+Now") gets triggered.
 
 Sync runs on a worker QThread (mirrors components.update_dialog's
 _ApplyWorker pattern) so a multi-minute first backfill (~500K rows across
@@ -16,27 +17,75 @@ inception_sync_service.incremental_sync). The colored dot + headline above
 the status line is the "is my data synced at all" answer at a glance;
 the sentence below it has the specifics (as-of date, row count).
 
-The three formula parameters (gap threshold %, 52-week window length, gap
-FIFO depth) are the full extent of "editable formula" for Group A/B — see
-services.inception_formula_engine's module docstring for why: these
-columns aren't row-level expressions, so a numeric parameter is the only
-thing there is to edit. Saving here takes effect on the NEXT View by
-Date/HMV load (values aren't cached, so no explicit recompute step is
-needed — see services.inception_compute_service).
+── "Fetch from Equal Solution" vs "Local Data Sync" — two DIFFERENT
+directions, easy to conflate since both say "sync" ──────────────────────
+"Local Data Sync" above pulls FROM the shared central database DOWN INTO
+this device's local cache (inception_bars_store) — every tenant's desktop
+does this independently, nothing it does is visible to anyone else.
+"Fetch from Equal Solution" pulls FROM the vendor's live market-data feed
+UP INTO that shared central database — a click here changes the dataset
+every tenant's Inception feature reads from, not just this device. The
+actual vendor call runs on the SERVER (app/services/
+inception_vendor_sync_service.py in broker-sync-api), but the Username/
+Password/Exchange fields below ARE sent as typed on every click — the
+server uses them if given, falling back to its own env config only when a
+field's left blank (see that service's own docstring). Prefilled with the
+same values inception-stock-data/eod_backfill.py has hardcoded for this
+account, since that's the account this button acts on by default.
+A successful fetch here automatically follows up with the same "Sync Now"
+pull Local Data Sync's own button triggers (_on_vendor_sync_succeeded) —
+explicitly requested, so this is a true one-click "get me current" action
+rather than needing a second manual step; harmless per-device even though
+it also affects the shared central dataset, since each device's own local
+sync is independent and idempotent regardless of what triggered it.
 """
 
 import font_scale
 
-from PySide6.QtCore import QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QDoubleSpinBox,
-    QSpinBox, QFrame, QMessageBox, QProgressBar,
+    QSpinBox, QFrame, QMessageBox, QProgressBar, QLineEdit, QScrollArea,
 )
 
+from api.exceptions import ApiError, NetworkError
 from services import (
     inception_bars_store, inception_compute_service, inception_formula_builder_columns,
     inception_settings, inception_sync_service,
 )
+
+# Prefill for the "Fetch from Equal Solution" section's Username/Password/
+# Exchange fields — matches inception-stock-data/eod_backfill.py's own
+# hardcoded values for this account. Plain text, no masking: these ARE
+# sent as typed on every click (see _start_vendor_sync/_VendorSyncWorker),
+# so there's nothing gained by obscuring a value already visible right
+# here and needed to actually use the button.
+_VENDOR_USERNAME_DISPLAY = "fukulens@gmail.com"
+_VENDOR_PASSWORD_DISPLAY = "12345678"
+_VENDOR_EXCHANGE = "NFOFUT"
+
+
+class _VendorSyncWorker(QThread):
+    succeeded = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, email: str, password: str, exchange: str, parent=None):
+        super().__init__(parent)
+        self._email = email
+        self._password = password
+        self._exchange = exchange
+
+    def run(self):
+        from api import inception_api
+        try:
+            result = inception_api.sync_vendor_data(self._email, self._password, self._exchange)
+        except (ApiError, NetworkError) as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # never let an unexpected error kill the worker thread silently
+            self.failed.emit(f"Unexpected error: {exc}")
+            return
+        self.succeeded.emit(result)
 
 
 class _SyncWorker(QThread):
@@ -63,6 +112,7 @@ class InceptionSettingsScreen(QWidget):
         super().__init__()
         self._controller = controller
         self._worker: _SyncWorker | None = None
+        self._vendor_worker: _VendorSyncWorker | None = None
         self._build()
         QTimer.singleShot(0, self._refresh_sync_status)
 
@@ -70,7 +120,18 @@ class InceptionSettingsScreen(QWidget):
 
     def _build(self):
         t = self._controller.theme
-        layout = QVBoxLayout(self)
+
+        # Scrollable — this screen grew a third card ("Fetch from Equal
+        # Solution") on top of the original two, and a plain fixed-height
+        # QVBoxLayout(self) started clipping/compressing content on a
+        # shorter window instead of scrolling to it (same pattern screens/
+        # profile.py already uses for its own long settings form).
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        container = QWidget()
+        layout = QVBoxLayout(container)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(20)
 
@@ -146,6 +207,61 @@ class InceptionSettingsScreen(QWidget):
         sync_hint.setWordWrap(True)
         sync_lay.addWidget(sync_hint)
 
+        # ── vendor fetch section ────────────────────────────────────────────
+        vendor_card = self._section("Fetch from Equal Solution", t)
+        layout.addWidget(vendor_card)
+        vendor_lay = vendor_card.layout()
+
+        vendor_intro = QLabel(
+            "Pulls new NFOFUT data from the vendor straight into the shared "
+            "central database — a DIFFERENT direction from Local Data Sync "
+            "above, which only pulls from that database down to this device. "
+            "Runs entirely on the server; the fields below are read-only, "
+            "shown for reference only — this app never sends or receives "
+            "the real credentials."
+        )
+        vendor_intro.setFont(font_scale.font(font_scale.SMALL, False))
+        vendor_intro.setStyleSheet(f"color: {t.get('text_secondary')};")
+        vendor_intro.setWordWrap(True)
+        vendor_lay.addWidget(vendor_intro)
+
+        self._vendor_username_field = self._labeled_readonly_field(
+            vendor_lay, "Username:", _VENDOR_USERNAME_DISPLAY,
+        )
+        self._vendor_password_field = self._labeled_readonly_field(
+            vendor_lay, "Password:", _VENDOR_PASSWORD_DISPLAY,
+        )
+        self._vendor_exchange_field = self._labeled_readonly_field(
+            vendor_lay, "Exchange:", _VENDOR_EXCHANGE,
+        )
+
+        self._vendor_progress_bar = QProgressBar()
+        self._vendor_progress_bar.setRange(0, 0)  # indeterminate — a single request, nothing to report a fraction of
+        self._vendor_progress_bar.setFixedHeight(18)
+        self._vendor_progress_bar.setTextVisible(False)
+        self._vendor_progress_bar.setVisible(False)
+        vendor_lay.addWidget(self._vendor_progress_bar)
+
+        self._vendor_status_lbl = QLabel("")
+        self._vendor_status_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._vendor_status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        self._vendor_status_lbl.setWordWrap(True)
+        vendor_lay.addWidget(self._vendor_status_lbl)
+
+        vendor_btn_row = QHBoxLayout()
+        self._vendor_fetch_btn = QPushButton("Fetch from Equal Solution")
+        self._vendor_fetch_btn.setFixedHeight(32)
+        self._vendor_fetch_btn.setToolTip(
+            "Fetches everything published since the last time this was run, "
+            "through today, for NFOFUT, and writes it to the shared central "
+            "database. Safe to click any time — a click with nothing new "
+            "just reports \"already up to date\"."
+        )
+        self._vendor_fetch_btn.clicked.connect(self._start_vendor_sync)
+        vendor_btn_row.addWidget(self._vendor_fetch_btn)
+        vendor_btn_row.addStretch()
+        vendor_lay.addLayout(vendor_btn_row)
+
         # ── formula parameters section ──────────────────────────────────────
         params_card = self._section("Group A/B Formula Parameters", t)
         layout.addWidget(params_card)
@@ -189,6 +305,11 @@ class InceptionSettingsScreen(QWidget):
 
         layout.addStretch()
         self._load_params()
+
+        scroll.setWidget(container)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
 
     def _section(self, title: str, t) -> QFrame:
         card = QFrame()
@@ -238,6 +359,80 @@ class InceptionSettingsScreen(QWidget):
         row.addStretch()
         layout.addLayout(row)
         return spin
+
+    def _labeled_readonly_field(self, layout, label, value):
+        row = QHBoxLayout()
+        lbl = QLabel(label)
+        lbl.setFixedWidth(180)
+        field = QLineEdit(value)
+        field.setReadOnly(True)
+        field.setFixedWidth(220)
+        row.addWidget(lbl)
+        row.addWidget(field)
+        row.addStretch()
+        layout.addLayout(row)
+        return field
+
+    # ── vendor fetch ─────────────────────────────────────────────────────────
+
+    def _start_vendor_sync(self):
+        if self._vendor_worker is not None and self._vendor_worker.isRunning():
+            return
+        t = self._controller.theme
+        self._vendor_fetch_btn.setEnabled(False)
+        self._vendor_progress_bar.setVisible(True)
+        self._vendor_status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        self._vendor_status_lbl.setText("Fetching from Equal Solution…")
+
+        self._vendor_worker = _VendorSyncWorker(
+            self._vendor_username_field.text(), self._vendor_password_field.text(),
+            self._vendor_exchange_field.text(), parent=self,
+        )
+        self._vendor_worker.succeeded.connect(self._on_vendor_sync_succeeded)
+        self._vendor_worker.failed.connect(self._on_vendor_sync_failed)
+        self._vendor_worker.start()
+
+    def _on_vendor_sync_succeeded(self, result: dict):
+        t = self._controller.theme
+        self._vendor_fetch_btn.setEnabled(True)
+        self._vendor_progress_bar.setVisible(False)
+        self._vendor_status_lbl.setStyleSheet(f"color: {t.get('accent')};")
+
+        # "already_up_to_date" (date_from already past today — no vendor
+        # call made at all) and a real vendor call that came back with
+        # nothing new (e.g. the vendor's EOD batch for today hasn't run
+        # yet — see app.services.eqldata_client.fetch_eod_range_rows'
+        # 404-means-"no data yet" handling) both land here as "nothing to
+        # report" rather than the bars_written=0 phrasing below, which
+        # reads oddly for what's actually a routine, expected outcome.
+        if result.get("status") == "already_up_to_date" or result.get("bars_written", 0) == 0:
+            last = result.get("last_available_after") or result.get("last_available_before")
+            self._vendor_status_lbl.setText(
+                f"Already up to date through {last} — nothing new published by the vendor yet."
+            )
+        else:
+            self._vendor_status_lbl.setText(
+                f"Fetched {result.get('exchange')} {result.get('date_from')} → {result.get('date_to')} — "
+                f"{result.get('bars_written', 0):,} bar row(s) written, "
+                f"{result.get('instruments_added', 0)} new instrument(s). "
+                f"Central data now current through {result.get('last_available_after')}. "
+                f"Pulling this into this device's local cache…"
+            )
+
+        # Auto-follow with the same "Sync Now" pull Local Data Sync's own
+        # button triggers — explicitly requested, so a vendor fetch is a
+        # true one-click "get me current" action instead of needing a
+        # second manual step. Harmless to call even when there was nothing
+        # new (incremental_sync's own no-op-if-current check makes it a
+        # cheap round trip, not a real re-download).
+        self._start_sync(full=False)
+
+    def _on_vendor_sync_failed(self, message: str):
+        t = self._controller.theme
+        self._vendor_fetch_btn.setEnabled(True)
+        self._vendor_progress_bar.setVisible(False)
+        self._vendor_status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
+        self._vendor_status_lbl.setText(f"Fetch failed: {message}")
 
     # ── formula parameters ──────────────────────────────────────────────────
 
@@ -356,3 +551,8 @@ class InceptionSettingsScreen(QWidget):
 
     def refresh_theme(self):
         self._refresh_sync_status()
+        t = self._controller.theme
+        if "failed" in self._vendor_status_lbl.text().lower():
+            self._vendor_status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
+        elif self._vendor_status_lbl.text():
+            self._vendor_status_lbl.setStyleSheet(f"color: {t.get('accent')};")
