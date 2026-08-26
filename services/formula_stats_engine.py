@@ -5,15 +5,24 @@ aggregating per stock. Two entry points:
   - compute_stats(): powers the Data menu's Formula Stats screen
     (screens/formula_stats.py) via components/formula_stats_panel.py — pick
     a strategy and a day count, see Min/Max/Average/etc. for every column,
-    right-click a cell for the day-by-day values behind it.
+    right-click a cell for the day-by-day values behind it. A formula
+    referencing VALUE_DAYS_AGO/VALUE_ON_DATE/a _DAYS aggregate resolves
+    self-contained straight from the same fetched range (see
+    _self_contained_day_history) — this screen has no "live tick" for a
+    real-today-anchored day_history to make sense against; every day being
+    analyzed is its own "today" instead. Without this, such a formula
+    (e.g. VALUE_DAYS_AGO([High], 1) > VALUE_DAYS_AGO([High], 0)) silently
+    evaluated to None for every single stock/day, blanking the whole
+    results table with no error.
 
   - compute_day_history(): powers the AVG_DAYS/MIN_DAYS/... formula
     functions and the VALUE_DAYS_AGO/VALUE_ON_DATE point lookups
     (services/strategy_engine.py's "Historic (N days) aggregates" /
-    "Historic value (point lookup)") — one value per stock per (column,
-    window) request, looked up by evaluate() while rendering Live Master
-    View. Callers (live_viewer.py) call this once per strategy load/toggle/
-    manual refresh, never per tick.
+    "Historic value (point lookup)") for a LIVE Master View row, where
+    "today" is real/fixed and a single shared lookback genuinely is
+    correct — one value per stock per (column, window) request, looked up
+    by evaluate() while rendering. Callers (live_viewer.py) call this once
+    per strategy load/toggle/manual refresh, never per tick.
 
 Fetching "which dates/values" lives in api/lmv_snapshot_api.get_range();
 this module is pure logic (no Qt, no network calls) so it's directly
@@ -63,13 +72,122 @@ AGGREGATES = {
 DEFAULT_AGGREGATES = ["Min", "Max", "Average", "Count"]
 
 
-def compute_stats(columns: list, range_response: dict) -> dict:
+def _needed_int_day_specs(compiled_by_name: dict) -> list:
+    """Distinct (agg_key, col_name, window) triples — every VALUE_DAYS_AGO
+    or _DAYS-family function referenced by any compiled column's day_specs
+    (see services.strategy_engine._Compiled) with an int (relative
+    "N days back") window. Feeds _self_contained_day_history — see that
+    function and compute_stats' own docstring for why these need a
+    per-evaluation-day history rather than the real-"today"-anchored one
+    compute_day_history builds."""
+    seen: set = set()
+    out = []
+    for compiled in compiled_by_name.values():
+        if compiled is None:
+            continue
+        for _, agg_key, col_name, window in compiled.day_specs:
+            key = (agg_key, col_name, window)
+            if isinstance(window, int) and key not in seen:
+                seen.add(key)
+                out.append(key)
+    return out
+
+
+def _needed_date_specs(compiled_by_name: dict) -> list:
+    """Distinct (col_name, (date_from, date_to)) pairs — every VALUE_ON_DATE
+    referenced by any compiled column's day_specs (always paired with
+    agg_key "First" — see services.strategy_engine._build_compiled). A
+    fixed calendar date/range needs no per-day lookback padding (unlike an
+    int window it isn't relative to whichever day is currently being
+    evaluated), so it's resolved directly against a stock's history-so-far,
+    same as the int windows, by _self_contained_day_history."""
+    seen: set = set()
+    out = []
+    for compiled in compiled_by_name.values():
+        if compiled is None:
+            continue
+        for _, _agg_key, col_name, window in compiled.day_specs:
+            key = (col_name, window)
+            if isinstance(window, tuple) and key not in seen:
+                seen.add(key)
+                out.append(key)
+    return out
+
+
+def _self_contained_day_history(hist: list, int_specs: list, date_specs: list, symbol: str) -> dict:
+    """Builds the {(col_name, window): {symbol: {agg_key: value}}} shape
+    evaluate_compiled expects for VALUE_DAYS_AGO/VALUE_ON_DATE/_DAYS-family
+    functions, entirely from *hist* — one stock's own [(trade_date,
+    row_dict), ...] accumulated so far (oldest first, the day currently
+    being evaluated last) within this same compute_stats() call, rather
+    than a separate historic fetch anchored to real "today" — every day in
+    a Formula Stats range is its own "today" for VALUE_DAYS_AGO's purposes,
+    so a single shared, today-anchored history would give every day the
+    SAME lookback value instead of each day's own. A window reaching before
+    the first day actually fetched just isn't included here, so it
+    resolves to None the same "missing input" way evaluate() already
+    treats any other absent day_history entry — the day is simply too
+    early in the picked range for that lookback to be answerable from what
+    was fetched, not a crash.
+    """
+    out: dict = {}
+    for agg_key, col_name, window in int_specs:
+        if window <= 0 or len(hist) < window:
+            continue
+        window_vals = [row.get(col_name) for _, row in hist[-window:]]
+        if agg_key == "First":
+            value = window_vals[0] if isinstance(window_vals[0], (int, float)) else None
+        else:
+            numeric = [v for v in window_vals if isinstance(v, (int, float))]
+            agg_fn = AGGREGATES.get(agg_key)
+            value = agg_fn(numeric) if agg_fn and numeric else None
+        out[(col_name, window)] = {symbol: {agg_key: value}}
+    for col_name, date_window in date_specs:
+        target_date = date_window[0]   # date_from == date_to for VALUE_ON_DATE
+        value = None
+        for trade_date, row in hist:
+            if trade_date == target_date:
+                v = row.get(col_name)
+                value = v if isinstance(v, (int, float)) else None
+                break
+        out[(col_name, date_window)] = {symbol: {"First": value}}
+    return out
+
+
+def compute_stats(columns: list, range_response: dict, day_history: dict | None = None) -> dict:
     """Evaluate every formula in *columns* (a list of {"name", "formula"}
     dicts — a strategy's saved columns, or any ad-hoc one-off formula built
     just for this test, e.g. from the Expression Editor's "Test Last N
     Days…" button) for every stock on every day in range_response["days"]
     (the shape returned by api/lmv_snapshot_api.get_range), then aggregate
     per stock per column.
+
+    A formula referencing VALUE_DAYS_AGO/VALUE_ON_DATE or a _DAYS
+    historic-aggregate function is resolved SELF-CONTAINED, straight from
+    range_response itself (see _self_contained_day_history) — no separate
+    fetch, and no explicit *day_history* needed from the caller for this,
+    unlike services.strategy_engine.evaluate_compiled's other callers.
+    This has to be built fresh per day being evaluated rather than once:
+    every day in a Formula Stats range stands in as its own "today", so
+    "N days ago" means N days before THAT day, not N days before real
+    today — a single today-anchored day_history (what compute_day_history
+    below builds, for the live-tick case where "today" really is fixed)
+    would give every historic day the exact same lookback value instead of
+    each one's own. A day early enough in the picked range that its own
+    window reaches before the first day actually fetched just comes back
+    blank for that function — not enough history was fetched to answer it,
+    same "blank rather than wrong" fallback as any other missing input.
+    VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS/VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES
+    aren't covered by this yet (still blank here, same as before this fix)
+    — pass an explicit *day_history* (real-"today"-anchored; see
+    compute_day_history) if a caller needs those to resolve instead.
+
+    *day_history*, when the caller passes one explicitly, is used as-is for
+    EVERY day instead of the self-contained per-day one above — this is
+    what compute_day_history's own recursive call below does (a _DAYS-of-
+    _DAYS reference resolves via nesting there, not this self-contained
+    path) and what any future caller wanting classic "real today" semantics
+    within a Formula Stats-shaped call would opt into.
 
     Returns:
         {symbol: {"display_name": str,
@@ -95,6 +213,16 @@ def compute_stats(columns: list, range_response: dict) -> dict:
     # a single Formula Stats/day-history request, so the saving is real, not
     # theoretical. See services.strategy_engine.evaluate_compiled.
     compiled_by_name = {c["name"]: get_compiled(c["formula"]) for c in columns}
+
+    # Only figure out what the self-contained path needs to track when the
+    # caller hasn't already supplied its own day_history (see this
+    # function's own docstring) — skips the bookkeeping below entirely for
+    # every column set that doesn't reference these functions at all.
+    build_self_contained = day_history is None
+    int_specs = _needed_int_day_specs(compiled_by_name) if build_self_contained else []
+    date_specs = _needed_date_specs(compiled_by_name) if build_self_contained else []
+    build_self_contained = build_self_contained and (int_specs or date_specs)
+    symbol_history: dict = {}   # symbol -> [(trade_date, row_dict), ...], oldest first
 
     for day in range_response.get("days", []):
         trade_date = day["trade_date"]
@@ -124,9 +252,15 @@ def compute_stats(columns: list, range_response: dict) -> dict:
                 "display_name": stock.get("display_name") or symbol,
                 "columns": {c["name"]: {"daily": []} for c in columns},
             })
+            this_day_history = day_history
+            if build_self_contained:
+                hist = symbol_history.setdefault(symbol, [])
+                hist.append((trade_date, row_dict))
+                this_day_history = _self_contained_day_history(hist, int_specs, date_specs, symbol)
             for col in columns:
                 value = evaluate_compiled(compiled_by_name[col["name"]], row_dict, all_dicts,
-                                          agg_cache=agg_cache, sym_index=sym_index)
+                                          agg_cache=agg_cache, sym_index=sym_index,
+                                          day_history=this_day_history)
                 entry["columns"][col["name"]]["daily"].append((trade_date, value))
 
     for entry in by_symbol.values():

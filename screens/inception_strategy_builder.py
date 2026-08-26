@@ -8,9 +8,13 @@ Editor (screens.formula_editor.ExpressionEditorDialog/VariablesManagerDialog)
 LMV's Strategy Builder uses — via two small, backward-compatible additions to
 those classes (`sections`/`variable_store` params, both defaulting to prior
 LMV behavior; see that module for the full rationale): `sections` drops
-"Historic Value"/"Rows" (day_history point-lookups and cross-instrument
-"[Field] of Symbol" references aren't wired up for Inception's field set);
-`variable_store` points the Variables tab/"Save as Variable" at
+"Historic Value" (VALUE_DAYS_AGO/VALUE_ON_DATE point-lookups — a UI/product
+choice, not an engine limitation: services.inception_day_history resolves
+these the same as the still-offered "Functions" section's AVG_DAYS/etc for
+a raw OHLCV field, just not surfaced in this picker) and "Rows"
+(cross-instrument "[Field] of Symbol" references, which really aren't
+wired up at all for Inception's field set); `variable_store` points the
+Variables tab/"Save as Variable" at
 services.inception_formula_variable_store instead of LMV's.
 
 Backed by its own store (services.inception_strategy_store) and its own
@@ -74,7 +78,7 @@ from PySide6.QtWidgets import (
 
 from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
-from services import inception_bars_store, inception_columns
+from services import formula_engine, inception_bars_store, inception_columns
 from services import inception_strategy_store as store
 from services import inception_formula_variable_store as var_store
 from screens.strategy_builder import (
@@ -84,10 +88,36 @@ from screens.strategy_builder import (
 )
 from screens.formula_editor import ExpressionEditorDialog, VariablesManagerDialog
 
-# Historic Value (day_history point-lookups) and Rows (cross-instrument "of
-# Symbol") aren't implemented server-side for Inception yet — see module
-# docstring.
+# Historic Value (VALUE_DAYS_AGO/VALUE_ON_DATE point-lookups) stays hidden
+# here by choice, and Rows (cross-instrument "of Symbol") isn't implemented
+# for Inception at all — see module docstring.
 INCEPTION_SECTIONS = ["Functions", "Operators", "Fields", "Constants", "Variables"]
+
+# Inception-only function(s) appended to the "Functions" section (see
+# ExpressionEditorDialog's extra_functions param) rather than added to
+# screens.formula_editor.FUNCTION_CATALOGUE itself, which every LMV caller
+# also draws from — LMV has no engine support to resolve this (see
+# services.strategy_engine.VALUE_BEFORE_CHANGE_TAG), so offering it there
+# would let a user insert something that always silently evaluates to None.
+INCEPTION_EXTRA_FUNCTIONS = [
+    {
+        "name": "VALUE_BEFORE_CHANGE",
+        "signature": "VALUE_BEFORE_CHANGE(column, months_back)",
+        "description": (
+            "This stock's own column value immediately before its CURRENT "
+            "value last changed — walks back one calendar month at a time "
+            "(up to months_back months), comparing each prior month's own "
+            "value against today's, and returns the first one that's "
+            "actually different. E.g. MT reads 400 for both August and "
+            "July but was 382 in June: VALUE_BEFORE_CHANGE([MT], 6) -> 382. "
+            "None if nothing differs within months_back months, or there "
+            "isn't that much synced history yet. Works for both Group A/B "
+            "columns (52WH, ATH, ...) and Formula Builder columns (MT, MB, "
+            "DT, DB, ...)."
+        ),
+        "token": {"type": "func", "value": "VALUE_BEFORE_CHANGE("},
+    },
+]
 
 
 def _dummy_row(fields: list) -> dict:
@@ -113,7 +143,8 @@ def _open_expression_editor(tokens: list, fields: list, theme, mode: str,
     dlg = ExpressionEditorDialog(
         tokens, fields, [], row, all_lmv_data=all_data, theme=theme, mode=mode,
         self_value=self_value, real_lmv_headers=fields,
-        sections=INCEPTION_SECTIONS, variable_store=var_store, parent=parent,
+        sections=INCEPTION_SECTIONS, variable_store=var_store,
+        extra_functions=INCEPTION_EXTRA_FUNCTIONS, parent=parent,
     )
     if dlg.exec() == QDialog.DialogCode.Accepted:
         return dlg.get_tokens()
@@ -772,6 +803,18 @@ class InceptionStrategyBuilderScreen(QWidget):
         # services.inception_columns/inception_formula_engine. No network
         # call needed here any more.
         self._fields = [c.code for c in inception_columns.column_catalogue()]
+        # Plus LMV's ~56 built-in Formula Builder codes (MT, MB, DT, DB,
+        # PMH, the camarilla ladders, ...) — services.
+        # inception_formula_builder_columns.compute_for_bars is what
+        # actually produces these for a row (see screens.inception_hmv /
+        # screens.inception_view_by_date, both of which merge them in
+        # before a strategy ever sees the row), so they need to be
+        # selectable here too or a formula could never reference them.
+        # FORMULA_CODES specifically (not services.formula_tokens.
+        # all_field_codes's superset) — compute_for_bars only ever computes
+        # the built-ins, never a custom External Import formula, so only
+        # those are guaranteed to actually resolve to a value here.
+        self._fields += [c for c in formula_engine.FORMULA_CODES if c not in self._fields]
         self._fields += [v["name"] for v in var_store.load_all()]
         self._strategies = store.load_all()
         self._refresh_list()
@@ -986,7 +1029,8 @@ class InceptionStrategyBuilderScreen(QWidget):
             all_data = [row]
         dlg = VariablesManagerDialog(
             self._fields, row, all_lmv_data=all_data, theme=self._theme,
-            sections=INCEPTION_SECTIONS, variable_store=var_store, parent=self,
+            sections=INCEPTION_SECTIONS, variable_store=var_store,
+            extra_functions=INCEPTION_EXTRA_FUNCTIONS, parent=self,
         )
         dlg.exec()
         # A variable may have been renamed/added/deleted — refresh the field

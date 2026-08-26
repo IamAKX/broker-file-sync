@@ -233,7 +233,8 @@ class LmvUploadScreen(QWidget):
         from services.historic_lmv_merge import read_merged_static
 
         script_name_data = config_store.load_tab("script_name", SCRIPT_NAME_DATA)
-        sector_map = {stock: sector for sector, stock in SECTOR_STOCK_DATA}
+        sector_stock_data = config_store.load_tab("sector_stock", SECTOR_STOCK_DATA)
+        sector_map = {stock: sector for sector, stock in sector_stock_data}
         try:
             headers, data = read_merged_static(
                 self._cards["Sharekhan"]._selected_file,
@@ -477,7 +478,8 @@ def _pivot_snapshot_for_viewer(stocks: list) -> tuple:
     Scrip Name isn't stored either — less exact than the live/preview merge,
     but Sector was never a "from file or DB" column to begin with.
     """
-    sector_map = {stock: sector for sector, stock in SECTOR_STOCK_DATA}
+    sector_stock_data = config_store.load_tab("sector_stock", SECTOR_STOCK_DATA)
+    sector_map = {stock: sector for sector, stock in sector_stock_data}
     metric_keys = sorted({k for s in stocks for k in s.get("metrics", {})})
     headers = ["Sector", "Scrip Name"] + metric_keys
     rows = []

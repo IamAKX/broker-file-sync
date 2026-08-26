@@ -298,6 +298,11 @@ _DAYS_AGG_FUNCS = {
 # "Historic value (point lookup)" docstring section.
 _POINT_DAYS_AGO_FUNCS = {"value_days_ago"}
 _ON_DATE_FUNCS = {"value_on_date"}
+# Same (column, N) text shape as the days-ago family above, but N means
+# "months to search back" for VALUE_BEFORE_CHANGE, not "days ago" — see
+# services/strategy_engine.py's VALUE_BEFORE_CHANGE_TAG docstring.
+# Inception-only (services.inception_value_before_change).
+_VALUE_BEFORE_CHANGE_FUNCS = {"value_before_change"}
 # Historic value at a window extreme — TWO column args (the value to fetch,
 # then the driver column that decides which of the last N days wins) plus a
 # days count. See services/strategy_engine.py's "Historic value at a window
@@ -405,7 +410,8 @@ def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
             return start, None, {}
         col = next(g for g in m.groups() if g is not None)
         return m.end(), col, {}
-    if func_name_lower in _DAYS_AGG_FUNCS or func_name_lower in _POINT_DAYS_AGO_FUNCS:
+    if (func_name_lower in _DAYS_AGG_FUNCS or func_name_lower in _POINT_DAYS_AGO_FUNCS
+            or func_name_lower in _VALUE_BEFORE_CHANGE_FUNCS):
         m = _DAYS_AGG_ARG_RE.match(text, start)
         if not m:
             return start, None, {}
@@ -864,17 +870,29 @@ class ExpressionEditorDialog(QDialog):
                  allow_self: bool = None, extra_row_values: dict = None,
                  real_lmv_headers: list = None,
                  sections: list = None, variable_store=None,
+                 extra_functions: list = None,
                  parent=None):
         """sections/variable_store: added for screens.inception_strategy_builder's
         reuse of this dialog with Inception's own field set — both default to
         the exact prior behavior (full 7-section nav, services.
         formula_variable_store), so every existing (LMV) call site is
         unaffected. sections lets a caller drop nav entries that don't apply
-        to it (Inception has no day_history/cross-row "of Symbol" support,
-        so it drops "Historic Value"/"Rows" rather than offering functions
-        that would silently do nothing server-side); variable_store swaps
-        which store's variables the Variables tab/"Save as Variable" reads
-        and writes.
+        to it (Inception has no cross-row "of Symbol" support, so it drops
+        "Rows"; "Historic Value" stays hidden by choice — see that constant's
+        own docstring in screens.inception_strategy_builder — even though
+        Inception now resolves some of it, see services.inception_day_history/
+        inception_value_before_change); variable_store swaps which store's
+        variables the Variables tab/"Save as Variable" reads and writes.
+
+        extra_functions: additional entries (same {"name", "signature",
+        "description", "token"} shape as FUNCTION_CATALOGUE) appended to the
+        "Functions" section for just this instance, rather than mutating the
+        shared FUNCTION_CATALOGUE list every caller (including LMV's) draws
+        from — for a function only ONE caller's engine can actually resolve
+        (e.g. screens.inception_strategy_builder's VALUE_BEFORE_CHANGE,
+        Inception-only — see services.strategy_engine.VALUE_BEFORE_CHANGE_TAG),
+        so it isn't offered somewhere it would silently always evaluate to
+        None. Defaults to None (nothing extra), the exact prior behavior.
         """
         super().__init__(parent)
         self._initial_tokens = list(tokens)
@@ -882,6 +900,7 @@ class ExpressionEditorDialog(QDialog):
         self._strategy_col_headers = list(strategy_col_headers)
         self._sections = list(sections) if sections is not None else list(self._ALL_SECTIONS)
         self._variable_store = variable_store
+        self._extra_functions = list(extra_functions) if extra_functions else []
         # The sheet's OWN currently-loaded columns — a strict subset of
         # self._lmv_headers above, which is really "every name offered in
         # the Fields list" (Formula Builder fields, other strategy columns,
@@ -1216,7 +1235,7 @@ class ExpressionEditorDialog(QDialog):
     def _catalogue_for_section(self, section: str) -> list:
         all_headers = self._lmv_headers + self._strategy_col_headers
         if section == "Functions":
-            return FUNCTION_CATALOGUE
+            return FUNCTION_CATALOGUE + self._extra_functions
         if section == "Historic Value":
             return POINT_LOOKUP_CATALOGUE
         if section == "Operators":
@@ -1603,10 +1622,11 @@ class VariablesManagerDialog(QDialog):
 
     def __init__(self, lmv_headers: list, lmv_first_row: dict,
                  all_lmv_data: list = None, theme=None,
-                 sections: list = None, variable_store=None, parent=None):
-        """sections/variable_store: see ExpressionEditorDialog — both
-        default to prior (LMV) behavior and are forwarded to every
-        ExpressionEditorDialog this dialog opens."""
+                 sections: list = None, variable_store=None,
+                 extra_functions: list = None, parent=None):
+        """sections/variable_store/extra_functions: see ExpressionEditorDialog
+        — all three default to prior (LMV) behavior and are forwarded to
+        every ExpressionEditorDialog this dialog opens."""
         super().__init__(parent)
         self._lmv_headers   = list(lmv_headers)
         self._lmv_first_row = lmv_first_row or {}
@@ -1614,6 +1634,7 @@ class VariablesManagerDialog(QDialog):
         self._theme = theme
         self._sections = sections
         self._variable_store = variable_store
+        self._extra_functions = extra_functions
         self.setWindowTitle("Manage Variables")
         self.setFixedSize(520, 440)
         self._build()
@@ -1743,7 +1764,8 @@ class VariablesManagerDialog(QDialog):
             all_lmv_data=self._all_lmv_data, theme=self._theme,
             mode="value", allow_self=False,
             real_lmv_headers=list(self._lmv_first_row.keys()),
-            sections=self._sections, variable_store=self._variable_store, parent=self,
+            sections=self._sections, variable_store=self._variable_store,
+            extra_functions=self._extra_functions, parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()
@@ -1761,7 +1783,8 @@ class VariablesManagerDialog(QDialog):
             all_lmv_data=self._all_lmv_data, theme=self._theme,
             mode="value", allow_self=False,
             real_lmv_headers=list(self._lmv_first_row.keys()),
-            sections=self._sections, variable_store=self._variable_store, parent=self,
+            sections=self._sections, variable_store=self._variable_store,
+            extra_functions=self._extra_functions, parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()

@@ -448,6 +448,23 @@ _VALUE_AT_EXTREME_FUNCS = {"VALUE_AT_MAX_DAYS": True, "VALUE_AT_MIN_DAYS": False
 # at a window extreme" docstring section, VALUE_AT_MAX_DATES paragraph.
 _VALUE_AT_EXTREME_DATE_FUNCS = {"VALUE_AT_MAX_DATES": True, "VALUE_AT_MIN_DATES": False}
 
+# "The value this column had immediately before its current value started"
+# — e.g. MT reads 400 for both August and July but was 382 in June:
+# VALUE_BEFORE_CHANGE([MT], 6) -> 382. Distinct from every function above:
+# not a fixed N-days/date lookup or an aggregate, but a walk backward one
+# CALENDAR MONTH at a time (up to the given month count) comparing each
+# prior month's own value against the current one, stopping at the first
+# real difference. window is a (VALUE_BEFORE_CHANGE_TAG, months_back)
+# tuple — tagged (unlike every other window shape here) so it can share
+# evaluate_compiled's one day_history dict without colliding with an int
+# (last N trading days) or a bare (date, date) tuple (one fixed date/
+# range) meaning something else entirely. Inception-only for now (see
+# services.inception_value_before_change, which builds day_history entries
+# for this from local bar history — Inception's Group A/B and Formula
+# Builder columns don't have an LMV-side equivalent this could resolve
+# against, so it's not offered in LMV's own Strategy Builder).
+VALUE_BEFORE_CHANGE_TAG = "months_before_change"
+
 
 class _Compiled:
     """A formula's fixed structure, compiled once and reused across rows/ticks.
@@ -577,6 +594,15 @@ def _build_compiled(tokens: list):
                 var = f"_d{len(day_specs)}"
                 day_specs.append((var, "First", col_name, (date_arg, date_arg)))
                 parts.append(var)
+            elif fname == "VALUE_BEFORE_CHANGE" and tok.get("col_arg") and days_arg is not None:
+                # "First" reused as the generic "single resolved value"
+                # agg_key, same convention as VALUE_DAYS_AGO/VALUE_ON_DATE
+                # above — see VALUE_BEFORE_CHANGE_TAG's own docstring for
+                # the tagged-tuple window shape.
+                col_name = tok.get("col_arg", "")
+                var = f"_d{len(day_specs)}"
+                day_specs.append((var, "First", col_name, (VALUE_BEFORE_CHANGE_TAG, int(days_arg))))
+                parts.append(var)
             elif (fname in _VALUE_AT_EXTREME_FUNCS and tok.get("col_arg")
                   and tok.get("driver_col_arg") and days_arg is not None):
                 col_name = tok.get("col_arg", "")
@@ -662,7 +688,8 @@ def _value_at_extreme(day_history, symbol, col_name: str, driver_col_name: str,
 
 def evaluate(tokens: list, row_data: dict, all_data: list,
              self_value=None, agg_cache: dict | None = None,
-             sym_index: dict | None = None, day_history: dict | None = None):
+             sym_index: dict | None = None, day_history: dict | None = None,
+             symbol_col: str = SYMBOL_COLUMN):
     """Return numeric or string result, or None on error.
 
     ``agg_cache``, when provided, memoizes _ALL aggregate results by
@@ -680,24 +707,34 @@ def evaluate(tokens: list, row_data: dict, all_data: list,
     {(col_name, window): {symbol: {agg_key: value}}}, as built by
     services.formula_stats_engine.compute_day_history — window is an int
     (last N days) or a (date, date) tuple (one fixed date), as the token
-    itself determines. The row's own stock symbol (row_data[SYMBOL_COLUMN])
+    itself determines. The row's own stock symbol (row_data[symbol_col])
     picks which entry applies. Missing entirely (None), or missing this
     (col_name, window)/symbol/agg_key, all resolve to None for that function
     call — same "blank rather than crash" fallback as everything else in
     this module — rather than pass day_history at every call site, most
     callers get away with never populating it: a formula with no _DAYS/
     VALUE_DAYS_AGO/VALUE_ON_DATE functions never looks it up.
+
+    ``symbol_col`` defaults to SYMBOL_COLUMN ("Scrip Name", LMV's own row
+    identity column) — services.inception_day_history's callers
+    (screens.inception_hmv/inception_view_by_date) pass "Symbol" instead,
+    Inception's own row identity column, so day_history's symbol-keyed
+    lookup above actually finds the row's symbol there instead of always
+    getting None from a "Scrip Name" key Inception rows never have (the
+    reason a _DAYS/VALUE_DAYS_AGO reference silently never resolved for
+    Inception even once day_history itself started being populated).
     """
     if not tokens:
         return None
     compiled = get_compiled(tokens)
     return evaluate_compiled(compiled, row_data, all_data, self_value,
-                             agg_cache, sym_index, day_history)
+                             agg_cache, sym_index, day_history, symbol_col)
 
 
 def evaluate_compiled(compiled, row_data: dict, all_data: list,
                       self_value=None, agg_cache: dict | None = None,
-                      sym_index: dict | None = None, day_history: dict | None = None):
+                      sym_index: dict | None = None, day_history: dict | None = None,
+                      symbol_col: str = SYMBOL_COLUMN):
     """Same as evaluate() above, but takes an already-get_compiled() result
     directly instead of raw tokens — for a hot loop that evaluates the SAME
     formula over many rows/days (e.g. services.formula_stats_engine.
@@ -742,12 +779,12 @@ def evaluate_compiled(compiled, row_data: dict, all_data: list,
     if compiled.day_specs:
         # Keyed by the row's own stock symbol, exactly as stored in
         # day_history (see compute_day_history — the historic snapshot's own
-        # "symbol" field, same identifier SYMBOL_COLUMN carries live).
+        # "symbol" field, same identifier symbol_col carries live).
         # ``window`` is either an int (last N days — the _DAYS family and
         # VALUE_DAYS_AGO) or a (date, date) tuple (one fixed date —
         # VALUE_ON_DATE) — both are valid dict keys, so this lookup needs no
         # branching between the two.
-        symbol = row_data.get(SYMBOL_COLUMN)
+        symbol = row_data.get(symbol_col)
         for var, agg_key, col_name, window in compiled.day_specs:
             val = None
             if day_history is not None and symbol:
@@ -764,7 +801,7 @@ def evaluate_compiled(compiled, row_data: dict, all_data: list,
         # that exact date. Same symbol-keyed day_history dict as day_specs;
         # just two entries (col_name, driver_col_name) at the same window
         # instead of one.
-        symbol = row_data.get(SYMBOL_COLUMN)
+        symbol = row_data.get(symbol_col)
         for var, col_name, driver_col_name, days, want_max in compiled.extreme_specs:
             ns[var] = _value_at_extreme(day_history, symbol, col_name, driver_col_name,
                                         days, want_max)
@@ -1114,7 +1151,8 @@ def evaluate_condition(tokens: list, row_data: dict, all_data: list,
 
 def apply_strategies(strategies: list, headers: list, data: list[list],
                      day_history: dict | None = None,
-                     include_streak_columns: bool = True) -> tuple[list, list[list]]:
+                     include_streak_columns: bool = True,
+                     symbol_col: str = SYMBOL_COLUMN) -> tuple[list, list[list]]:
     """
     Append strategy columns to headers and data rows.
     Returns (new_headers, new_data).
@@ -1126,14 +1164,30 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
     on their own cadence (e.g. strategy load/toggle, not every tick) rather
     than this function fetching it itself.
 
+    ``symbol_col`` names *headers*' own row-identity column and defaults to
+    SYMBOL_COLUMN ("Scrip Name", LMV's) — forwarded to build_symbol_index
+    and every evaluate_compiled() call so day_history's symbol-keyed lookup
+    (and "[Col of Symbol]" cross-row references) resolve against whichever
+    column actually carries the symbol in *headers*. screens.inception_hmv/
+    inception_view_by_date pass "Symbol" (Inception's own row-identity
+    column; Inception rows have no "Scrip Name" key at all) — without this,
+    day_history's lookup always found row_data.get("Scrip Name") == None
+    and treated every row as symbol-less, so a day_history entry the
+    caller had gone to the trouble of building was still never found.
+
     ``include_streak_columns`` (default True — LMV's own callers all want
     this) adds the "Days True"/"Since" pair per row-filtered strategy (see
     the module docstring's "Row-filter streak" section). screens.
-    inception_hmv/inception_view_by_date pass False: Inception has no
-    day_history/historic-value support wired up at all (a deliberate scope
-    cut — see inception_strategy_builder.py's module docstring), so these
+    inception_hmv/inception_view_by_date pass False: the streak pair needs
+    its own synthetic day_history request over a row filter's FULL formula
+    (collect_day_requests, evaluated the general way services.
+    formula_stats_engine.compute_stats can but services.inception_
+    day_history deliberately can't — see that module's docstring), not
+    just a bare raw-field lookback like AVG_DAYS(CLOSE, 200) — so these
     would always read "0"/blank there — dead weight, not a useful feature,
-    for a strategy type this function is also shared with.
+    for a strategy type this function is also shared with. (Inception's
+    day_history param IS populated for everything services.
+    inception_day_history covers — see those two screens' own workers.)
     """
     active = [s for s in strategies if s.get("active")]
     if not active:
@@ -1146,7 +1200,7 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
     agg_cache: dict = {}
     # Symbol -> row-dict lookup for "[Col of Symbol]" tokens, built once per
     # call instead of once per row.
-    sym_index = build_symbol_index(all_dicts)
+    sym_index = build_symbol_index(all_dicts, symbol_col)
 
     extra_headers = []
     for strat in active:
@@ -1201,13 +1255,13 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
             for col_name, compiled in col_compiled:
                 val = evaluate_compiled(compiled, enriched, all_dicts,
                                         agg_cache=agg_cache, sym_index=sym_index,
-                                        day_history=day_history)
+                                        day_history=day_history, symbol_col=symbol_col)
                 enriched[col_name] = val
                 values.append(val)
             row_filter = strat.get("row_filter", [])
             passed = row_filter_compiled is None or bool(evaluate_compiled(
                 row_filter_compiled, enriched, all_dicts, agg_cache=agg_cache,
-                sym_index=sym_index, day_history=day_history))
+                sym_index=sym_index, day_history=day_history, symbol_col=symbol_col))
             # "Days True"/"Since" — see this module's "Row-filter streak"
             # docstring section and compute_streak. Only computed for a row
             # that currently passes; when it doesn't, the extra_vals loop
@@ -1216,7 +1270,7 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
             # strategy's own columns already use, so there's nothing to
             # compute in that case.
             if include_streak_columns and row_filter and passed:
-                symbol = row_dict.get(SYMBOL_COLUMN)
+                symbol = row_dict.get(symbol_col)
                 entry = None
                 if day_history is not None and symbol:
                     entry = day_history.get(

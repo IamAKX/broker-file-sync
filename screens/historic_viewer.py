@@ -4,6 +4,7 @@ from PySide6.QtWidgets import (
     QHeaderView, QAbstractItemView, QPushButton, QLineEdit
 )
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor
 
 from components.column_filter_popup import ColumnFilterPopup
 from components.frozen_table_columns import FrozenColumns
@@ -19,10 +20,24 @@ class HistoricDataViewer(QWidget):
     to keep Sector + Symbol in view while scrolling through Inception's wider
     computed-column set, same idea as screens.live_viewer's Scrip Name
     freeze on the live grid.
+
+    *cell_highlights*, also backward-compatible (defaults to None — no
+    coloring, exactly today's behavior for every existing caller), is
+    {(row_idx, col_idx): "#rrggbb"} applied as that cell's background (with
+    an auto-contrasted text color) at build time. Fully resolved by the
+    caller — this widget doesn't know or care WHY a cell is colored (screens.
+    inception_view_by_date uses it for "changed since the last View", see
+    services.inception_change_highlight, but nothing here is specific to
+    that). Row/column indices stay stable for this widget's whole lifetime
+    (column filtering hides columns rather than removing them, and search
+    hides rows the same way — see _apply_col_filter/_on_search), so this is
+    applied once here rather than needing to be re-applied on every filter/
+    search change.
     """
 
     def __init__(self, headers: list, rows: list, date_str: str, theme=None,
-                 parent=None, title: str = None, frozen_headers: list = None):
+                 parent=None, title: str = None, frozen_headers: list = None,
+                 cell_highlights: dict = None):
         super().__init__(parent)
         self._theme = theme
         self._headers = headers
@@ -32,9 +47,9 @@ class HistoricDataViewer(QWidget):
         self._frozen_headers = list(frozen_headers) if frozen_headers else []
         self.setWindowTitle(title if title is not None else f"Historic Data — {date_str}")
         self.resize(1000, 600)
-        self._build(headers, rows)
+        self._build(headers, rows, cell_highlights or {})
 
-    def _build(self, headers: list, rows: list):
+    def _build(self, headers: list, rows: list, cell_highlights: dict):
         t = self._theme
         accent = t.get("accent") if t else "#39d353"
         text_s = t.get("text_secondary") if t else "#8b949e"
@@ -101,6 +116,11 @@ class HistoricDataViewer(QWidget):
                     cell_text = str(value)
                 item = QTableWidgetItem(cell_text)
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                fill = cell_highlights.get((r, c))
+                if fill:
+                    from screens.live_viewer import _contrasting_text
+                    item.setBackground(QBrush(QColor(fill)))
+                    item.setForeground(QBrush(QColor(_contrasting_text(fill))))
                 self._table.setItem(r, c, item)
 
         layout.addWidget(self._table, 1)

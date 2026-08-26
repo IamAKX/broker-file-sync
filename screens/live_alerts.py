@@ -487,9 +487,14 @@ class LiveAlertsScreen(QWidget):
             self._strategy_combo.addItem(s.get("name", ""), s.get("id"))
 
     def _populate_stock_sector_combos(self):
+        # See screens.live_viewer's identical fix for why this reads through
+        # Config Editor's persisted "sector_stock" override rather than
+        # config_defaults.SECTOR_STOCK_DATA directly.
         from config_defaults import SECTOR_STOCK_DATA
-        sectors = sorted({sector for sector, _ in SECTOR_STOCK_DATA})
-        stocks = sorted({stock for _, stock in SECTOR_STOCK_DATA})
+        from services import config_store
+        sector_stock_data = config_store.load_tab("sector_stock", SECTOR_STOCK_DATA)
+        sectors = sorted({sector for sector, _ in sector_stock_data})
+        stocks = sorted({stock for _, stock in sector_stock_data})
         for sector in sectors:
             self._sector_combo.addItem(sector, sector)
         for stock in stocks:

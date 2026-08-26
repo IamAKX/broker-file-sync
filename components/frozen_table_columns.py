@@ -69,7 +69,19 @@ class FrozenColumns(QObject):
 
     def eventFilter(self, obj, event):
         if obj is self._table and event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+            # QObject event filters run BEFORE the target's own event()
+            # handling, so at this point QAbstractScrollArea hasn't resized
+            # self._table's viewport yet — computing geometry synchronously
+            # here bakes in the PRE-resize viewport height/width and nothing
+            # ever corrects it afterwards (no further event fires once the
+            # viewport itself finishes resizing). That's what let the overlay
+            # freeze at a stale, too-short size — covering only the first
+            # ~N rows — the moment the popup was resized/maximized after its
+            # initial show. Recompute now (harmless if already current) AND
+            # once more after this event finishes propagating, same
+            # belt-and-suspenders as configure()'s QTimer.singleShot(0, ...).
             self._update_geometry()
+            QTimer.singleShot(0, self._update_geometry)
         return False
 
     def _on_section_resized(self, logical: int, old_size: int, new_size: int):

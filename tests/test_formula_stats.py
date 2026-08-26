@@ -112,6 +112,107 @@ def test_compute_stats_returns_empty_when_no_days():
     assert result == {}
 
 
+# ── self-contained day_history (VALUE_DAYS_AGO/VALUE_ON_DATE/_DAYS in Formula Stats) ──
+
+def tok_days_ago(col, days):
+    return {"type": "func", "value": "VALUE_DAYS_AGO(", "col_arg": col, "days_arg": days}
+
+
+def tok_on_date(col, iso_date):
+    return {"type": "func", "value": "VALUE_ON_DATE(", "col_arg": col, "date_arg": iso_date}
+
+
+def tok_op(v):
+    return {"type": "op", "value": v}
+
+
+def _3_day_range():
+    return {
+        "days": [
+            _day("2026-08-01", [_stock("TEST", {"High": 100, "Low": 90})]),
+            _day("2026-08-02", [_stock("TEST", {"High": 105, "Low": 92})]),
+            _day("2026-08-03", [_stock("TEST", {"High": 110, "Low": 95})]),
+        ]
+    }
+
+
+def test_compute_stats_value_days_ago_resolves_without_explicit_day_history():
+    """Regression: a formula using VALUE_DAYS_AGO used to evaluate to None
+    for every single day (no day_history was ever wired through from
+    compute_stats' callers — see this module's own docstring on why a
+    real-"today"-anchored one, the only kind compute_day_history could
+    build, would be wrong here anyway), blanking Min/Max/Average/Count for
+    every stock — reported as strategy "Positive Bias" (two VALUE_DAYS_AGO
+    calls ANDed together) showing "-" everywhere in Data > Formula Stats."""
+    columns = _columns([tok_days_ago("High", 0), tok_op(">"), tok_days_ago("High", 1)])
+    result = compute_stats(columns, _3_day_range())
+    col = result["TEST"]["columns"]["MyCol"]
+    # Day 1 has no earlier day fetched to look 1 day back to -> blank, not a
+    # crash. Days 2/3: each day's own High > the previous day's High (105>100,
+    # 110>105) -> True both times.
+    assert col["daily"] == [("2026-08-01", None), ("2026-08-02", True), ("2026-08-03", True)]
+    assert col["Count"] == 2
+    assert col["Min"] is True
+    assert col["Max"] is True
+
+
+def test_compute_stats_positive_bias_formula_resolves_across_days():
+    """The exact reported "Positive Bias" shape: two VALUE_DAYS_AGO
+    comparisons ANDed with two same-day column comparisons."""
+    columns = [{
+        "name": "Positive Bias",
+        "formula": [
+            {"type": "paren", "value": "("},
+            tok_days_ago("High", 0), tok_op(">"), tok_days_ago("High", 1),
+            {"type": "paren", "value": ")"}, tok_op(" and "), {"type": "paren", "value": "("},
+            tok_days_ago("Low", 0), tok_op(">"), tok_days_ago("Low", 1),
+            {"type": "paren", "value": ")"}, tok_op(" and "), {"type": "paren", "value": "("},
+            tok_col("Current"), tok_op(">"), tok_col("Close"),
+            {"type": "paren", "value": ")"}, tok_op(" and "), {"type": "paren", "value": "("},
+            tok_col("Current"), tok_op(">"), tok_col("P.Low"),
+            {"type": "paren", "value": ")"},
+        ],
+    }]
+    range_response = {
+        "days": [
+            _day("2026-08-01", [_stock("TEST", {"High": 100, "Low": 90, "Close": 95, "Current": 95, "P.Low": 80})]),
+            _day("2026-08-02", [_stock("TEST", {"High": 105, "Low": 92, "Close": 100, "Current": 96, "P.Low": 90})]),
+            _day("2026-08-03", [_stock("TEST", {"High": 110, "Low": 95, "Close": 108, "Current": 109, "P.Low": 92})]),
+        ]
+    }
+    result = compute_stats(columns, range_response)
+    col = result["TEST"]["columns"]["Positive Bias"]
+    assert col["daily"] == [
+        ("2026-08-01", None),    # no prior day to compare against
+        ("2026-08-02", False),   # Current 96 is not > Close 100
+        ("2026-08-03", True),    # every clause holds
+    ]
+    assert col["Count"] == 2
+    assert col["Max"] is True
+
+
+def test_compute_stats_value_on_date_resolves_without_explicit_day_history():
+    columns = _columns([tok_on_date("High", "2026-08-01")])
+    result = compute_stats(columns, _3_day_range())
+    col = result["TEST"]["columns"]["MyCol"]
+    # Every day (including the target date itself) can look this fixed date
+    # up once it's been seen — the reference date is in the past relative
+    # to every day on/after it, never a "future" lookup.
+    assert col["daily"] == [("2026-08-01", 100), ("2026-08-02", 100), ("2026-08-03", 100)]
+
+
+def test_compute_stats_explicit_day_history_still_wins_over_self_contained():
+    """An explicit day_history (e.g. compute_day_history's own recursive
+    call into compute_stats) is used as-is for every day rather than being
+    overridden by the self-contained per-day resolution — same real-
+    "today" value for every row, exactly like before this fix."""
+    columns = _columns([tok_days_ago("High", 0)])
+    fixed_day_history = {("High", 1): {"TEST": {"First": 999}}}
+    result = compute_stats(columns, _3_day_range(), day_history=fixed_day_history)
+    col = result["TEST"]["columns"]["MyCol"]
+    assert col["daily"] == [("2026-08-01", 999), ("2026-08-02", 999), ("2026-08-03", 999)]
+
+
 def test_std_dev_and_variance_none_for_single_data_point():
     columns = _columns([tok_col("High")])
     range_response = {"days": [_day("2026-01-05", [_stock("INFY", {"High": 100.0})])]}

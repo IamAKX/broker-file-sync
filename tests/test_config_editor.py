@@ -165,8 +165,12 @@ def test_inception_hmv_column_order_tab_uses_its_own_key(theme, tmp_path, monkey
     assert config_store.load_column_order(key=config_store.INCEPTION_HMV_COLUMN_ORDER) == ["Symbol", "Sector"]
 
 
-def test_config_editor_has_inception_hmv_column_order_tab(screen):
+def test_config_editor_has_inception_column_order_tab(screen):
+    """Tab renamed from "Inception HMV Column Order" now that screens.
+    inception_view_by_date reads the same saved list too (services.
+    config_store.INCEPTION_HMV_COLUMN_ORDER — key name kept as-is so an
+    already-saved order isn't orphaned; see that constant's own docstring)."""
     from PySide6.QtWidgets import QTabWidget
     tab = screen.findChildren(QTabWidget)[0]
     labels = [tab.tabText(i) for i in range(tab.count())]
-    assert "Inception HMV Column Order" in labels
+    assert "Inception Column Order" in labels

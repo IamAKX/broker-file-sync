@@ -1002,9 +1002,16 @@ class LiveViewerWindow(QWidget):
         self._sort_descending: bool = False
         self._row_order: list | None = None    # captured Scrip Name order, or None
 
-        # Build sector lookup from config defaults once at init
+        # Build sector lookup from Config Editor's persisted "sector_stock"
+        # tab override if the user has saved one, else config_defaults —
+        # previously read config_defaults.SECTOR_STOCK_DATA directly, so a
+        # rename saved in Config Editor's Sector Stock tab (e.g. LTIM -> LTM
+        # to match a vendor feed's own spelling) silently had no effect here
+        # even though it looked saved.
         from config_defaults import SECTOR_STOCK_DATA
-        self._sector_map: dict = {stock: sector for sector, stock in SECTOR_STOCK_DATA}
+        from services import config_store
+        sector_stock_data = config_store.load_tab("sector_stock", SECTOR_STOCK_DATA)
+        self._sector_map: dict = {stock: sector for sector, stock in sector_stock_data}
 
         # Same symbol resolution used by the Opening Range capture job
         # (services/scheduled_jobs.py::_build_opening_range_payload) — needed

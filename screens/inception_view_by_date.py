@@ -1,17 +1,24 @@
 """Inception > View by Date — calendar view of the shared historical EOD
 dataset (see docs/INCEPTION_DATA.md in the backend repo): a green dot marks
 a trading day that has data, and clicking View pops up that day's raw +
-computed (Group A/B) metrics for every locally-synced instrument, reusing
-screens.historic_viewer's generic table popup (same widget the existing
-Data > Historic Upload > Browse by Date tab uses) rather than a bespoke one.
+computed (Group A/B + Formula Builder) metrics for every locally-synced
+instrument, reusing screens.historic_viewer's generic table popup (same
+widget the existing Data > Historic Upload > Browse by Date tab uses)
+rather than a bespoke one.
 
-The day's row values come entirely from services.inception_compute_service,
-which computes Group A/B locally from services.inception_bars_store's
-synced bar cache — see screens.inception_settings for the sync status/Sync
-Now action. Only the green-dot availability check (does the SERVER have
-data for this day at all, useful even before this client has synced it) and
-"has this been synced locally yet" still touch the network/local store
-directly here.
+The day's row values come from services.inception_compute_service (Group
+A/B, computed locally from services.inception_bars_store's synced bar
+cache) plus _SnapshotLoadWorker._merge_formula_builder_columns' own merge of
+LMV's ~56 Formula Builder columns (same one screens.inception_hmv does for
+its grid — see that method's docstring) — the latter matters beyond just
+this screen's own display: Strategy Builder for Inception can only
+reference a column that's actually present in a row it evaluates, so this
+is also what makes those columns available to build Inception strategies
+against. See screens.inception_settings for the sync status/Sync Now action
+this all depends on. Only the green-dot availability check (does the SERVER
+have data for this day at all, useful even before this client has synced
+it) and "has this been synced locally yet" still touch the network/local
+store directly here.
 
 Unlike Historic Upload's Browse tab, there's no per-day Delete here —
 Inception's dataset is a shared, centrally-loaded market-data table (not
@@ -37,7 +44,12 @@ from api.exceptions import ApiError, NetworkError
 from components.availability_calendar import AvailabilityCalendar, themed_calendar_stylesheet
 from components.error_popup import show_api_error
 from screens.historic_viewer import HistoricDataViewer
-from services import inception_bars_store, inception_compute_service, inception_sector, inception_strategy_store
+from services import (
+    inception_bars_store, inception_change_highlight, inception_compute_service,
+    inception_day_history, inception_formula_builder_columns, inception_sector,
+    inception_strategy_store, inception_value_before_change,
+)
+from services.formula_engine import FORMULA_CODES
 from services.strategy_engine import apply_strategies
 
 _FROZEN_HEADERS = ["Sector", "Symbol"]
@@ -53,13 +65,48 @@ def _display_symbol(symbol: str) -> str:
     return symbol[: -len(_CANONICAL_SUFFIX)] if symbol.endswith(_CANONICAL_SUFFIX) else symbol
 
 
+def _reorder_by_saved_column_order(headers: list, rows: list) -> tuple:
+    """Reorders *headers* (and every row in *rows* to match) to the Config
+    Editor > "Inception Column Order" tab's saved list (services.
+    config_store.INCEPTION_HMV_COLUMN_ORDER — the same key screens.
+    inception_hmv's own "⚡"-free "Load" path reads via its
+    _restore_saved_column_order; one shared list rather than a second tab,
+    since the two screens' column universes overlap almost entirely).
+
+    Columns named in the saved list move to the front, in that order;
+    anything not listed keeps its current relative position after them —
+    same partial-list convention as inception_hmv/live_viewer's own column-
+    order restores. Unlike those two (which reorder VISUAL sections on an
+    already-built, persistent QHeaderView), View by Date builds a brand new
+    HistoricDataViewer popup — and its headers/rows as brand new Python
+    lists — on every View click, so there's no live header to move
+    sections on; permuting these two lists before HistoricDataViewer ever
+    sees them has the same effect. A no-op ([]) when nothing's been saved.
+    """
+    from services import config_store
+    saved = config_store.load_column_order(key=config_store.INCEPTION_HMV_COLUMN_ORDER)
+    if not saved:
+        return headers, rows
+    name_to_idx = {name: i for i, name in enumerate(headers)}
+    ordered_idx = [name_to_idx[name] for name in saved if name in name_to_idx]
+    seen = set(ordered_idx)
+    final_idx = ordered_idx + [i for i in range(len(headers)) if i not in seen]
+    new_headers = [headers[i] for i in final_idx]
+    new_rows = [[row[i] for i in final_idx] for row in rows]
+    return new_headers, new_rows
+
+
 class _SnapshotLoadWorker(QThread):
     """Runs inception_compute_service.snapshot on a background thread — see
     that module's docstring on why a cold Group A/B walk across the full
     instrument universe can take a while, and screens.inception_settings.
     _SyncWorker for the same pattern used for syncing."""
     progress = Signal(int, int)   # done, total instruments
-    succeeded = Signal(list)      # rows
+    # day_history declared `object`, not `dict` — see screens.inception_hmv's
+    # identical _HmvLoadWorker.succeeded fix for the full rationale (a
+    # Signal(dict) with non-string keys silently marshals to {} cross-
+    # thread instead of raising).
+    succeeded = Signal(list, object)    # rows, day_history
     failed = Signal(str)
 
     def __init__(self, as_of_date: date, parent=None):
@@ -71,10 +118,69 @@ class _SnapshotLoadWorker(QThread):
             rows = inception_compute_service.snapshot(
                 self._as_of_date, progress_cb=lambda done, total: self.progress.emit(done, total),
             )
+            day_history = self._merge_formula_builder_columns_and_day_history(rows, self._as_of_date)
         except Exception as exc:
             self.failed.emit(str(exc))
             return
-        self.succeeded.emit(rows)
+        self.succeeded.emit(rows, day_history)
+
+    @staticmethod
+    def _merge_formula_builder_columns_and_day_history(rows: list, as_of_date: date) -> dict:
+        """Adds LMV's ~56 Formula Builder columns (MT, MB, DT, DB, PMH, the
+        camarilla pivot ladders, ...) to every row's values dict — same
+        merge screens.inception_hmv._HmvLoadWorker does (see that module's
+        docstring for the full rationale), now also here so those columns
+        are available to View by Date and, in turn, to Strategy Builder for
+        Inception (a formula can only reference a column that's actually
+        present in the row it's evaluating against). Also builds this
+        View's day_history from two sources sharing one dict: services.
+        inception_day_history (a raw-OHLCV-only analogue of services.
+        formula_stats_engine.compute_day_history for VALUE_DAYS_AGO/_DAYS-
+        family functions, e.g. the "200 Average" strategy's AVG_DAYS(CLOSE,
+        200)) and services.inception_value_before_change (VALUE_BEFORE_
+        CHANGE — "the value this column had before it last changed"), both
+        reusing the SAME per-symbol bars fetched for the Formula Builder
+        merge rather than querying them again. Runs on this background
+        thread for the same reason HMV's does: bars_for_symbol is a cheap
+        indexed query, but the calendar-bucket arithmetic still adds up
+        across the full instrument universe (and resolve_group_a_b's own
+        extra range_rows pass, when a VALUE_BEFORE_CHANGE spec needs it,
+        more so — still bounded to once per View, not once per month
+        scanned) so none of this ever blocks the GUI thread.
+        """
+        strategies = inception_strategy_store.load_all()
+        specs = inception_day_history.raw_day_specs(strategies)
+        vbc_specs = inception_value_before_change.specs_for_strategies(strategies)
+        vbc_fb_specs = [(c, m) for c, m in vbc_specs if c in FORMULA_CODES]
+        vbc_other_specs = [(c, m) for c, m in vbc_specs if c not in FORMULA_CODES]
+
+        day_history: dict = {}
+        for row in rows:
+            bars = inception_bars_store.bars_for_symbol(row["symbol"], date_to=as_of_date)
+            row["values"].update(inception_formula_builder_columns.compute_for_bars(row["symbol"], bars))
+            if specs or vbc_fb_specs:
+                # Keyed by the DISPLAY symbol (suffix stripped), not
+                # row["symbol"] (the raw "_I" roll-series name) — that's
+                # what ends up in the "Symbol" column apply_strategies'
+                # symbol_col="Symbol" actually looks up against (see
+                # _on_view_succeeded), so building this with the raw name
+                # would leave every entry unreachable, day_history
+                # correctly populated but never found.
+                symbol = _display_symbol(row["symbol"])
+                if specs:
+                    for key, entry in inception_day_history.build(specs, symbol, bars).items():
+                        day_history.setdefault(key, {}).update(entry)
+                if vbc_fb_specs:
+                    for key, entry in inception_value_before_change.resolve_formula_builder(
+                        vbc_fb_specs, symbol, bars,
+                    ).items():
+                        day_history.setdefault(key, {}).update(entry)
+        if vbc_other_specs:
+            for key, entry in inception_value_before_change.resolve_group_a_b(
+                vbc_other_specs, as_of_date,
+            ).items():
+                day_history.setdefault(key, {}).update(entry)
+        return day_history
 
 
 class InceptionViewByDateScreen(QWidget):
@@ -86,6 +192,16 @@ class InceptionViewByDateScreen(QWidget):
         self._viewers = []
         self._worker: _SnapshotLoadWorker | None = None
         self._strategies: list = []
+        # "Changed since last View" cell highlighting — see services.
+        # inception_change_highlight and _on_view_succeeded below. Kept at
+        # the SCREEN level (not on the HistoricDataViewer popup itself,
+        # which is a fresh instance every View click) so it survives across
+        # popups the same way self._strategies does.
+        from services import config_store
+        self._highlight_color = config_store.load_inception_highlight_color()
+        self._column_highlight_colors = config_store.load_inception_column_highlight_colors()
+        self._previous_headers: list = []
+        self._previous_data: list = []
         self._build()
 
     def _build(self):
@@ -126,6 +242,14 @@ class InceptionViewByDateScreen(QWidget):
         bottom_row.addWidget(self._strat_btn)
         bottom_row.addSpacing(8)
 
+        self._highlight_btn = QPushButton()
+        self._highlight_btn.setFixedSize(32, 32)
+        self._highlight_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._highlight_btn.setToolTip("Changed-since-last-View highlight color")
+        self._highlight_btn.clicked.connect(self._show_highlight_color_manager)
+        bottom_row.addWidget(self._highlight_btn)
+        bottom_row.addSpacing(8)
+
         self._view_btn = QPushButton("View")
         self._view_btn.setFixedHeight(32)
         self._view_btn.setFixedWidth(100)
@@ -142,6 +266,8 @@ class InceptionViewByDateScreen(QWidget):
         layout.addWidget(self._progress_bar)
 
         layout.addStretch()
+
+        self._refresh_highlight_btn_style()
 
         # Deferred, same rationale as historic_upload's browse tab: don't
         # block widget construction (this can happen during app startup) on
@@ -198,7 +324,8 @@ class InceptionViewByDateScreen(QWidget):
         from screens.live_viewer import StrategyPickerPopup
         t = self._controller.theme
         try:
-            self._strategies = inception_strategy_store.load_all()
+            fresh = inception_strategy_store.load_all()
+            self._strategies = inception_strategy_store.merge_session_active(fresh, self._strategies)
         except (ApiError, NetworkError):
             pass   # best-effort refresh — picker still opens with whatever it already had
         popup = StrategyPickerPopup(self._strategies, t, self)
@@ -224,6 +351,63 @@ class InceptionViewByDateScreen(QWidget):
         active = sum(1 for s in self._strategies if s.get("active"))
         total = len(self._strategies)
         self._strat_btn.setText("⚡  Strategies" if total == 0 else f"⚡  Strategies  {active}/{total}")
+
+    # ── "changed since last View" highlight colors ──────────────────────────
+
+    def _effective_highlight_color(self, column_name: str | None = None) -> str:
+        """See screens.inception_hmv's identical method — same convention,
+        kept as a per-screen copy rather than shared since each owns its
+        own _highlight_color/_column_highlight_colors state (this is a
+        small pure function, not worth a shared service module for)."""
+        if column_name is not None:
+            override = self._column_highlight_colors.get(column_name)
+            if override:
+                return override
+        if self._highlight_color:
+            return self._highlight_color
+        t = self._controller.theme
+        try:
+            return t.get("status_amber") if t else "#d29922"
+        except KeyError:
+            return "#d29922"
+
+    def _refresh_highlight_btn_style(self):
+        t      = self._controller.theme
+        divclr = t.get("divider") if t else "#30363d"
+        accent = t.get("accent")  if t else "#39d353"
+        fill   = self._effective_highlight_color()
+        self._highlight_btn.setStyleSheet(
+            f"QPushButton {{ background: {fill};"
+            f"border: 1px solid {divclr}; border-radius: 4px; }}"
+            f"QPushButton:hover {{ border-color: {accent}; }}"
+        )
+
+    def _show_highlight_color_manager(self):
+        from screens.live_viewer import HighlightColorManagerDialog
+        dlg = HighlightColorManagerDialog(
+            columns=self._previous_headers,
+            default_color=self._highlight_color,
+            column_colors=self._column_highlight_colors,
+            theme=self._controller.theme,
+            parent=self,
+        )
+        dlg.default_changed.connect(self._set_highlight_color)
+        dlg.column_changed.connect(self._set_column_highlight_color)
+        dlg.exec()
+
+    def _set_highlight_color(self, color):
+        from services import config_store
+        self._highlight_color = color
+        config_store.save_inception_highlight_color(color)
+        self._refresh_highlight_btn_style()
+
+    def _set_column_highlight_color(self, column: str, color):
+        from services import config_store
+        if color is None:
+            self._column_highlight_colors.pop(column, None)
+        else:
+            self._column_highlight_colors[column] = color
+        config_store.save_inception_column_highlight_colors(self._column_highlight_colors)
 
     # ── view popup ───────────────────────────────────────────────────────────
 
@@ -258,7 +442,7 @@ class InceptionViewByDateScreen(QWidget):
         self._progress_bar.setValue(done)
         self._status_lbl.setText(f"Computing… {done}/{total} instruments")
 
-    def _on_view_succeeded(self, rows: list):
+    def _on_view_succeeded(self, rows: list, day_history: dict):
         t = self._controller.theme
         self._view_btn.setEnabled(True)
         self._progress_bar.setVisible(False)
@@ -297,16 +481,43 @@ class InceptionViewByDateScreen(QWidget):
         self._strategies = inception_strategy_store.load_all()
         self._update_strat_btn_label()
         strategies = [s for s in self._strategies if s.get("active")]
-        # include_streak_columns=False — Inception has no day_history/
-        # historic-value support wired up (see inception_strategy_builder.
-        # py's module docstring), so the "Days True"/"Since" pair would
-        # always read "0"/blank here — dead weight, not a useful feature.
-        headers, table_rows = apply_strategies(strategies, headers, table_rows, include_streak_columns=False)
+        # include_streak_columns=False — the "Days True"/"Since" streak pair
+        # needs a row filter evaluated via day_history too (services.
+        # strategy_engine.collect_day_requests' synthetic streak request),
+        # which is beyond day_history's raw-OHLCV-only scope (see services.
+        # inception_day_history's module docstring) — would always read
+        # "0"/blank here, dead weight, not a useful feature.
+        # symbol_col="Symbol" — Inception's row-identity column is "Symbol",
+        # not apply_strategies' LMV-default "Scrip Name" (which Inception
+        # rows don't have at all); without this, day_history's symbol-keyed
+        # lookup would never find a match, no matter how correctly it was
+        # built (see services.strategy_engine.apply_strategies' symbol_col
+        # docstring).
+        headers, table_rows = apply_strategies(strategies, headers, table_rows,
+                                               day_history=day_history, include_streak_columns=False,
+                                               symbol_col="Symbol")
+        headers, table_rows = _reorder_by_saved_column_order(headers, table_rows)
+
+        # "Changed since last View" (services.inception_change_highlight) —
+        # diffed against whatever was shown the last time THIS screen
+        # succeeded a View (a different date, a re-View of the same date
+        # after new data synced, ...), symbol-matched so a changed universe
+        # doesn't produce false positives. Computed AFTER the column
+        # reorder above so the (row, col) indices line up with what
+        # HistoricDataViewer is actually about to build.
+        changed = inception_change_highlight.changed_cells(
+            self._previous_headers, self._previous_data, headers, table_rows,
+        )
+        cell_highlights = {
+            (r, c): self._effective_highlight_color(headers[c]) for r, c in changed
+        }
+        self._previous_headers = list(headers)
+        self._previous_data = [list(row) for row in table_rows]
 
         viewer = HistoricDataViewer(
             headers, table_rows, self._selected_date.strftime("%d-%b-%Y"), theme=t,
             title=f"Inception — {self._selected_date.strftime('%d-%b-%Y')}",
-            frozen_headers=_FROZEN_HEADERS,
+            frozen_headers=_FROZEN_HEADERS, cell_highlights=cell_highlights,
         )
         viewer.show()
         self._viewers.append(viewer)
@@ -326,6 +537,7 @@ class InceptionViewByDateScreen(QWidget):
         if not self._status_lbl.text():
             self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         self._calendar.setStyleSheet(themed_calendar_stylesheet(t))
+        self._refresh_highlight_btn_style()
         for viewer in self._viewers:
             if viewer.isVisible():
                 viewer.refresh_theme()

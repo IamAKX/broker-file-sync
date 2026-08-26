@@ -429,7 +429,15 @@ class ConfigEditorScreen(QWidget):
         # this tab isn't blank on first open; same "list just the columns
         # you care about, in whatever order" partial-list convention as
         # Main Column Order above (whose own default only names ~20 of
-        # LMV's ~82 columns). Add/remove rows for anything else.
+        # LMV's ~82 columns). Add/remove rows for anything else. One shared
+        # list for both Inception HMV (screens.inception_hmv.
+        # _restore_saved_column_order) and View by Date (screens.
+        # inception_view_by_date._reorder_by_saved_column_order) — their
+        # column universes overlap almost entirely, and a second near-
+        # identical tab just to reorder the same names twice wasn't worth
+        # it; store_key kept as INCEPTION_HMV_COLUMN_ORDER (this tab's name
+        # when it was HMV-only) rather than renamed, so an order already
+        # saved under it isn't orphaned.
         inception_column_order_defaults = [
             ("Sector",), ("Symbol",), ("OPEN",), ("HIGH",), ("LOW",), ("CLOSE",),
             ("VOL",), ("OPENINT",), ("52WH",), ("52WL",), ("ATH",), ("ATL",),
@@ -437,7 +445,7 @@ class ConfigEditorScreen(QWidget):
         tabs.addTab(
             ConfigTabWidget(["Column Name"], inception_column_order_defaults, t,
                             reorderable=True, store_key=INCEPTION_HMV_COLUMN_ORDER),
-            "Inception HMV Column Order"
+            "Inception Column Order"
         )
 
         layout.addWidget(tabs, 1)

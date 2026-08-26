@@ -1,4 +1,40 @@
+import gc
+
 import pytest
+
+
+def pytest_configure(config):
+    """Disable Python's cyclic garbage collector for the whole test session.
+
+    A full `pytest tests/` run accumulates a large live graph of PySide6
+    QWidget-derived objects (every screen/dialog/popup any test ever
+    constructed, plus their QThread children — several of these screens
+    launch a background QThread worker and keep it as a permanent child
+    even after the load it did is done, e.g. screens.inception_hmv/
+    inception_view_by_date's own workers). With gc enabled, Python's cyclic
+    collector can trigger at essentially any bytecode boundary — including
+    from inside a QThread's own run() method, mid-computation on a
+    worker thread. If that collection pass finalizes a Qt widget object
+    (as opposed to a plain Python one), Qt aborts/segfaults: widgets may
+    only ever be destroyed on the GUI/main thread. Confirmed via
+    `python -m pytest tests/ -v`: a Fatal Python error: Segmentation fault,
+    with `gc_collect_main` on the crashing thread's own C stack, nested
+    inside `QThreadWrapper::run`, deleting a QCalendarWidget/QTabWidget/
+    QStackedWidget subtree — every single time, always shortly after a test
+    that runs two Loads/Views on the same screen instance (twice as many
+    live QThread children on that one screen to eventually collect).
+    Reference counting alone (never disabled) still frees the vast
+    majority of objects immediately as each test's local variables go out
+    of scope; disabling only the cyclic collector means genuine reference
+    cycles pile up uncollected for the rest of the session instead of
+    being swept at an unpredictable, possibly-unsafe moment — an
+    acceptable trade for a process that exits shortly after the suite
+    finishes anyway. Not narrowed to a subset of tests: this fixes a
+    property of the WHOLE session's accumulated object graph, and the
+    thread-timing bug it's dodging is exactly as invisible in a small
+    per-file run as it is common in the full-suite one.
+    """
+    gc.disable()
 
 
 @pytest.fixture(autouse=True)

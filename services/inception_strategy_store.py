@@ -145,6 +145,33 @@ def load_all() -> list:
     return _backfill_defaults(server_strategies)
 
 
+def merge_session_active(fresh: list, session: list) -> list:
+    """Reconciles a freshly-reloaded strategy list (a load_all() done right
+    before the "⚡ Strategies" picker reopens, so an edit just made in
+    Strategy Builder shows up promptly) against a screen's own in-memory
+    *session* copy — same idea, and same "active" dict-key overload, as
+    services.strategy_store.merge_session_active for LMV.
+    screens.inception_view_by_date._on_strategies_applied and
+    screens.inception_hmv._on_strategies_applied deliberately never persist
+    the picker's Apply back to the store (see those docstrings), so that
+    session-local "applied to this table" active flag has nowhere to survive
+    a store re-sync except here — without this, re-fetching on every picker
+    open silently reverted every local deselect back to Strategy Builder's
+    own persisted flag the moment the picker was reopened.
+
+    Unlike LMV's version, Inception's picker lists every strategy the store
+    has (not just ones active in Strategy Builder), so nothing is filtered
+    out here either — a strategy already known to *session* keeps its
+    session-side active flag; anything new (or not yet toggled locally)
+    keeps the store's own value, exactly as a first-ever load_all() would.
+    """
+    session_active_by_id = {s["id"]: s.get("active", False) for s in session}
+    return [
+        dict(s, active=session_active_by_id.get(s["id"], s.get("active", False)))
+        for s in fresh
+    ]
+
+
 def save_strategy(strategy: dict):
     from api import inception_api
 

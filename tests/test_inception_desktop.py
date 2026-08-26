@@ -23,10 +23,24 @@ def controller(qapp):
 def bars_db(tmp_path, monkeypatch):
     """Points services.inception_bars_store at a throwaway SQLite file for
     the duration of one test, so tests never touch (or depend on leftover
-    state in) the real inception_bars.db next to the app."""
-    from services import inception_bars_store
+    state in) the real inception_bars.db next to the app.
+
+    Also clears services.inception_compute_service's module-level
+    _row_cache on both ends — that cache is keyed by (symbol, len(bars),
+    last_trade_date, settings), which says nothing about WHICH database the
+    bars came from, so two tests using the same symbol/date/bar-count (e.g.
+    every _bar("ABB_I", date(2026, 8, 18), ...) call) but different OHLC
+    values can silently read each other's cached Group A/B result even
+    though each has its own isolated SQLite file. Clearing before AND after
+    means neither a preceding test's leftovers nor this test's own (e.g.
+    one that deliberately re-upserts different data mid-test to exercise a
+    "changed since last Load" diff) can leak into a different test.
+    """
+    from services import inception_bars_store, inception_compute_service
     monkeypatch.setattr(inception_bars_store, "_DB_FILE", str(tmp_path / "inception_bars_test.db"))
-    return inception_bars_store
+    inception_compute_service.clear_cache()
+    yield inception_bars_store
+    inception_compute_service.clear_cache()
 
 
 def _run_worker(qapp, screen, timeout_ms=5000):
@@ -998,6 +1012,177 @@ def test_view_by_date_screen_constructs(qapp, controller):
     screen.refresh_theme()
 
 
+def test_reorder_by_saved_column_order_moves_named_columns_to_front(monkeypatch):
+    from screens.inception_view_by_date import _reorder_by_saved_column_order
+    from services import config_store
+
+    headers = ["Sector", "Symbol", "OPEN", "HIGH", "LOW", "CLOSE", "52WH"]
+    rows = [["CG", "ABB", 90, 105, 85, 100, 200]]
+
+    monkeypatch.setattr(config_store, "load_column_order", lambda key=None: ["CLOSE", "Symbol"])
+    new_headers, new_rows = _reorder_by_saved_column_order(headers, rows)
+
+    assert new_headers == ["CLOSE", "Symbol", "Sector", "OPEN", "HIGH", "LOW", "52WH"]
+    assert new_rows == [[100, "ABB", "CG", 90, 105, 85, 200]]
+
+
+def test_reorder_by_saved_column_order_noop_when_nothing_saved(monkeypatch):
+    from screens.inception_view_by_date import _reorder_by_saved_column_order
+    from services import config_store
+
+    headers = ["Sector", "Symbol", "CLOSE"]
+    rows = [["CG", "ABB", 100]]
+    monkeypatch.setattr(config_store, "load_column_order", lambda key=None: [])
+    new_headers, new_rows = _reorder_by_saved_column_order(headers, rows)
+    assert new_headers == headers
+    assert new_rows == rows
+
+
+def test_reorder_by_saved_column_order_ignores_unknown_names(monkeypatch):
+    from screens.inception_view_by_date import _reorder_by_saved_column_order
+    from services import config_store
+
+    headers = ["Sector", "Symbol", "CLOSE"]
+    rows = [["CG", "ABB", 100]]
+    monkeypatch.setattr(config_store, "load_column_order", lambda key=None: ["CLOSE", "NOT_A_REAL_COLUMN"])
+    new_headers, new_rows = _reorder_by_saved_column_order(headers, rows)
+    assert new_headers == ["CLOSE", "Sector", "Symbol"]
+    assert new_rows == [[100, "CG", "ABB"]]
+
+
+def test_view_by_date_applies_saved_column_order_from_config_editor(qapp, controller, bars_db, tmp_path, monkeypatch):
+    """Config Editor's "Inception Column Order" tab (services.config_store.
+    INCEPTION_HMV_COLUMN_ORDER — shared with screens.inception_hmv's own
+    identical fix) applies here too, not just to HMV. Sector/Symbol still
+    win the leftmost two spots regardless (see components.
+    frozen_table_columns) — the saved order applies to everything after
+    that."""
+    from services import config_store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "c.json"))
+    config_store.save_column_order(["CLOSE", "OPEN"], key=config_store.INCEPTION_HMV_COLUMN_ORDER)
+
+    from screens.inception_view_by_date import InceptionViewByDateScreen
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+
+    from unittest.mock import MagicMock
+    from screens import inception_view_by_date as ivd
+    fake_viewer_cls = MagicMock()
+    monkeypatch.setattr(ivd, "HistoricDataViewer", fake_viewer_cls)
+
+    screen = InceptionViewByDateScreen(controller)
+    screen._selected_date = date(2026, 8, 18)
+    screen._on_view_clicked()
+    _run_worker(qapp, screen)
+
+    headers = fake_viewer_cls.call_args.args[0]
+    assert headers[0] == "CLOSE"
+    assert headers[1] == "OPEN"
+
+
+def test_view_by_date_highlights_cells_changed_since_last_view(qapp, controller, monkeypatch, bars_db):
+    """Same "changed since last Load/View" idea as screens.inception_hmv's
+    identical fix (there's no live tick here to flash on) — cell_highlights
+    passed into HistoricDataViewer, computed AFTER the saved column reorder
+    so indices line up with what the popup actually builds."""
+    from screens.inception_view_by_date import InceptionViewByDateScreen
+    from services import inception_compute_service, inception_strategy_store
+
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [])
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+
+    from unittest.mock import MagicMock
+    from screens import inception_view_by_date as ivd
+    fake_viewer_cls = MagicMock()
+    monkeypatch.setattr(ivd, "HistoricDataViewer", fake_viewer_cls)
+
+    screen = InceptionViewByDateScreen(controller)
+    screen._highlight_color = "#ff0000"
+    screen._selected_date = date(2026, 8, 18)
+    screen._on_view_clicked()
+    _run_worker(qapp, screen)
+    assert fake_viewer_cls.call_args.kwargs["cell_highlights"] == {}   # first View — nothing to compare against
+
+    inception_compute_service.clear_cache()
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 150)])
+    screen._on_view_clicked()
+    _run_worker(qapp, screen)
+
+    headers = fake_viewer_cls.call_args.args[0]
+    close_idx = headers.index("CLOSE")
+    highlights = fake_viewer_cls.call_args.kwargs["cell_highlights"]
+    assert highlights.get((0, close_idx)) == "#ff0000"
+
+
+def test_view_by_date_includes_formula_builder_columns(qapp, controller, monkeypatch, bars_db):
+    """MT/MB and friends (services.inception_formula_builder_columns) used
+    to be HMV-only — merged in here too now (_SnapshotLoadWorker, same
+    merge screens.inception_hmv's own worker does) so they're both visible
+    in View by Date's popup and, since screens.inception_strategy_builder's
+    "real sample data" load reuses this exact worker, actually resolvable
+    when a Strategy Builder formula references one — see
+    test_strategy_builder_fields_include_formula_builder_columns."""
+    from screens.inception_view_by_date import InceptionViewByDateScreen
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+
+    from unittest.mock import MagicMock
+    from screens import inception_view_by_date as ivd
+    fake_viewer_cls = MagicMock()
+    monkeypatch.setattr(ivd, "HistoricDataViewer", fake_viewer_cls)
+
+    screen = InceptionViewByDateScreen(controller)
+    screen._selected_date = date(2026, 8, 18)
+    screen._on_view_clicked()
+    _run_worker(qapp, screen)
+
+    headers = fake_viewer_cls.call_args.args[0]
+    assert "MT" in headers and "MB" in headers
+    assert "DT" in headers and "DB" in headers
+
+
+def test_view_by_date_resolves_avg_days_on_raw_field(qapp, controller, monkeypatch, bars_db):
+    """Regression: a strategy column using AVG_DAYS on a raw OHLCV field
+    (e.g. the reported "200 Average" -> AVG_DAYS(CLOSE, 200)) used to
+    always evaluate to None here — apply_strategies was never given a
+    day_history at all (see services.inception_day_history's module
+    docstring), and even once it started being built and passed through, a
+    second bug (day_history keyed by the raw "_I" symbol, while the row's
+    own "Symbol" column is display-stripped) meant the lookup still never
+    found a match — see screens.inception_view_by_date._SnapshotLoadWorker
+    ._merge_formula_builder_columns_and_day_history's own comment on that."""
+    from screens.inception_view_by_date import InceptionViewByDateScreen
+    from services import inception_strategy_store
+
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2025, 1, 1) + timedelta(days=i), 100 + i, 101 + i, 99 + i, 100 + i)
+        for i in range(210)
+    ])
+    as_of = date(2025, 1, 1) + timedelta(days=209)
+
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "200 Average", "active": True, "row_filter": [],
+        "columns": [{"name": "200 Average", "formula": [
+            {"type": "func", "value": "AVG_DAYS(", "col_arg": "CLOSE", "days_arg": 200},
+        ]}],
+    }])
+
+    from unittest.mock import MagicMock
+    from screens import inception_view_by_date as ivd
+    fake_viewer_cls = MagicMock()
+    monkeypatch.setattr(ivd, "HistoricDataViewer", fake_viewer_cls)
+
+    screen = InceptionViewByDateScreen(controller)
+    screen._selected_date = as_of
+    screen._on_view_clicked()
+    _run_worker(qapp, screen)
+
+    headers, rows = fake_viewer_cls.call_args.args[:2]
+    idx = headers.index("200 Average")
+    # last 200 closes out of 100..309 are 110..309 -> average 209.5
+    assert rows[0][idx] == 209.5
+
+
 # ── screens: HMV ─────────────────────────────────────────────────────────
 
 def test_hmv_screen_current_range_reads_the_date_pickers(qapp, controller):
@@ -1097,9 +1282,10 @@ def test_hmv_screen_does_not_add_row_filter_streak_columns(qapp, controller, mon
 
 
 def test_hmv_screen_includes_formula_builder_columns(qapp, controller, bars_db):
-    """MT/MB and friends (services.inception_formula_builder_columns) are
-    HMV-only per product decision — merged into every row alongside Group
-    A/B, computed from that same instrument's local bars."""
+    """MT/MB and friends (services.inception_formula_builder_columns) —
+    merged into every row alongside Group A/B, computed from that same
+    instrument's local bars. See test_view_by_date_includes_formula_
+    builder_columns for View by Date's identical merge."""
     from screens.inception_hmv import InceptionHmvScreen
     from PySide6.QtCore import QDate
 
@@ -1112,6 +1298,108 @@ def test_hmv_screen_includes_formula_builder_columns(qapp, controller, bars_db):
     _run_worker(qapp, screen)
     assert "MT" in screen._headers and "MB" in screen._headers
     assert "DT" in screen._headers and "DB" in screen._headers
+
+
+def test_hmv_screen_resolves_avg_days_on_raw_field(qapp, controller, monkeypatch, bars_db):
+    """Regression: a strategy column using AVG_DAYS on a raw OHLCV field
+    (the reported "200 Average" -> AVG_DAYS(CLOSE, 200)) used to always
+    evaluate to None here — see screens.inception_view_by_date.
+    test_view_by_date_resolves_avg_days_on_raw_field's docstring for the
+    two-part fix this guards."""
+    from screens.inception_hmv import InceptionHmvScreen
+    from services import inception_strategy_store
+    from PySide6.QtCore import QDate
+
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2025, 1, 1) + timedelta(days=i), 100 + i, 101 + i, 99 + i, 100 + i)
+        for i in range(210)
+    ])
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "200 Average", "active": True, "row_filter": [],
+        "columns": [{"name": "200 Average", "formula": [
+            {"type": "func", "value": "AVG_DAYS(", "col_arg": "CLOSE", "days_arg": 200},
+        ]}],
+    }])
+
+    as_of = date(2025, 1, 1) + timedelta(days=209)
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2025, 1, 1))
+    screen._to_date.setDate(QDate(as_of.year, as_of.month, as_of.day))
+    screen._on_load()
+    _run_worker(qapp, screen)
+
+    idx = screen._headers.index("200 Average")
+    assert screen._data[0][idx] == 209.5
+
+
+def test_hmv_screen_resolves_value_before_change_on_formula_builder_column(qapp, controller, monkeypatch, bars_db):
+    """The reported example: MT reads 400 for both August and July but was
+    382 in June -> VALUE_BEFORE_CHANGE([MT], 6) resolves to 382 end to end
+    through InceptionHmvScreen. See services.inception_value_before_change
+    for the resolution logic itself."""
+    from screens.inception_hmv import InceptionHmvScreen
+    from services import inception_strategy_store
+    from PySide6.QtCore import QDate
+
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2025, 1, 1) + timedelta(days=i), 1, 1, 1, 1)
+        for i in range(210)
+    ])
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "MT Change", "active": True, "row_filter": [],
+        "columns": [{"name": "MT Before", "formula": [
+            {"type": "func", "value": "VALUE_BEFORE_CHANGE(", "col_arg": "MT", "days_arg": 6},
+        ]}],
+    }])
+
+    def fake_compute_for_bars(symbol, bar_slice):
+        if not bar_slice:
+            return {}
+        return {"MT": 400 if bar_slice[-1]["trade_date"] >= date(2025, 6, 15) else 382}
+
+    monkeypatch.setattr("services.inception_formula_builder_columns.compute_for_bars", fake_compute_for_bars)
+
+    as_of = date(2025, 1, 1) + timedelta(days=209)
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2025, 1, 1))
+    screen._to_date.setDate(QDate(as_of.year, as_of.month, as_of.day))
+    screen._on_load()
+    _run_worker(qapp, screen)
+
+    idx = screen._headers.index("MT Before")
+    assert screen._data[0][idx] == 382
+
+
+def test_hmv_screen_highlights_cells_changed_since_last_load(qapp, controller, monkeypatch, bars_db):
+    """"Select a colour for each column" (LMV's value-change highlight,
+    screens.live_viewer.HighlightColorManagerDialog) ported for HMV/View by
+    Date as "changed since the last Load/View" (services.
+    inception_change_highlight) — there's no live tick here to flash on."""
+    from screens.inception_hmv import InceptionHmvScreen
+    from services import inception_compute_service, inception_strategy_store
+    from PySide6.QtCore import QDate
+    from PySide6.QtGui import QColor
+
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [])
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+
+    screen = InceptionHmvScreen(controller)
+    screen._highlight_color = "#ff0000"
+    screen._from_date.setDate(QDate(2026, 1, 1))
+    screen._to_date.setDate(QDate(2026, 8, 18))
+    screen._on_load()
+    _run_worker(qapp, screen)
+    assert screen._changed_cells == set()   # first Load ever — nothing to compare against
+
+    inception_compute_service.clear_cache()
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 150)])
+    screen._on_load()
+    _run_worker(qapp, screen)
+
+    close_idx = screen._headers.index("CLOSE")
+    assert (0, close_idx) in screen._changed_cells
+    item = screen._table.item(0, close_idx)
+    assert item.background().color() == QColor("#ff0000")
 
 
 def test_hmv_screen_applies_saved_column_order_from_config_editor(qapp, controller, bars_db, tmp_path, monkeypatch):
@@ -1408,6 +1696,48 @@ def test_strategy_builder_fields_come_from_local_catalogue_no_network(qapp, cont
     assert "OPEN" in screen._fields
     assert "52WH" in screen._fields
     assert "DAY UF GUP 1" in screen._fields
+
+
+def test_strategy_builder_fields_include_formula_builder_columns(qapp, controller, monkeypatch):
+    """MT/MB and friends (services.formula_engine.FORMULA_CODES, the same
+    ~56 codes services.inception_formula_builder_columns.compute_for_bars
+    produces for a row — see screens.inception_view_by_date/inception_hmv's
+    identical merge) must be selectable Fields here too, or a strategy could
+    never actually reference one even after View by Date/HMV started
+    surfacing it in a real row."""
+    from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
+    from services import formula_engine
+
+    monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
+
+    screen = InceptionStrategyBuilderScreen(controller)
+    screen._reload_all()
+    assert "MT" in screen._fields and "MB" in screen._fields
+    assert "DT" in screen._fields and "DB" in screen._fields
+    assert len(screen._fields) == len(set(screen._fields))   # no duplicates
+    assert set(formula_engine.FORMULA_CODES) <= set(screen._fields)
+
+
+def test_strategy_builder_expression_editor_offers_value_before_change(qapp, controller):
+    """VALUE_BEFORE_CHANGE (services.inception_value_before_change) is
+    Inception-only — appended to just this editor's "Functions" section via
+    ExpressionEditorDialog's extra_functions param, not to screens.
+    formula_editor.FUNCTION_CATALOGUE itself (which LMV's own Strategy
+    Builder also draws from, and has no engine support to resolve this)."""
+    from screens.inception_strategy_builder import INCEPTION_EXTRA_FUNCTIONS
+    from screens.formula_editor import ExpressionEditorDialog, FUNCTION_CATALOGUE
+
+    dlg = ExpressionEditorDialog(
+        [], ["MT", "CLOSE"], [], {"MT": 1.0, "CLOSE": 1.0},
+        all_lmv_data=[{"MT": 1.0, "CLOSE": 1.0}], theme=None, mode="value",
+        real_lmv_headers=["MT", "CLOSE"], sections=["Functions"],
+        extra_functions=INCEPTION_EXTRA_FUNCTIONS,
+    )
+    names = [c["name"] for c in dlg._catalogue_for_section("Functions")]
+    assert "VALUE_BEFORE_CHANGE" in names
+    # Not leaked into the shared catalogue every LMV caller also draws from.
+    assert "VALUE_BEFORE_CHANGE" not in [c["name"] for c in FUNCTION_CATALOGUE]
 
 
 def test_strategy_builder_sample_data_placeholder_when_nothing_synced(qapp, controller, monkeypatch, bars_db):

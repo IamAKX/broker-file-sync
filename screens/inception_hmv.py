@@ -49,9 +49,11 @@ frozen_table_columns (see that module — generalizes screens.live_viewer's
 single-column Scrip Name freeze to two columns) and always stay visible
 regardless of the Columns filter, same convention LMV uses for Scrip Name.
 
-Column order can also be set from Config Editor's "Inception HMV Column
-Order" tab (screens.config_editor, services.config_store.
-INCEPTION_HMV_COLUMN_ORDER) instead of dragging — see
+Column order can also be set from Config Editor's "Inception Column Order"
+tab (screens.config_editor, services.config_store.
+INCEPTION_HMV_COLUMN_ORDER — key name kept from when this was HMV-only, now
+shared with screens.inception_view_by_date's own "one day" popup too, see
+that module's _reorder_by_saved_column_order) instead of dragging — see
 _restore_saved_column_order, same idea as LMV's own "Main Column Order" tab
 + screens.live_viewer._restore_column_order, under a separate key since
 Inception's column universe is entirely different from LMV's. Unlike LMV,
@@ -69,15 +71,18 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QProgressBar,
 )
 from PySide6.QtCore import Qt, QDate, QThread, Signal
+from PySide6.QtGui import QBrush, QColor
 
 from api.exceptions import ApiError, NetworkError
 from components.column_filter_popup import ColumnFilterPopup
 from components.frozen_table_columns import FrozenColumns
 from screens.inception_view_by_date import _display_symbol
 from services import (
-    inception_bars_store, inception_compute_service, inception_formula_builder_columns,
-    inception_sector, inception_strategy_store,
+    inception_bars_store, inception_change_highlight, inception_compute_service,
+    inception_day_history, inception_formula_builder_columns, inception_sector,
+    inception_strategy_store, inception_value_before_change,
 )
+from services.formula_engine import FORMULA_CODES
 from services.strategy_engine import apply_strategies
 
 _FROZEN_HEADERS = ["Sector", "Symbol"]
@@ -85,7 +90,15 @@ _FROZEN_HEADERS = ["Sector", "Symbol"]
 
 class _HmvLoadWorker(QThread):
     progress = Signal(int, int)          # done, total instruments
-    succeeded = Signal(object, list)     # as_of_date (date | None), rows
+    # day_history declared `object`, not `dict` — its keys are (col_name,
+    # window) tuples, and Signal(dict) marshals cross-thread via
+    # QVariantMap, which requires string keys and silently converts
+    # anything else to {} instead of raising (see screens.live_viewer's
+    # _request_read/_request_recompute for the identical fix/rationale —
+    # this is the exact "AVG_DAYS column renders empty with no visible
+    # error" failure mode that comment warns about). `object` passes the
+    # real Python dict through unchanged.
+    succeeded = Signal(object, list, object)  # as_of_date (date | None), rows, day_history
     failed = Signal(str)
 
     def __init__(self, date_from: date, date_to: date, parent=None):
@@ -99,29 +112,75 @@ class _HmvLoadWorker(QThread):
                 self._date_from, self._date_to,
                 progress_cb=lambda done, total: self.progress.emit(done, total),
             )
+            day_history = {}
             if as_of_date is not None:
-                self._merge_formula_builder_columns(rows, as_of_date)
+                day_history = self._merge_formula_builder_columns_and_day_history(rows, as_of_date)
         except Exception as exc:
             self.failed.emit(str(exc))
             return
-        self.succeeded.emit(as_of_date, rows)
+        self.succeeded.emit(as_of_date, rows, day_history)
 
     @staticmethod
-    def _merge_formula_builder_columns(rows: list, as_of_date: date):
+    def _merge_formula_builder_columns_and_day_history(rows: list, as_of_date: date) -> dict:
         """Adds LMV's ~56 Formula Builder columns (MT, MB, DT, DB, PMH, the
         camarilla pivot ladders, ...) to every row's values dict, computed
         from that same instrument's local bar history — see services.
-        inception_formula_builder_columns. Runs on this background thread
-        (bars_for_symbol is a cheap indexed query; the calendar-bucket
-        arithmetic itself is pure Python but still adds up across ~213
-        instruments) so it never blocks the GUI thread. HMV-only for now
-        (View by Date / Strategy Builder don't offer these columns yet) —
-        scoped here rather than in services.inception_compute_service so it
-        doesn't leak into those other call sites.
+        inception_formula_builder_columns. Also builds this Load's
+        day_history from two sources sharing one dict: services.
+        inception_day_history (a raw-OHLCV-only analogue of services.
+        formula_stats_engine.compute_day_history for VALUE_DAYS_AGO/_DAYS-
+        family functions, e.g. the "200 Average" strategy's AVG_DAYS(CLOSE,
+        200)) and services.inception_value_before_change (VALUE_BEFORE_
+        CHANGE — "the value this column had before it last changed"), both
+        reusing the SAME per-symbol bars fetched for the Formula Builder
+        merge rather than querying them again. Runs on this background
+        thread (bars_for_symbol is a cheap indexed query; the calendar-
+        bucket arithmetic itself is pure Python but still adds up across
+        ~213 instruments — resolve_group_a_b's own extra range_rows pass,
+        when a VALUE_BEFORE_CHANGE spec needs it, is the one meaningfully
+        heavier addition, still bounded to once per Load, not once per
+        month scanned) so none of this ever blocks the GUI thread.
+        screens.inception_view_by_date._SnapshotLoadWorker has the
+        identical merge for its own screen (and, via that, Strategy
+        Builder for Inception — a formula can only reference a column
+        actually present in the row) — scoped to each worker rather than
+        services.inception_compute_service itself so this stays opt-in per
+        call site instead of always running, e.g. for a caller that only
+        needs the raw/Group A-B values.
         """
+        strategies = inception_strategy_store.load_all()
+        specs = inception_day_history.raw_day_specs(strategies)
+        vbc_specs = inception_value_before_change.specs_for_strategies(strategies)
+        vbc_fb_specs = [(c, m) for c, m in vbc_specs if c in FORMULA_CODES]
+        vbc_other_specs = [(c, m) for c, m in vbc_specs if c not in FORMULA_CODES]
+
+        day_history: dict = {}
         for row in rows:
             bars = inception_bars_store.bars_for_symbol(row["symbol"], date_to=as_of_date)
             row["values"].update(inception_formula_builder_columns.compute_for_bars(row["symbol"], bars))
+            if specs or vbc_fb_specs:
+                # Keyed by the DISPLAY symbol (suffix stripped), not
+                # row["symbol"] (the raw "_I" roll-series name) — that's
+                # what ends up in the "Symbol" column apply_strategies'
+                # symbol_col="Symbol" actually looks up against (see
+                # _on_load_succeeded), so building this with the raw name
+                # would leave every entry unreachable, day_history
+                # correctly populated but never found.
+                symbol = _display_symbol(row["symbol"])
+                if specs:
+                    for key, entry in inception_day_history.build(specs, symbol, bars).items():
+                        day_history.setdefault(key, {}).update(entry)
+                if vbc_fb_specs:
+                    for key, entry in inception_value_before_change.resolve_formula_builder(
+                        vbc_fb_specs, symbol, bars,
+                    ).items():
+                        day_history.setdefault(key, {}).update(entry)
+        if vbc_other_specs:
+            for key, entry in inception_value_before_change.resolve_group_a_b(
+                vbc_other_specs, as_of_date,
+            ).items():
+                day_history.setdefault(key, {}).update(entry)
+        return day_history
 
 
 class InceptionHmvScreen(QWidget):
@@ -132,9 +191,18 @@ class InceptionHmvScreen(QWidget):
         self._data: list = []          # display rows
         self._raw_headers: list = []   # headers before strategy columns were appended
         self._raw_data: list = []      # rows before strategy columns were appended
+        self._day_history: dict = {}   # see services.inception_day_history / _recompute_display
         self._strategies: list = []
         self._visible_cols: set = set()
         self._worker: _HmvLoadWorker | None = None
+        # "Changed since last Load/View" cell highlighting — see services.
+        # inception_change_highlight and _recompute_display below.
+        from services import config_store
+        self._highlight_color = config_store.load_inception_highlight_color()
+        self._column_highlight_colors = config_store.load_inception_column_highlight_colors()
+        self._previous_headers: list = []
+        self._previous_data: list = []
+        self._changed_cells: set = set()
         self._build()
 
     # ── build ────────────────────────────────────────────────────────────────
@@ -202,6 +270,14 @@ class InceptionHmvScreen(QWidget):
         self._filter_btn.clicked.connect(self._show_col_filter)
         toolbar.addWidget(self._filter_btn)
 
+        toolbar.addSpacing(8)
+        self._highlight_btn = QPushButton()
+        self._highlight_btn.setFixedSize(30, 30)
+        self._highlight_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._highlight_btn.setToolTip("Changed-since-last-Load highlight color")
+        self._highlight_btn.clicked.connect(self._show_highlight_color_manager)
+        toolbar.addWidget(self._highlight_btn)
+
         toolbar.addStretch()
         self._as_of_lbl = QLabel("")
         self._as_of_lbl.setFont(font_scale.font(font_scale.SMALL, False))
@@ -236,6 +312,8 @@ class InceptionHmvScreen(QWidget):
         bottom.addStretch()
         layout.addLayout(bottom)
 
+        self._refresh_highlight_btn_style()
+
     def _style_calendar_popups(self):
         from components.availability_calendar import themed_calendar_stylesheet
         t = self._controller.theme
@@ -254,6 +332,69 @@ class InceptionHmvScreen(QWidget):
             f"QTableView {{ background: {bg}; color: {txt}; border-right: 2px solid {border}; }}"
             f"QTableView QHeaderView::section {{ background: {bg}; color: {txt}; }}"
         )
+
+    # ── "changed since last Load" highlight colors ─────────────────────────────
+
+    def _effective_highlight_color(self, column_name: str | None = None) -> str:
+        """The color used to flag a cell that changed since the last Load
+        for *column_name* — that column's own override if it has one, else
+        the screen-wide default, else the theme's own status_amber. Single
+        source of truth for both _populate_table (the table repaint) and
+        the toolbar swatch button (which always previews the default) —
+        same convention as screens.live_viewer's identical method for its
+        (differently triggered — see services.inception_change_highlight's
+        module docstring) value-change flash."""
+        if column_name is not None:
+            override = self._column_highlight_colors.get(column_name)
+            if override:
+                return override
+        if self._highlight_color:
+            return self._highlight_color
+        t = self._controller.theme
+        try:
+            return t.get("status_amber") if t else "#d29922"
+        except KeyError:
+            return "#d29922"
+
+    def _refresh_highlight_btn_style(self):
+        t      = self._controller.theme
+        divclr = t.get("divider") if t else "#30363d"
+        accent = t.get("accent")  if t else "#39d353"
+        fill   = self._effective_highlight_color()
+        self._highlight_btn.setStyleSheet(
+            f"QPushButton {{ background: {fill};"
+            f"border: 1px solid {divclr}; border-radius: 4px; }}"
+            f"QPushButton:hover {{ border-color: {accent}; }}"
+        )
+
+    def _show_highlight_color_manager(self):
+        from screens.live_viewer import HighlightColorManagerDialog
+        dlg = HighlightColorManagerDialog(
+            columns=self._headers,
+            default_color=self._highlight_color,
+            column_colors=self._column_highlight_colors,
+            theme=self._controller.theme,
+            parent=self,
+        )
+        dlg.default_changed.connect(self._set_highlight_color)
+        dlg.column_changed.connect(self._set_column_highlight_color)
+        dlg.exec()
+
+    def _set_highlight_color(self, color):
+        from services import config_store
+        self._highlight_color = color
+        config_store.save_inception_highlight_color(color)
+        self._refresh_highlight_btn_style()
+        self._populate_table()
+
+    def _set_column_highlight_color(self, column: str, color):
+        from services import config_store
+        if color is None:
+            self._column_highlight_colors.pop(column, None)
+        else:
+            self._column_highlight_colors[column] = color
+        config_store.save_inception_column_highlight_colors(self._column_highlight_colors)
+        self._populate_table()
 
     # ── date range ───────────────────────────────────────────────────────────
 
@@ -292,7 +433,9 @@ class InceptionHmvScreen(QWidget):
 
         self._worker = _HmvLoadWorker(date_from, date_to, parent=self)
         self._worker.progress.connect(self._on_load_progress)
-        self._worker.succeeded.connect(lambda as_of_date, rows: self._on_load_succeeded(date_from, date_to, as_of_date, rows))
+        self._worker.succeeded.connect(
+            lambda as_of_date, rows, day_history: self._on_load_succeeded(date_from, date_to, as_of_date, rows, day_history)
+        )
         self._worker.failed.connect(self._on_load_failed)
         self._worker.start()
 
@@ -301,11 +444,12 @@ class InceptionHmvScreen(QWidget):
         self._progress_bar.setValue(done)
         self._status_lbl.setText(f"Computing… {done}/{total} instruments")
 
-    def _on_load_succeeded(self, date_from: date, date_to: date, as_of_date, rows: list):
+    def _on_load_succeeded(self, date_from: date, date_to: date, as_of_date, rows: list, day_history: dict):
         t = self._controller.theme
         self._load_btn.setEnabled(True)
         self._load_btn.setText("Load")
         self._progress_bar.setVisible(False)
+        self._day_history = day_history
 
         self._as_of_lbl.setText(f"As of {as_of_date.isoformat()}" if as_of_date else "No synced trading day in this range")
 
@@ -359,7 +503,8 @@ class InceptionHmvScreen(QWidget):
         from screens.live_viewer import StrategyPickerPopup
         t = self._controller.theme
         try:
-            self._strategies = inception_strategy_store.load_all()
+            fresh = inception_strategy_store.load_all()
+            self._strategies = inception_strategy_store.merge_session_active(fresh, self._strategies)
         except (ApiError, NetworkError):
             pass   # best-effort refresh — picker still opens with whatever it already had
         popup = StrategyPickerPopup(self._strategies, t, self)
@@ -399,12 +544,21 @@ class InceptionHmvScreen(QWidget):
         if not self._raw_headers:
             self._update_strat_btn_label()
             return
-        # include_streak_columns=False — Inception has no day_history/
-        # historic-value support wired up (see inception_strategy_builder.
-        # py's module docstring), so the "Days True"/"Since" pair would
-        # always read "0"/blank here — dead weight, not a useful feature.
+        # include_streak_columns=False — the "Days True"/"Since" streak pair
+        # needs a row filter evaluated via day_history too (services.
+        # strategy_engine.collect_day_requests' synthetic streak request),
+        # which is beyond self._day_history's raw-OHLCV-only scope (see
+        # services.inception_day_history's module docstring) — would always
+        # read "0"/blank here, dead weight, not a useful feature.
+        # symbol_col="Symbol" — Inception's row-identity column is "Symbol",
+        # not apply_strategies' LMV-default "Scrip Name" (which Inception
+        # rows don't have at all); without this, self._day_history's
+        # symbol-keyed lookup would never find a match, no matter how
+        # correctly it was built (see services.strategy_engine.
+        # apply_strategies' symbol_col docstring).
         headers, data = apply_strategies(self._strategies, self._raw_headers, self._raw_data,
-                                          include_streak_columns=False)
+                                          day_history=self._day_history, include_streak_columns=False,
+                                          symbol_col="Symbol")
         # Keep any strategy-appended column (beyond the raw/base set)
         # visible by default, without undoing a column-visibility choice the
         # user already made for existing columns (same top-up-not-reset rule
@@ -414,8 +568,21 @@ class InceptionHmvScreen(QWidget):
         # could be stale from a completely different prior render.
         if len(headers) > len(self._raw_headers):
             self._visible_cols |= set(range(len(self._raw_headers), len(headers)))
+        # "Changed since last Load/View" (services.inception_change_
+        # highlight) — diffed against whatever was on screen at the END of
+        # the PREVIOUS _recompute_display call (a real Load, or just a
+        # strategy toggle — either way, "what's different from what was
+        # showing a moment ago"), then that snapshot is replaced with this
+        # render's own so the NEXT call diffs against this one in turn.
+        # Symbol-matched, not row-position-matched, so a universe/row-order
+        # change between the two doesn't produce false positives.
+        self._changed_cells = inception_change_highlight.changed_cells(
+            self._previous_headers, self._previous_data, headers, data,
+        )
         self._headers, self._data = headers, data
         self._populate_table()
+        self._previous_headers = list(headers)
+        self._previous_data = [list(r) for r in data]
         self._update_strat_btn_label()
 
     # ── table ────────────────────────────────────────────────────────────────
@@ -436,6 +603,11 @@ class InceptionHmvScreen(QWidget):
             for c, val in enumerate(row):
                 item = QTableWidgetItem(self._fmt_cell(val))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if (r, c) in self._changed_cells:
+                    from screens.live_viewer import _contrasting_text
+                    fill = self._effective_highlight_color(self._headers[c])
+                    item.setBackground(QBrush(QColor(fill)))
+                    item.setForeground(QBrush(QColor(_contrasting_text(fill))))
                 self._table.setItem(r, c, item)
         for c in range(len(self._headers)):
             self._table.setColumnHidden(c, c not in self._visible_cols)
@@ -448,17 +620,20 @@ class InceptionHmvScreen(QWidget):
         self._freeze.configure(self._headers, _FROZEN_HEADERS, self._freeze_style())
 
     def _restore_saved_column_order(self):
-        """Reorders columns to match the Config Editor > "Inception HMV
-        Column Order" tab's saved list (services.config_store.
-        INCEPTION_HMV_COLUMN_ORDER) — same mechanism/shape as screens.
-        live_viewer._restore_column_order for LMV's own "Main Column Order"
-        tab, under a separate key since Inception's ~150-column universe is
-        entirely different from LMV's. That tab exists specifically because
-        dragging one column at a time across a table this wide is tedious —
-        it lets you list (search + up/down-reorder, no dragging) just the
-        columns you want pulled to specific positions; anything not listed
-        keeps its current relative position, same partial-list convention
-        LMV's own tab already uses (its default only names ~20 of LMV's ~82
+        """Reorders columns to match the Config Editor > "Inception Column
+        Order" tab's saved list (services.config_store.
+        INCEPTION_HMV_COLUMN_ORDER — same key screens.inception_view_by_date
+        reads too, see that module's _reorder_by_saved_column_order for why
+        one shared list made more sense than a second tab here) — same
+        mechanism/shape as screens.live_viewer._restore_column_order for
+        LMV's own "Main Column Order" tab, under a separate key since
+        Inception's ~150-column universe is entirely different from LMV's.
+        That tab exists specifically because dragging one column at a time
+        across a table this wide is tedious — it lets you list (search +
+        up/down-reorder, no dragging) just the columns you want pulled to
+        specific positions; anything not listed keeps its current relative
+        position, same partial-list convention LMV's own tab already uses
+        (its default only names ~20 of LMV's ~82
         columns, not all of them)."""
         from services import config_store
         saved = config_store.load_column_order(key=config_store.INCEPTION_HMV_COLUMN_ORDER)
@@ -504,6 +679,7 @@ class InceptionHmvScreen(QWidget):
         if not self._status_lbl.text():
             self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         self._style_calendar_popups()
+        self._refresh_highlight_btn_style()
         self._table.repaint()
         if self._headers:
             self._freeze.configure(self._headers, _FROZEN_HEADERS, self._freeze_style())

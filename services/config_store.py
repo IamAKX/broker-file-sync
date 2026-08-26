@@ -21,7 +21,15 @@ Tab keys (stable identifiers, independent of UI labels):
   "main_column_name"             — (Actual, Renamed)
   "main_column_order"            — flat list of column names (LMV) — see
                                     save_column_order/load_column_order
-  "inception_hmv_column_order"   — same shape, Inception HMV's own list
+  "inception_hmv_column_order"   — same shape, shared by Inception HMV and
+                                    View by Date (name kept from when it was
+                                    HMV-only — see screens.inception_hmv/
+                                    inception_view_by_date's own docstrings)
+  "inception_highlight_color"/
+  "inception_column_highlight_colors" — same shape/idea as the lmv_* pair
+                                    below, shared by Inception HMV and View
+                                    by Date (see services.
+                                    inception_change_highlight)
   "theme"                        — "dark" | "light" (local-cache key only — see above)
 """
 
@@ -36,6 +44,8 @@ INCEPTION_HMV_COLUMN_ORDER = "inception_hmv_column_order"
 THEME             = "theme"
 LMV_HIGHLIGHT_COLOR = "lmv_highlight_color"
 LMV_COLUMN_HIGHLIGHT_COLORS = "lmv_column_highlight_colors"
+INCEPTION_HIGHLIGHT_COLOR = "inception_highlight_color"
+INCEPTION_COLUMN_HIGHLIGHT_COLORS = "inception_column_highlight_colors"
 
 
 def _load_raw() -> dict:
@@ -256,6 +266,29 @@ def load_lmv_column_highlight_colors() -> dict:
     """Return the saved {column_name: "#rrggbb"} overrides, or {} if none
     saved."""
     colors = load_json(LMV_COLUMN_HIGHLIGHT_COLORS, None)
+    return dict(colors) if isinstance(colors, dict) else {}
+
+
+def save_inception_highlight_color(hex_color: str | None):
+    """Same idea as save_lmv_highlight_color, for Inception's HMV/View by
+    Date "changed since last Load" highlight (services.
+    inception_change_highlight) — one shared color, same key for both
+    screens (see INCEPTION_HIGHLIGHT_COLOR's own docstring)."""
+    save_json(INCEPTION_HIGHLIGHT_COLOR, hex_color)
+
+
+def load_inception_highlight_color() -> str | None:
+    color = load_json(INCEPTION_HIGHLIGHT_COLOR, None)
+    return color if isinstance(color, str) else None
+
+
+def save_inception_column_highlight_colors(colors: dict):
+    """Same idea as save_lmv_column_highlight_colors, for Inception."""
+    save_json(INCEPTION_COLUMN_HIGHLIGHT_COLORS, dict(colors))
+
+
+def load_inception_column_highlight_colors() -> dict:
+    colors = load_json(INCEPTION_COLUMN_HIGHLIGHT_COLORS, None)
     return dict(colors) if isinstance(colors, dict) else {}
 
 

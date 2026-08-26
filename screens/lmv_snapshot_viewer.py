@@ -50,8 +50,13 @@ class LmvSnapshotViewer(QWidget):
             if show_strategies else []
         )
 
+        # See screens.live_viewer's identical fix for why this reads through
+        # Config Editor's persisted "sector_stock" override rather than
+        # config_defaults.SECTOR_STOCK_DATA directly.
         from config_defaults import SECTOR_STOCK_DATA
-        self._sector_map = {stock: sector for sector, stock in SECTOR_STOCK_DATA}
+        from services import config_store
+        sector_stock_data = config_store.load_tab("sector_stock", SECTOR_STOCK_DATA)
+        self._sector_map = {stock: sector for sector, stock in sector_stock_data}
 
         self._title_text = title or f"Historical LMV — {trade_date.strftime('%d-%b-%Y')}"
         self.setWindowTitle(self._title_text)
