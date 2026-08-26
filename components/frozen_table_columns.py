@@ -27,6 +27,7 @@ component for Inception's grids (screens.inception_hmv, the HistoricDataViewer
 popup screens.inception_view_by_date uses) so as not to risk regressing it.
 """
 
+import shiboken6
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer
 from PySide6.QtWidgets import QAbstractItemView, QFrame, QHeaderView, QTableView
 
@@ -136,6 +137,19 @@ class FrozenColumns(QObject):
             self._guarding = False
 
     def _update_geometry(self):
+        # Both configure() and eventFilter() schedule this via
+        # QTimer.singleShot(0, ...) as a "settle one event-loop turn later"
+        # belt-and-suspenders (see their own comments) — if the table (a
+        # transient popup, e.g. HistoricDataViewer) got closed/destroyed
+        # before that deferred turn arrives, self._table/self._overlay are
+        # Python wrappers around already-C++-deleted Qt objects; touching
+        # either raises "libshiboken: Internal C++ object ... already
+        # deleted" instead of just being a harmless no-op for a table that
+        # no longer needs its geometry updated. Seen in CI (test_external_
+        # import.py's database-mode test, which builds and tears down a
+        # preview popup fast enough to land right in this window).
+        if not shiboken6.isValid(self._table) or not shiboken6.isValid(self._overlay):
+            return
         if not self._frozen_cols or any(self._table.isColumnHidden(c) for c in self._frozen_cols):
             self._overlay.hide()
             return
