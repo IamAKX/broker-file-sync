@@ -1004,6 +1004,50 @@ def test_view_by_date_strategy_picker_lets_multiple_strategies_be_selected(qapp,
     assert screen._strat_btn.text() == "⚡  Strategies  2/2"
 
 
+def test_view_by_date_view_click_respects_picker_deselection(qapp, controller, monkeypatch, bars_db):
+    """Regression: clicking View used to reload strategies straight from
+    inception_strategy_store.load_all() (screens.inception_view_by_date.
+    _on_view_succeeded), clobbering whatever the "⚡ Strategies" picker had
+    just deselected this session — since that picker deliberately never
+    persists its Apply back to the store (see _on_strategies_applied's
+    docstring). A strategy switched off in the picker must stay off through
+    a View, same as it already does across a picker re-open (see
+    services.inception_strategy_store.merge_session_active)."""
+    from screens.inception_view_by_date import InceptionViewByDateScreen
+    from services import inception_strategy_store
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+
+    strategy = {
+        "id": "s1", "name": "Range", "active": True, "row_filter": [],
+        "columns": [{
+            "name": "Day Range",
+            "formula": [{"type": "col", "value": "CLOSE"}, {"type": "op", "value": "-"}, {"type": "col", "value": "OPEN"}],
+        }],
+    }
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [dict(strategy)])
+
+    screen = InceptionViewByDateScreen(controller)
+    screen._selected_date = date(2026, 8, 18)
+
+    # Deselect the strategy via the picker's Apply path, exactly as the
+    # "⚡ Strategies" popup does — session-local only, never saved.
+    screen._show_strategy_picker()
+    screen._on_strategies_applied([dict(strategy, active=False)])
+    assert screen._strat_btn.text() == "⚡  Strategies  0/1"
+
+    from unittest.mock import MagicMock
+    from screens import inception_view_by_date as ivd
+    fake_viewer_cls = MagicMock()
+    monkeypatch.setattr(ivd, "HistoricDataViewer", fake_viewer_cls)
+
+    screen._on_view_clicked()
+    _run_worker(qapp, screen)
+    headers, rows = fake_viewer_cls.call_args.args[:2]
+    assert "Day Range" not in headers
+    assert screen._strat_btn.text() == "⚡  Strategies  0/1"
+
+
 def test_view_by_date_screen_constructs(qapp, controller):
     from screens.inception_view_by_date import InceptionViewByDateScreen
 

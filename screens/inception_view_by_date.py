@@ -477,8 +477,13 @@ class InceptionViewByDateScreen(QWidget):
         # additionally lets more than one be selected and applied at once
         # for this session, same as screens.inception_hmv. load_all() already
         # falls back to its local cache on a network error, so this can't
-        # raise.
-        self._strategies = inception_strategy_store.load_all()
+        # raise. Merged through merge_session_active (not a plain overwrite)
+        # so a deselect made via the picker earlier this session — never
+        # persisted to the store, see _on_strategies_applied — survives this
+        # reload instead of being silently reverted back to Strategy
+        # Builder's own persisted "active" flag on every View click.
+        fresh = inception_strategy_store.load_all()
+        self._strategies = inception_strategy_store.merge_session_active(fresh, self._strategies)
         self._update_strat_btn_label()
         strategies = [s for s in self._strategies if s.get("active")]
         # include_streak_columns=False — the "Days True"/"Since" streak pair
