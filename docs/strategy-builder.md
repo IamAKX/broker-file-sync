@@ -166,6 +166,16 @@ can be a raw sheet column or another of this strategy's own columns (any
 custom formula), same as `AVG_DAYS`/etc. above — both column pickers offer
 the full Fields list, not a restricted set.
 
+> **Inception's Strategy Builder** (historical EOD data, not Live Master
+> View) offers all six of these Historic Value functions too, resolved
+> straight from each instrument's locally-synced bar history instead of a
+> remote snapshot fetch — but **both** the value column **and** the driver
+> column must be a raw OHLCV field (Open/High/Low/Close/Vol/OpenInt); a
+> Group A/B (52WH, ATH, ...) or Formula Builder (MT, MB, ...) column on
+> either side isn't resolved and the result is blank (`None`), same
+> convention as `AVG_DAYS`/etc.'s own raw-field scoping there. Inception
+> also has its own extra `VALUE_BEFORE_CHANGE` function — see below.
+
 The `_DATES` pair's date range is **static** — typed into the formula, not
 rolling — so "last week" means re-opening the picker (or editing the dates
 by hand) to point at a new range each week, unlike `_DAYS`' N-trading-days
@@ -177,6 +187,46 @@ and the same click-a-cell popup in Live Master View (for any of these four,
 the popup drills into the *value* column's own history, not the driver's)
 — it's the identical underlying mechanism, just resolving to one specific
 day's value instead of an aggregate over several.
+
+### VALUE_BEFORE_CHANGE (Inception's Strategy Builder only)
+
+Inception's own Strategy Builder (historical EOD data, not Live Master
+View) has one extra function in its **Historic Value** section that LMV's
+doesn't: `VALUE_BEFORE_CHANGE` — "the value this column had immediately
+before its CURRENT value last changed." It takes an **optional** second
+argument:
+
+```
+VALUE_BEFORE_CHANGE([WT])       — "auto": walks back day by day (every
+                                   trading day, not just month-ends), up to
+                                   ~1 year, and returns the first day whose
+                                   value actually differs from today's. Use
+                                   this for anything that doesn't change on
+                                   a fixed monthly schedule — e.g. WT
+                                   changed last Tuesday: this finds that
+                                   value directly, no need to know or name
+                                   the interval.
+
+VALUE_BEFORE_CHANGE([MT], 6)    — explicit months form: walks back one
+                                   CALENDAR MONTH at a time, up to 6 months,
+                                   comparing each prior month-end's value
+                                   against today's. E.g. MT reads 400 for
+                                   both August and July but was 382 in
+                                   June: VALUE_BEFORE_CHANGE([MT], 6) -> 382.
+                                   Use this only when you specifically want
+                                   month-boundary comparisons rather than a
+                                   day-by-day search.
+```
+
+Both forms return `None` if nothing differs within range, or there isn't
+that much synced history yet. Works for both Group A/B columns (52WH,
+ATH, ...) and Formula Builder columns (MT, MB, DT, DB, ...). In the
+picker (click **VALUE_BEFORE_CHANGE** in the catalogue), pick a column,
+then either leave the "Just find the previous changed value" checkbox on
+(the auto form) or uncheck it and enter a months count. Same Compile &
+Test placeholder caveat as every other Historic Value function above —
+not offered in LMV's own Strategy Builder, since it needs Inception's
+own per-symbol bar history to resolve.
 
 ---
 

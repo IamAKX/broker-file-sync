@@ -1,10 +1,21 @@
-"""Resolves VALUE_BEFORE_CHANGE(column, months_back) for Inception's HMV/
+"""Resolves VALUE_BEFORE_CHANGE(column[, months_back]) for Inception's HMV/
 View by Date grids — "the value this column had immediately before its
-CURRENT value last changed." Walks back one calendar month at a time (up
-to months_back months) from the as-of-date, comparing each prior month's
-own value of the column against the as-of-date's own value, and returns
-the first one that's actually different (None if nothing differs within
-months_back months, or there isn't that much synced history yet).
+CURRENT value last changed." Two resolution modes, chosen by whether
+months_back was given:
+
+  - months_back given: walks back one calendar month at a time (up to
+    months_back months) from the as-of-date, comparing each prior month's
+    own value of the column against the as-of-date's own value, and
+    returns the first one that's actually different (None if nothing
+    differs within months_back months, or there isn't that much synced
+    history yet).
+
+  - months_back omitted ("auto"): for a field with no fixed change
+    cadence (weekly, irregular, ...) naming a month count is the wrong
+    question. Instead walks back TRADING DAY by trading day (not
+    month-ends) — up to VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS days — and
+    returns the first day whose value actually differs. Same None
+    semantics if nothing differs within that span.
 
 A fundamentally different kind of lookup than services.inception_day_history
 (VALUE_DAYS_AGO/_DAYS-family, raw OHLCV fields only, resolved by slicing an
@@ -31,23 +42,47 @@ paths, split by column kind:
     for, so this is one extra full-universe pass total, not months_back of
     them.
 
-Both produce the same {(col_name, (VALUE_BEFORE_CHANGE_TAG, months_back)):
-{symbol: {"First": value}}} shape services.strategy_engine.evaluate_compiled
-expects from day_history — see VALUE_BEFORE_CHANGE_TAG's own docstring for
-the tagged-window convention.
+Both produce the same {(col_name, window): {symbol: {"First": value}}}
+shape services.strategy_engine.evaluate_compiled expects from day_history
+— window is (VALUE_BEFORE_CHANGE_TAG, months_back) for the explicit-months
+form or the bare (VALUE_BEFORE_CHANGE_DAILY_TAG,) 1-tuple for the "auto"
+day-granularity form — see those tags' own docstrings in services.
+strategy_engine for the tagged-window convention.
 """
 from datetime import date, timedelta
 
 from services.formula_engine import FORMULA_CODES
-from services.strategy_engine import VALUE_BEFORE_CHANGE_TAG, get_compiled
+from services.strategy_engine import (
+    VALUE_BEFORE_CHANGE_DAILY_TAG, VALUE_BEFORE_CHANGE_TAG, get_compiled,
+)
+
+# Cap for the "auto" (no months_back) day-granularity walk — trading days,
+# not calendar days. ~1 trading year: bounds the per-lookup cost (each step
+# back is a real re-resolve, not a cache hit) while comfortably covering
+# "changes weekly" and every less-frequent cadence up to about a year old.
+# Chosen so a column that's been constant since Inception's own history
+# began still gives up in bounded time rather than walking its entire
+# synced history on every single lookup.
+VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS = 252
+
+# Calendar-day span resolve_group_a_b fetches (via range_rows) to cover
+# VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS trading days of history — a trading
+# year is ~252 sessions out of ~365 calendar days; the extra ~35 days is
+# slack for holidays/weekends plus the same "one month of padding before
+# the oldest day" reasoning _earliest_date_from uses for the monthly form.
+_DAILY_LOOKBACK_CALENDAR_DAYS = 400
 
 
 def specs_for_strategies(strategies: list) -> list:
     """[(col_name, months_back), ...], deduped — every VALUE_BEFORE_CHANGE
-    reference across *strategies*' own columns' formulas. *strategies* is
-    every saved strategy, active or not — a strategy switched on later in
-    the same session (via the picker), without a fresh Load, still
-    resolves correctly as long as it was already known when this ran, same
+    reference across *strategies*' own columns' formulas. months_back is
+    None for the "auto" no-argument form (VALUE_BEFORE_CHANGE([col]) — see
+    this module's docstring) or an int for the explicit
+    VALUE_BEFORE_CHANGE([col], months_back) form; resolve_formula_builder/
+    resolve_group_a_b below both branch on that. *strategies* is every
+    saved strategy, active or not — a strategy switched on later in the
+    same session (via the picker), without a fresh Load, still resolves
+    correctly as long as it was already known when this ran, same
     reasoning as services.inception_day_history.raw_day_specs."""
     seen: set = set()
     out = []
@@ -59,10 +94,22 @@ def specs_for_strategies(strategies: list) -> list:
             for _, _agg_key, col_name, window in compiled.day_specs:
                 if isinstance(window, tuple) and len(window) == 2 and window[0] == VALUE_BEFORE_CHANGE_TAG:
                     key = (col_name, window[1])
-                    if key not in seen:
-                        seen.add(key)
-                        out.append(key)
+                elif isinstance(window, tuple) and len(window) == 1 and window[0] == VALUE_BEFORE_CHANGE_DAILY_TAG:
+                    key = (col_name, None)
+                else:
+                    continue
+                if key not in seen:
+                    seen.add(key)
+                    out.append(key)
     return out
+
+
+def _window_for(months_back):
+    """The day_history window key for one (col_name, months_back) spec —
+    see this module's docstring for the two tagged shapes."""
+    if months_back is None:
+        return (VALUE_BEFORE_CHANGE_DAILY_TAG,)
+    return (VALUE_BEFORE_CHANGE_TAG, months_back)
 
 
 def _month_first(d: date) -> date:
@@ -113,10 +160,12 @@ def _earliest_date_from(as_of_date: date, months_back: int) -> date:
 
 def resolve_formula_builder(specs: list, symbol: str, bars: list) -> dict:
     """*specs*: [(col_name, months_back), ...] already filtered to Formula
-    Builder codes only (see specs_for_strategies + FORMULA_CODES). *bars*:
-    this symbol's own ascending-by-trade_date bar history, already fetched
-    up to the as-of-date (services.inception_bars_store.bars_for_symbol's
-    shape) — reused as-is, no extra query."""
+    Builder codes only (see specs_for_strategies + FORMULA_CODES).
+    months_back may be None (the "auto" day-granularity form — see this
+    module's docstring). *bars*: this symbol's own ascending-by-trade_date
+    bar history, already fetched up to the as-of-date (services.
+    inception_bars_store.bars_for_symbol's shape) — reused as-is, no extra
+    query."""
     if not specs or not bars:
         return {}
     from services import inception_formula_builder_columns
@@ -128,18 +177,30 @@ def resolve_formula_builder(specs: list, symbol: str, bars: list) -> dict:
         current = inception_formula_builder_columns.compute_for_bars(symbol, bars).get(col_name)
         found = None
         if isinstance(current, (int, float)):
-            month_first = _month_first(as_of_date)
-            for i in range(1, months_back + 1):
-                target_end = _month_end(_months_before(month_first, i))
-                candidate_date = _latest_on_or_before(bar_dates, target_end)
-                if candidate_date is None:
-                    break
-                idx = bar_dates.index(candidate_date)
-                value = inception_formula_builder_columns.compute_for_bars(symbol, bars[:idx + 1]).get(col_name)
-                if isinstance(value, (int, float)) and value != current:
-                    found = value
-                    break
-        out[(col_name, (VALUE_BEFORE_CHANGE_TAG, months_back))] = {symbol: {"First": found}}
+            if months_back is None:
+                # "Auto" — walk back TRADING day by trading day (every bar,
+                # not just month-ends), stopping at the first differing
+                # value or VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS bars back,
+                # whichever comes first.
+                oldest_idx = max(0, len(bars) - 1 - VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS)
+                for idx in range(len(bars) - 2, oldest_idx - 1, -1):
+                    value = inception_formula_builder_columns.compute_for_bars(symbol, bars[:idx + 1]).get(col_name)
+                    if isinstance(value, (int, float)) and value != current:
+                        found = value
+                        break
+            else:
+                month_first = _month_first(as_of_date)
+                for i in range(1, months_back + 1):
+                    target_end = _month_end(_months_before(month_first, i))
+                    candidate_date = _latest_on_or_before(bar_dates, target_end)
+                    if candidate_date is None:
+                        break
+                    idx = bar_dates.index(candidate_date)
+                    value = inception_formula_builder_columns.compute_for_bars(symbol, bars[:idx + 1]).get(col_name)
+                    if isinstance(value, (int, float)) and value != current:
+                        found = value
+                        break
+        out[(col_name, _window_for(months_back))] = {symbol: {"First": found}}
     return out
 
 
@@ -147,17 +208,23 @@ def resolve_formula_builder(specs: list, symbol: str, bars: list) -> dict:
 
 def resolve_group_a_b(specs: list, as_of_date: date, progress_cb=None) -> dict:
     """*specs*: [(col_name, months_back), ...] already filtered to
-    NON-Formula-Builder codes (Group A/B or raw). One services.
-    inception_compute_service.range_rows call covers every symbol and every
-    candidate month-end in a single full-universe pass — see this module's
-    own docstring for why that's cheap relative to walking month-by-month
-    per symbol."""
+    NON-Formula-Builder codes (Group A/B or raw). months_back may be None
+    (the "auto" day-granularity form — see this module's docstring). One
+    services.inception_compute_service.range_rows call covers every symbol
+    and every candidate day in a single full-universe pass — see this
+    module's own docstring for why that's cheap relative to walking
+    day-by-day/month-by-month per symbol."""
     if not specs:
         return {}
     from services import inception_compute_service
 
-    max_months = max(months for _, months in specs)
-    date_from = _earliest_date_from(as_of_date, max_months)
+    month_specs = [m for _, m in specs if m is not None]
+    date_from_candidates = []
+    if month_specs:
+        date_from_candidates.append(_earliest_date_from(as_of_date, max(month_specs)))
+    if len(month_specs) < len(specs):  # at least one "auto" spec present
+        date_from_candidates.append(as_of_date - timedelta(days=_DAILY_LOOKBACK_CALENDAR_DAYS))
+    date_from = min(date_from_candidates)
     range_response = inception_compute_service.range_rows(date_from, as_of_date, progress_cb=progress_cb)
 
     by_date: dict = {}
@@ -165,6 +232,10 @@ def resolve_group_a_b(specs: list, as_of_date: date, progress_cb=None) -> dict:
         trade_date = date.fromisoformat(day["trade_date"])
         by_date[trade_date] = {s["symbol"]: s.get("metrics", {}) for s in day.get("stocks", [])}
     sorted_dates = sorted(by_date)
+    # Index of as_of_date within sorted_dates, for the "auto" walk below —
+    # computed once, not per symbol. as_of_date may be absent from
+    # sorted_dates (e.g. no bar for it yet); treat that as "off the end".
+    as_of_idx = sorted_dates.index(as_of_date) if as_of_date in sorted_dates else len(sorted_dates)
 
     out: dict = {}
     current_by_symbol = by_date.get(as_of_date, {})
@@ -176,15 +247,23 @@ def resolve_group_a_b(specs: list, as_of_date: date, progress_cb=None) -> dict:
             if not isinstance(current, (int, float)):
                 continue
             found = None
-            for i in range(1, months_back + 1):
-                target_end = _month_end(_months_before(month_first, i))
-                candidate_date = _latest_on_or_before(sorted_dates, target_end)
-                if candidate_date is None:
-                    break
-                value = by_date[candidate_date].get(symbol, {}).get(col_name)
-                if isinstance(value, (int, float)) and value != current:
-                    found = value
-                    break
+            if months_back is None:
+                oldest_idx = max(0, as_of_idx - VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS)
+                for j in range(as_of_idx - 1, oldest_idx - 1, -1):
+                    value = by_date[sorted_dates[j]].get(symbol, {}).get(col_name)
+                    if isinstance(value, (int, float)) and value != current:
+                        found = value
+                        break
+            else:
+                for i in range(1, months_back + 1):
+                    target_end = _month_end(_months_before(month_first, i))
+                    candidate_date = _latest_on_or_before(sorted_dates, target_end)
+                    if candidate_date is None:
+                        break
+                    value = by_date[candidate_date].get(symbol, {}).get(col_name)
+                    if isinstance(value, (int, float)) and value != current:
+                        found = value
+                        break
             entries[symbol] = {"First": found}
-        out[(col_name, (VALUE_BEFORE_CHANGE_TAG, months_back))] = entries
+        out[(col_name, _window_for(months_back))] = entries
     return out

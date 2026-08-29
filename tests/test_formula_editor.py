@@ -720,6 +720,98 @@ def test_days_ago_picker_inserts_full_call_text(qapp):
     assert dlg._preview_edit.toPlainText() == "VALUE_DAYS_AGO([High], 2)"
 
 
+def test_months_back_picker_inserts_full_call_text(qapp):
+    """VALUE_BEFORE_CHANGE's "months_back" picker (screens.
+    inception_strategy_builder's INCEPTION_HISTORIC_VALUE_CATALOGUE) reuses
+    the same column-then-N flow as VALUE_DAYS_AGO's "days_ago", just via
+    _MonthsBackPickerDialog instead of _DaysAgoPickerDialog."""
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QDialog
+
+    dlg = ExpressionEditorDialog([], ["MT"], [], {"MT": 400.0})
+
+    class _FakeColDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_column(self): return "MT"
+
+    class _FakeNDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_n(self): return 6
+
+    import screens.formula_editor as mod
+    orig_col, orig_n = mod._ColumnPickerDialog, mod._MonthsBackPickerDialog
+    mod._ColumnPickerDialog = _FakeColDlg
+    mod._MonthsBackPickerDialog = _FakeNDlg
+    try:
+        dlg._open_point_lookup_picker("VALUE_BEFORE_CHANGE", "months_back")
+    finally:
+        mod._ColumnPickerDialog = orig_col
+        mod._MonthsBackPickerDialog = orig_n
+
+    assert dlg._preview_edit.toPlainText() == "VALUE_BEFORE_CHANGE([MT], 6)"
+
+
+def test_months_back_picker_auto_inserts_no_arg_call_text(qapp):
+    """selected_n() returning None (the _MonthsBackPickerDialog "auto"
+    checkbox — no months limit, day-granularity search instead) inserts the
+    bare column form, no second argument."""
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QDialog
+
+    dlg = ExpressionEditorDialog([], ["WT"], [], {"WT": 400.0})
+
+    class _FakeColDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_column(self): return "WT"
+
+    class _FakeNDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_n(self): return None
+
+    import screens.formula_editor as mod
+    orig_col, orig_n = mod._ColumnPickerDialog, mod._MonthsBackPickerDialog
+    mod._ColumnPickerDialog = _FakeColDlg
+    mod._MonthsBackPickerDialog = _FakeNDlg
+    try:
+        dlg._open_point_lookup_picker("VALUE_BEFORE_CHANGE", "months_back")
+    finally:
+        mod._ColumnPickerDialog = orig_col
+        mod._MonthsBackPickerDialog = orig_n
+
+    assert dlg._preview_edit.toPlainText() == "VALUE_BEFORE_CHANGE([WT])"
+
+
+def test_months_back_picker_dialog_selected_n_real_class(qapp):
+    """Exercises the REAL _MonthsBackPickerDialog (not mocked, unlike the
+    tests above which fake out selected_n() entirely) — regression for a
+    duplicate `def selected_n` definition that silently shadowed the
+    checkbox-aware one with a bare `return self._spin.value()` stub, so
+    the "auto" checkbox rendered and toggled fine but had NO effect on
+    what got inserted. A test that mocks the dialog can't catch that class
+    of bug; this one constructs the real class."""
+    from screens.formula_editor import _MonthsBackPickerDialog
+    dlg = _MonthsBackPickerDialog(theme=None)
+    assert dlg._auto_check.isChecked() is True
+    assert dlg.selected_n() is None          # auto (checked) -> None
+    dlg._auto_check.setChecked(False)
+    assert dlg.selected_n() == dlg._spin.value()   # unchecked -> the spin value
+    dlg._spin.setValue(9)
+    assert dlg.selected_n() == 9
+
+
+def test_parse_expression_text_value_before_change_no_arg_form():
+    """Typed directly (not via the picker): VALUE_BEFORE_CHANGE([WT]) with
+    no months_back should parse to a func token with no days_arg, same as
+    the picker's "auto" output."""
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_BEFORE_CHANGE([WT])")
+    assert tokens == [{"type": "func", "value": "VALUE_BEFORE_CHANGE(", "col_arg": "WT"}]
+
+
 def test_on_date_picker_inserts_full_call_text(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     from PySide6.QtWidgets import QDialog

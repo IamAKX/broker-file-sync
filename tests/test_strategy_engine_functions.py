@@ -547,6 +547,32 @@ def test_compile_check_days_func_unknown_column_still_reported():
     assert "TotallyMadeUp" in msg
 
 
+# ── compile_check with VALUE_BEFORE_CHANGE (Inception-only, no day_history
+# fetch at edit time either — same placeholder treatment as the _DAYS
+# functions above). Regression test: _tokens_to_expr's structural
+# pre-check didn't know this function name, so it fell into the generic
+# "func" branch and emitted an unclosed "value_before_change(" with no
+# arguments -> Python SyntaxError -> a false "isn't structured correctly"
+# on a perfectly valid formula.
+
+def test_compile_check_value_before_change_uses_placeholder_not_syntax_error():
+    from services.strategy_engine import compile_check
+    tokens = days_tok("VALUE_BEFORE_CHANGE", "MT", 3)
+    ok, msg = compile_check(tokens, {"MT": "100"}, [{"MT": "100"}])
+    assert ok is True
+    assert "structured correctly" not in msg.lower()
+
+
+def test_compile_check_value_before_change_no_arg_form_also_compiles():
+    """The "auto" no-months_back form (a bare column arg, no days_arg at
+    all) must hit the same placeholder path as the explicit-months form."""
+    from services.strategy_engine import compile_check
+    tokens = [{"type": "func", "value": "VALUE_BEFORE_CHANGE(", "col_arg": "WT"}]
+    ok, msg = compile_check(tokens, {"WT": "100"}, [{"WT": "100"}])
+    assert ok is True
+    assert "structured correctly" not in msg.lower()
+
+
 # ── compile_check's lmv_headers param (historic/derived column reference) ────
 # Reproduces: [Last5Day]*1 where [Last5Day] is a Formula Builder field whose
 # own formula is MAX_OF([DAY TO], LAST_5_TRADING_DAYS) — a plain "col"

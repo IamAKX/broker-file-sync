@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QSplitter, QWidget,
     QListWidget, QListWidgetItem, QLabel, QLineEdit, QPushButton,
     QTextEdit, QFrame, QScrollArea, QSizePolicy, QMessageBox, QSpinBox,
-    QDateEdit,
+    QDateEdit, QCheckBox,
 )
 from PySide6.QtCore import Qt, Signal, QDate
 from PySide6.QtGui import QFont, QColor, QTextCursor, QTextCharFormat
@@ -394,7 +394,10 @@ def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
     """For SUM_ALL(...)-style aggregates, try to read the single column
     argument up to the matching ')'; for AVG_DAYS(...)/VALUE_DAYS_AGO(...)-
     style functions, the column argument plus a required ", <days>"; for
-    VALUE_ON_DATE(...), the column argument plus a required
+    VALUE_BEFORE_CHANGE(...), the column argument plus EITHER a ", <days>"
+    (months_back) OR nothing at all — VALUE_BEFORE_CHANGE([col]) is the
+    "auto" day-granularity form, see services.inception_value_before_change;
+    for VALUE_ON_DATE(...), the column argument plus a required
     ", <YYYY-MM-DD>"; for VALUE_AT_MAX_DAYS(...)/VALUE_AT_MIN_DAYS(...), TWO
     column arguments plus a required ", <days>"; for VALUE_AT_MAX_DATES(...)/
     VALUE_AT_MIN_DATES(...), TWO column arguments plus a required
@@ -413,11 +416,21 @@ def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
     if (func_name_lower in _DAYS_AGG_FUNCS or func_name_lower in _POINT_DAYS_AGO_FUNCS
             or func_name_lower in _VALUE_BEFORE_CHANGE_FUNCS):
         m = _DAYS_AGG_ARG_RE.match(text, start)
-        if not m:
-            return start, None, {}
-        *col_groups, days = m.groups()
-        col = next(g for g in col_groups if g is not None)
-        return m.end(), col, {"days_arg": int(days)}
+        if m:
+            *col_groups, days = m.groups()
+            col = next(g for g in col_groups if g is not None)
+            return m.end(), col, {"days_arg": int(days)}
+        # VALUE_BEFORE_CHANGE(column) — no months_back arg at all is valid
+        # too: "auto", day-granularity search until a differing value turns
+        # up (see services.inception_value_before_change). AVG_DAYS/
+        # VALUE_DAYS_AGO/etc keep requiring the ", <days>" form — a bare
+        # AVG_DAYS([High]) still falls through to "not recognized" below.
+        if func_name_lower in _VALUE_BEFORE_CHANGE_FUNCS:
+            m = _AGG_ARG_RE.match(text, start)
+            if m:
+                col = next(g for g in m.groups() if g is not None)
+                return m.end(), col, {}
+        return start, None, {}
     if func_name_lower in _ON_DATE_FUNCS:
         m = _ON_DATE_ARG_RE.match(text, start)
         if not m:
@@ -706,6 +719,69 @@ class _DaysCountPickerDialog(QDialog):
         return self._spin.value()
 
 
+class _MonthsBackPickerDialog(QDialog):
+    """Step 2 of building VALUE_BEFORE_CHANGE (screens.
+    inception_strategy_builder, Inception-only): either a plain calendar-
+    months window (same shape as _DaysCountPickerDialog, a positive N,
+    minimum 1) or the "auto" no-argument form — walk back day by day
+    (not month-ends) until a differing value turns up, no unit to name at
+    all, capped at services.inception_value_before_change.
+    VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS trading days. The auto checkbox is
+    the answer to "it doesn't change monthly, it changes every week — why
+    do I have to say a number of months at all": selected_n() returning
+    None tells the caller to insert the bare VALUE_BEFORE_CHANGE([col])
+    form (see _open_point_lookup_picker)."""
+
+    def __init__(self, theme, parent=None):
+        super().__init__(parent)
+        self._theme = theme
+        self.setWindowTitle("VALUE_BEFORE_CHANGE — Search Range")
+        self.setFixedWidth(340)
+        bg, txt = _t(theme, "background"), _t(theme, "text_primary")
+        self.setStyleSheet(
+            f"QDialog{{background:{bg};color:{txt};}}QWidget{{background:{bg};color:{txt};}}"
+            f"QLabel{{background:transparent;}}QCheckBox{{background:transparent;}}"
+        )
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+
+        self._auto_check = QCheckBox("Just find the previous changed value")
+        self._auto_check.setChecked(True)
+        self._auto_check.toggled.connect(self._on_auto_toggled)
+        lay.addWidget(self._auto_check)
+
+        auto_hint = QLabel(
+            "No month limit — searches day by day (not just month-ends), "
+            "up to about a year back."
+        )
+        auto_hint.setWordWrap(True)  # QLabel supports this; QCheckBox does not
+        lay.addWidget(auto_hint)
+
+        self._n_label = QLabel("Or search back up to N calendar months instead:")
+        lay.addWidget(self._n_label)
+        self._spin = QSpinBox()
+        self._spin.setRange(1, 120)
+        self._spin.setValue(12)
+        lay.addWidget(self._spin)
+        self._on_auto_toggled(True)
+
+        ok = QPushButton("OK")
+        ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok.clicked.connect(self.accept)
+        lay.addWidget(ok)
+
+    def _on_auto_toggled(self, checked: bool):
+        self._n_label.setEnabled(not checked)
+        self._spin.setEnabled(not checked)
+
+    def selected_n(self):
+        """None ("auto") for the day-granularity no-argument form, else the
+        chosen months-back count."""
+        if self._auto_check.isChecked():
+            return None
+        return self._spin.value()
+
+
 class _DateRangePickerDialog(QDialog):
     """Step 3 of building VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES: an explicit
     From/To calendar range — plain QDateEdit fields (no availability dots;
@@ -860,7 +936,8 @@ class ExpressionEditorDialog(QDialog):
 
     #: Full nav order — every existing (LMV) caller gets exactly this list
     #: since sections defaults to None. See screens.inception_strategy_builder
-    #: for a caller that trims it (Historic Value/Rows don't apply there).
+    #: for a caller that trims it ("Rows" doesn't apply there; "Historic
+    #: Value" stays but is scoped down via historic_value_catalogue).
     _ALL_SECTIONS = ["Functions", "Historic Value", "Operators", "Fields", "Rows", "Constants", "Variables"]
 
     def __init__(self, tokens: list, lmv_headers: list,
@@ -871,6 +948,7 @@ class ExpressionEditorDialog(QDialog):
                  real_lmv_headers: list = None,
                  sections: list = None, variable_store=None,
                  extra_functions: list = None,
+                 historic_value_catalogue: list = None,
                  parent=None):
         """sections/variable_store: added for screens.inception_strategy_builder's
         reuse of this dialog with Inception's own field set — both default to
@@ -878,19 +956,30 @@ class ExpressionEditorDialog(QDialog):
         formula_variable_store), so every existing (LMV) call site is
         unaffected. sections lets a caller drop nav entries that don't apply
         to it (Inception has no cross-row "of Symbol" support, so it drops
-        "Rows"; "Historic Value" stays hidden by choice — see that constant's
-        own docstring in screens.inception_strategy_builder — even though
-        Inception now resolves some of it, see services.inception_day_history/
-        inception_value_before_change); variable_store swaps which store's
-        variables the Variables tab/"Save as Variable" reads and writes.
+        "Rows"); variable_store swaps which store's variables the Variables
+        tab/"Save as Variable" reads and writes.
+
+        historic_value_catalogue: overrides what the "Historic Value" nav
+        entry lists (defaults to the full POINT_LOOKUP_CATALOGUE, i.e. every
+        existing LMV call site is unaffected) — for a caller whose engine
+        can't resolve every POINT_LOOKUP_CATALOGUE entry, e.g. screens.
+        inception_strategy_builder's INCEPTION_HISTORIC_VALUE_CATALOGUE,
+        which keeps VALUE_DAYS_AGO/VALUE_ON_DATE (services.
+        inception_day_history resolves these for raw OHLCV fields, same
+        "blank on an unresolvable column" convention as Functions' own
+        AVG_DAYS/etc already carry for Inception) and adds Inception-only
+        VALUE_BEFORE_CHANGE (services.inception_value_before_change; LMV's
+        engine can't resolve it at all — see services.strategy_engine.
+        VALUE_BEFORE_CHANGE_TAG), while dropping VALUE_AT_MAX_DAYS/
+        VALUE_AT_MIN_DAYS/VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES, which
+        Inception's day_history has no driver-column-extreme resolution for
+        at all and would always evaluate to None.
 
         extra_functions: additional entries (same {"name", "signature",
         "description", "token"} shape as FUNCTION_CATALOGUE) appended to the
         "Functions" section for just this instance, rather than mutating the
         shared FUNCTION_CATALOGUE list every caller (including LMV's) draws
-        from — for a function only ONE caller's engine can actually resolve
-        (e.g. screens.inception_strategy_builder's VALUE_BEFORE_CHANGE,
-        Inception-only — see services.strategy_engine.VALUE_BEFORE_CHANGE_TAG),
+        from — for a function only ONE caller's engine can actually resolve,
         so it isn't offered somewhere it would silently always evaluate to
         None. Defaults to None (nothing extra), the exact prior behavior.
         """
@@ -901,6 +990,10 @@ class ExpressionEditorDialog(QDialog):
         self._sections = list(sections) if sections is not None else list(self._ALL_SECTIONS)
         self._variable_store = variable_store
         self._extra_functions = list(extra_functions) if extra_functions else []
+        self._historic_value_catalogue = (
+            list(historic_value_catalogue) if historic_value_catalogue is not None
+            else POINT_LOOKUP_CATALOGUE
+        )
         # The sheet's OWN currently-loaded columns — a strict subset of
         # self._lmv_headers above, which is really "every name offered in
         # the Fields list" (Formula Builder fields, other strategy columns,
@@ -1237,7 +1330,7 @@ class ExpressionEditorDialog(QDialog):
         if section == "Functions":
             return FUNCTION_CATALOGUE + self._extra_functions
         if section == "Historic Value":
-            return POINT_LOOKUP_CATALOGUE
+            return self._historic_value_catalogue
         if section == "Operators":
             return OPERATOR_CATALOGUE
         if section == "Fields":
@@ -1318,8 +1411,9 @@ class ExpressionEditorDialog(QDialog):
         VALUE_AT_MAX_DATES([High], [CWTO], 2026-08-10, 2026-08-14), instead
         of the plain "insert bare function name, fill in the rest by hand"
         flow every other catalogue entry uses. *picker* is "days_ago",
-        "on_date", "extreme_days", or "extreme_dates" (see
-        POINT_LOOKUP_CATALOGUE)."""
+        "on_date", "extreme_days", "extreme_dates", or "months_back" (see
+        POINT_LOOKUP_CATALOGUE / screens.inception_strategy_builder's
+        INCEPTION_HISTORIC_VALUE_CATALOGUE)."""
         columns = self._lmv_headers + self._strategy_col_headers
         if not columns:
             QMessageBox.information(
@@ -1337,6 +1431,18 @@ class ExpressionEditorDialog(QDialog):
             if n_dlg.exec() != QDialog.DialogCode.Accepted:
                 return
             self._insert_at_cursor(f"{fname}([{column}], {n_dlg.selected_n()})")
+        elif picker == "months_back":
+            n_dlg = _MonthsBackPickerDialog(self._theme, self)
+            if n_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            n = n_dlg.selected_n()
+            # None = "auto" (no months_back arg) — day-granularity search,
+            # see _MonthsBackPickerDialog and _try_consume_aggregate_arg's
+            # single-column fallback for VALUE_BEFORE_CHANGE.
+            if n is None:
+                self._insert_at_cursor(f"{fname}([{column}])")
+            else:
+                self._insert_at_cursor(f"{fname}([{column}], {n})")
         elif picker == "extreme_days":
             # Same full column list for the driver — any raw sheet column or
             # this/another strategy's own computed column is fair game (see
@@ -1623,10 +1729,11 @@ class VariablesManagerDialog(QDialog):
     def __init__(self, lmv_headers: list, lmv_first_row: dict,
                  all_lmv_data: list = None, theme=None,
                  sections: list = None, variable_store=None,
-                 extra_functions: list = None, parent=None):
-        """sections/variable_store/extra_functions: see ExpressionEditorDialog
-        — all three default to prior (LMV) behavior and are forwarded to
-        every ExpressionEditorDialog this dialog opens."""
+                 extra_functions: list = None,
+                 historic_value_catalogue: list = None, parent=None):
+        """sections/variable_store/extra_functions/historic_value_catalogue:
+        see ExpressionEditorDialog — all default to prior (LMV) behavior and
+        are forwarded to every ExpressionEditorDialog this dialog opens."""
         super().__init__(parent)
         self._lmv_headers   = list(lmv_headers)
         self._lmv_first_row = lmv_first_row or {}
@@ -1635,6 +1742,7 @@ class VariablesManagerDialog(QDialog):
         self._sections = sections
         self._variable_store = variable_store
         self._extra_functions = extra_functions
+        self._historic_value_catalogue = historic_value_catalogue
         self.setWindowTitle("Manage Variables")
         self.setFixedSize(520, 440)
         self._build()
@@ -1765,7 +1873,8 @@ class VariablesManagerDialog(QDialog):
             mode="value", allow_self=False,
             real_lmv_headers=list(self._lmv_first_row.keys()),
             sections=self._sections, variable_store=self._variable_store,
-            extra_functions=self._extra_functions, parent=self,
+            extra_functions=self._extra_functions,
+            historic_value_catalogue=self._historic_value_catalogue, parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()
@@ -1784,7 +1893,8 @@ class VariablesManagerDialog(QDialog):
             mode="value", allow_self=False,
             real_lmv_headers=list(self._lmv_first_row.keys()),
             sections=self._sections, variable_store=self._variable_store,
-            extra_functions=self._extra_functions, parent=self,
+            extra_functions=self._extra_functions,
+            historic_value_catalogue=self._historic_value_catalogue, parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()

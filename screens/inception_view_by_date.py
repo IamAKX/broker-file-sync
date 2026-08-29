@@ -133,23 +133,30 @@ class _SnapshotLoadWorker(QThread):
         are available to View by Date and, in turn, to Strategy Builder for
         Inception (a formula can only reference a column that's actually
         present in the row it's evaluating against). Also builds this
-        View's day_history from two sources sharing one dict: services.
+        View's day_history from three sources sharing one dict: services.
         inception_day_history (a raw-OHLCV-only analogue of services.
-        formula_stats_engine.compute_day_history for VALUE_DAYS_AGO/_DAYS-
-        family functions, e.g. the "200 Average" strategy's AVG_DAYS(CLOSE,
-        200)) and services.inception_value_before_change (VALUE_BEFORE_
-        CHANGE — "the value this column had before it last changed"), both
-        reusing the SAME per-symbol bars fetched for the Formula Builder
-        merge rather than querying them again. Runs on this background
-        thread for the same reason HMV's does: bars_for_symbol is a cheap
-        indexed query, but the calendar-bucket arithmetic still adds up
-        across the full instrument universe (and resolve_group_a_b's own
-        extra range_rows pass, when a VALUE_BEFORE_CHANGE spec needs it,
-        more so — still bounded to once per View, not once per month
-        scanned) so none of this ever blocks the GUI thread.
+        formula_stats_engine.compute_day_history — build() for VALUE_DAYS_
+        AGO/_DAYS-family, e.g. the "200 Average" strategy's AVG_DAYS(CLOSE,
+        200); build_extreme() for VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS/
+        VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES) and services.
+        inception_value_before_change (VALUE_BEFORE_CHANGE — "the value
+        this column had before it last changed"), all reusing the SAME
+        per-symbol bars fetched for the Formula Builder merge rather than
+        querying them again. Combined via inception_day_history.merge_into
+        (not a bare dict.update) so a formula referencing both a plain
+        _DAYS function and a VALUE_AT_MAX_DAYS/etc call on the identical
+        (column, window) doesn't have one clobber the other's entry — see
+        merge_into's own docstring. Runs on this background thread for the
+        same reason HMV's does: bars_for_symbol is a cheap indexed query,
+        but the calendar-bucket arithmetic still adds up across the full
+        instrument universe (and resolve_group_a_b's own extra range_rows
+        pass, when a VALUE_BEFORE_CHANGE spec needs it, more so — still
+        bounded to once per View, not once per month scanned) so none of
+        this ever blocks the GUI thread.
         """
         strategies = inception_strategy_store.load_all()
         specs = inception_day_history.raw_day_specs(strategies)
+        extreme_specs = inception_day_history.raw_extreme_specs(strategies)
         vbc_specs = inception_value_before_change.specs_for_strategies(strategies)
         vbc_fb_specs = [(c, m) for c, m in vbc_specs if c in FORMULA_CODES]
         vbc_other_specs = [(c, m) for c, m in vbc_specs if c not in FORMULA_CODES]
@@ -158,7 +165,7 @@ class _SnapshotLoadWorker(QThread):
         for row in rows:
             bars = inception_bars_store.bars_for_symbol(row["symbol"], date_to=as_of_date)
             row["values"].update(inception_formula_builder_columns.compute_for_bars(row["symbol"], bars))
-            if specs or vbc_fb_specs:
+            if specs or extreme_specs or vbc_fb_specs:
                 # Keyed by the DISPLAY symbol (suffix stripped), not
                 # row["symbol"] (the raw "_I" roll-series name) — that's
                 # what ends up in the "Symbol" column apply_strategies'
@@ -168,18 +175,19 @@ class _SnapshotLoadWorker(QThread):
                 # correctly populated but never found.
                 symbol = _display_symbol(row["symbol"])
                 if specs:
-                    for key, entry in inception_day_history.build(specs, symbol, bars).items():
-                        day_history.setdefault(key, {}).update(entry)
+                    inception_day_history.merge_into(
+                        day_history, inception_day_history.build(specs, symbol, bars))
+                if extreme_specs:
+                    inception_day_history.merge_into(
+                        day_history, inception_day_history.build_extreme(extreme_specs, symbol, bars))
                 if vbc_fb_specs:
-                    for key, entry in inception_value_before_change.resolve_formula_builder(
-                        vbc_fb_specs, symbol, bars,
-                    ).items():
-                        day_history.setdefault(key, {}).update(entry)
+                    inception_day_history.merge_into(
+                        day_history, inception_value_before_change.resolve_formula_builder(
+                            vbc_fb_specs, symbol, bars))
         if vbc_other_specs:
-            for key, entry in inception_value_before_change.resolve_group_a_b(
-                vbc_other_specs, as_of_date,
-            ).items():
-                day_history.setdefault(key, {}).update(entry)
+            inception_day_history.merge_into(
+                day_history, inception_value_before_change.resolve_group_a_b(
+                    vbc_other_specs, as_of_date))
         return day_history
 
 

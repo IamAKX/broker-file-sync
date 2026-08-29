@@ -4,17 +4,22 @@ its generic (non-LMV-specific) building blocks directly: StrategyCard,
 _CategorySection, _AddCategoryDialog, _tokens_to_display, _btn/_sep/
 _apply_dialog_bg/_svg_icon. Formula editing reuses the actual Expression
 Editor (screens.formula_editor.ExpressionEditorDialog/VariablesManagerDialog)
-— the same searchable Functions/Operators/Fields/Constants/Variables catalogue
-LMV's Strategy Builder uses — via two small, backward-compatible additions to
-those classes (`sections`/`variable_store` params, both defaulting to prior
-LMV behavior; see that module for the full rationale): `sections` drops
-"Historic Value" (VALUE_DAYS_AGO/VALUE_ON_DATE point-lookups — a UI/product
-choice, not an engine limitation: services.inception_day_history resolves
-these the same as the still-offered "Functions" section's AVG_DAYS/etc for
-a raw OHLCV field, just not surfaced in this picker) and "Rows"
-(cross-instrument "[Field] of Symbol" references, which really aren't
-wired up at all for Inception's field set); `variable_store` points the
-Variables tab/"Save as Variable" at
+— the same searchable Functions/Historic Value/Operators/Fields/Constants/
+Variables catalogue LMV's Strategy Builder uses — via three small,
+backward-compatible additions to those classes (`sections`/`variable_store`/
+`historic_value_catalogue` params, all defaulting to prior LMV behavior; see
+that module for the full rationale): `sections` drops "Rows" (cross-
+instrument "[Field] of Symbol" references, which really aren't wired up at
+all for Inception's field set) but keeps "Historic Value";
+`historic_value_catalogue` narrows THAT section to
+INCEPTION_HISTORIC_VALUE_CATALOGUE below — VALUE_DAYS_AGO/VALUE_ON_DATE/
+VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS/VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES
+(services.inception_day_history resolves all six for raw OHLCV fields,
+same as the "Functions" section's own AVG_DAYS/etc — the _AT_ four
+additionally need their DRIVER column to be raw too) plus Inception-only
+VALUE_BEFORE_CHANGE (services.inception_value_before_change — "the value
+this column had before its current value last changed"); `variable_store`
+points the Variables tab/"Save as Variable" at
 services.inception_formula_variable_store instead of LMV's.
 
 Backed by its own store (services.inception_strategy_store) and its own
@@ -86,38 +91,70 @@ from screens.strategy_builder import (
     _ADD_CATEGORY_SENTINEL, _tokens_to_display, _btn, _sep, _apply_dialog_bg,
     _svg_icon, _t, _pick_compile_test_row,
 )
-from screens.formula_editor import ExpressionEditorDialog, VariablesManagerDialog
+from screens.formula_editor import (
+    ExpressionEditorDialog, VariablesManagerDialog, POINT_LOOKUP_CATALOGUE,
+)
 
-# Historic Value (VALUE_DAYS_AGO/VALUE_ON_DATE point-lookups) stays hidden
-# here by choice, and Rows (cross-instrument "of Symbol") isn't implemented
-# for Inception at all — see module docstring.
-INCEPTION_SECTIONS = ["Functions", "Operators", "Fields", "Constants", "Variables"]
+# Rows (cross-instrument "[Field] of Symbol") isn't implemented for
+# Inception's field set at all — see module docstring. Historic Value IS
+# offered (unlike the old "stays hidden by choice" state), scoped down to
+# INCEPTION_HISTORIC_VALUE_CATALOGUE below rather than the LMV-only full
+# POINT_LOOKUP_CATALOGUE.
+INCEPTION_SECTIONS = ["Functions", "Historic Value", "Operators", "Fields", "Constants", "Variables"]
 
-# Inception-only function(s) appended to the "Functions" section (see
-# ExpressionEditorDialog's extra_functions param) rather than added to
-# screens.formula_editor.FUNCTION_CATALOGUE itself, which every LMV caller
-# also draws from — LMV has no engine support to resolve this (see
-# services.strategy_engine.VALUE_BEFORE_CHANGE_TAG), so offering it there
-# would let a user insert something that always silently evaluates to None.
-INCEPTION_EXTRA_FUNCTIONS = [
-    {
-        "name": "VALUE_BEFORE_CHANGE",
-        "signature": "VALUE_BEFORE_CHANGE(column, months_back)",
-        "description": (
-            "This stock's own column value immediately before its CURRENT "
-            "value last changed — walks back one calendar month at a time "
-            "(up to months_back months), comparing each prior month's own "
-            "value against today's, and returns the first one that's "
-            "actually different. E.g. MT reads 400 for both August and "
-            "July but was 382 in June: VALUE_BEFORE_CHANGE([MT], 6) -> 382. "
-            "None if nothing differs within months_back months, or there "
-            "isn't that much synced history yet. Works for both Group A/B "
-            "columns (52WH, ATH, ...) and Formula Builder columns (MT, MB, "
-            "DT, DB, ...)."
-        ),
-        "token": {"type": "func", "value": "VALUE_BEFORE_CHANGE("},
-    },
-]
+# Point-lookup functions Inception's own day_history actually resolves —
+# see services.inception_day_history's module docstring: all six work for
+# raw OHLCV fields (OPEN/HIGH/LOW/CLOSE/VOL/OPENINT) only, same "blank on
+# an unresolvable column" convention Functions' own AVG_DAYS/MAX_DAYS/etc
+# already carry for Inception, so surfacing them here is not a new risk.
+# VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS/VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES
+# additionally require the DRIVER column to also be a raw field (services.
+# inception_day_history.raw_extreme_specs/build_extreme) — a call mixing a
+# raw value column with a Group A/B or Formula Builder driver (or vice
+# versa) evaluates to None the same way, not an error.
+_INCEPTION_POINT_LOOKUPS = {
+    "VALUE_DAYS_AGO", "VALUE_ON_DATE",
+    "VALUE_AT_MAX_DAYS", "VALUE_AT_MIN_DAYS",
+    "VALUE_AT_MAX_DATES", "VALUE_AT_MIN_DATES",
+}
+
+# VALUE_BEFORE_CHANGE — Inception-only (services.strategy_engine has no
+# engine support for it at all outside Inception's own services.
+# inception_value_before_change, see VALUE_BEFORE_CHANGE_TAG's own
+# docstring), so it's built here rather than added to screens.formula_editor.
+# POINT_LOOKUP_CATALOGUE itself, which every LMV caller also draws from —
+# offering it there would let an LMV user insert something that always
+# silently evaluates to None. needs_point_picker="months_back" gets it the
+# same column-then-N two-step insertion flow VALUE_DAYS_AGO gets, rather
+# than the plain "insert bare function name" flow a Functions-section entry
+# would have used.
+_VALUE_BEFORE_CHANGE_ENTRY = {
+    "name": "VALUE_BEFORE_CHANGE",
+    "signature": "VALUE_BEFORE_CHANGE(column[, months_back])",
+    "description": (
+        "This stock's own column value immediately before its CURRENT "
+        "value last changed. months_back is OPTIONAL — leave it out (in "
+        "the picker, keep the \"Just find the previous changed value\" box "
+        "checked) for a field that changes on no fixed schedule (weekly, "
+        "irregularly, ...): it then walks back "
+        "day by day, up to about a year, and returns the first day whose "
+        "value actually differs from today's — e.g. WT changed last "
+        "Tuesday: VALUE_BEFORE_CHANGE([WT]) finds that day's value "
+        "directly, no need to know or name the interval. Give months_back "
+        "instead only if you specifically want a calendar-month-boundary "
+        "walk (checks each prior month-end, not every day) — e.g. MT "
+        "reads 400 for both August and July but was 382 in June: "
+        "VALUE_BEFORE_CHANGE([MT], 6) -> 382. Either form returns None if "
+        "nothing differs within range, or there isn't that much synced "
+        "history yet. Works for both Group A/B columns (52WH, ATH, ...) "
+        "and Formula Builder columns (MT, MB, DT, DB, ...)."
+    ),
+    "token": {"type": "func", "value": "VALUE_BEFORE_CHANGE(", "needs_point_picker": "months_back"},
+}
+
+INCEPTION_HISTORIC_VALUE_CATALOGUE = [
+    e for e in POINT_LOOKUP_CATALOGUE if e["name"] in _INCEPTION_POINT_LOOKUPS
+] + [_VALUE_BEFORE_CHANGE_ENTRY]
 
 
 def _dummy_row(fields: list) -> dict:
@@ -144,7 +181,7 @@ def _open_expression_editor(tokens: list, fields: list, theme, mode: str,
         tokens, fields, [], row, all_lmv_data=all_data, theme=theme, mode=mode,
         self_value=self_value, real_lmv_headers=fields,
         sections=INCEPTION_SECTIONS, variable_store=var_store,
-        extra_functions=INCEPTION_EXTRA_FUNCTIONS, parent=parent,
+        historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE, parent=parent,
     )
     if dlg.exec() == QDialog.DialogCode.Accepted:
         return dlg.get_tokens()
@@ -1030,7 +1067,7 @@ class InceptionStrategyBuilderScreen(QWidget):
         dlg = VariablesManagerDialog(
             self._fields, row, all_lmv_data=all_data, theme=self._theme,
             sections=INCEPTION_SECTIONS, variable_store=var_store,
-            extra_functions=INCEPTION_EXTRA_FUNCTIONS, parent=self,
+            historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE, parent=self,
         )
         dlg.exec()
         # A variable may have been renamed/added/deleted — refresh the field

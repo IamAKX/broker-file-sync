@@ -1765,23 +1765,31 @@ def test_strategy_builder_fields_include_formula_builder_columns(qapp, controlle
 
 def test_strategy_builder_expression_editor_offers_value_before_change(qapp, controller):
     """VALUE_BEFORE_CHANGE (services.inception_value_before_change) is
-    Inception-only — appended to just this editor's "Functions" section via
-    ExpressionEditorDialog's extra_functions param, not to screens.
-    formula_editor.FUNCTION_CATALOGUE itself (which LMV's own Strategy
-    Builder also draws from, and has no engine support to resolve this)."""
-    from screens.inception_strategy_builder import INCEPTION_EXTRA_FUNCTIONS
-    from screens.formula_editor import ExpressionEditorDialog, FUNCTION_CATALOGUE
+    Inception-only — appended to just this editor's "Historic Value" section
+    via ExpressionEditorDialog's historic_value_catalogue param, not to
+    screens.formula_editor.POINT_LOOKUP_CATALOGUE itself (which LMV's own
+    Strategy Builder also draws from, and has no engine support to resolve
+    this)."""
+    from screens.inception_strategy_builder import INCEPTION_HISTORIC_VALUE_CATALOGUE
+    from screens.formula_editor import ExpressionEditorDialog, POINT_LOOKUP_CATALOGUE
 
     dlg = ExpressionEditorDialog(
         [], ["MT", "CLOSE"], [], {"MT": 1.0, "CLOSE": 1.0},
         all_lmv_data=[{"MT": 1.0, "CLOSE": 1.0}], theme=None, mode="value",
-        real_lmv_headers=["MT", "CLOSE"], sections=["Functions"],
-        extra_functions=INCEPTION_EXTRA_FUNCTIONS,
+        real_lmv_headers=["MT", "CLOSE"], sections=["Historic Value"],
+        historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE,
     )
-    names = [c["name"] for c in dlg._catalogue_for_section("Functions")]
+    names = [c["name"] for c in dlg._catalogue_for_section("Historic Value")]
     assert "VALUE_BEFORE_CHANGE" in names
+    assert "VALUE_DAYS_AGO" in names and "VALUE_ON_DATE" in names
+    # The driver-column-extreme lookups are resolved too now (services.
+    # inception_day_history.raw_extreme_specs/build_extreme, RAW_FIELDS-
+    # only on both the value and driver column) — see
+    # INCEPTION_HISTORIC_VALUE_CATALOGUE's own docstring.
+    assert "VALUE_AT_MAX_DAYS" in names and "VALUE_AT_MIN_DAYS" in names
+    assert "VALUE_AT_MAX_DATES" in names and "VALUE_AT_MIN_DATES" in names
     # Not leaked into the shared catalogue every LMV caller also draws from.
-    assert "VALUE_BEFORE_CHANGE" not in [c["name"] for c in FUNCTION_CATALOGUE]
+    assert "VALUE_BEFORE_CHANGE" not in [c["name"] for c in POINT_LOOKUP_CATALOGUE]
 
 
 def test_strategy_builder_sample_data_placeholder_when_nothing_synced(qapp, controller, monkeypatch, bars_db):

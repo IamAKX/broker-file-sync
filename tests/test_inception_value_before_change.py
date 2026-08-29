@@ -10,6 +10,13 @@ def tok_before_change(col, months):
     return {"type": "func", "value": "VALUE_BEFORE_CHANGE(", "col_arg": col, "days_arg": months}
 
 
+def tok_before_change_auto(col):
+    """The no-argument "auto" form — VALUE_BEFORE_CHANGE([col]) with no
+    months_back at all; day-granularity search (see this module's docstring
+    and services.inception_value_before_change's)."""
+    return {"type": "func", "value": "VALUE_BEFORE_CHANGE(", "col_arg": col}
+
+
 def _strategy(formula, active=True):
     return {
         "id": "s1", "name": "Test", "active": active,
@@ -70,6 +77,21 @@ def test_specs_for_strategies_scans_inactive_too():
     assert ivbc.specs_for_strategies(strategies) == [("MT", 6)]
 
 
+def test_specs_for_strategies_extracts_auto_form():
+    """No months_back at all -> a (col_name, None) spec, distinct from the
+    explicit-months (col_name, N) shape."""
+    strategies = [_strategy([tok_before_change_auto("WT")])]
+    assert ivbc.specs_for_strategies(strategies) == [("WT", None)]
+
+
+def test_specs_for_strategies_auto_and_explicit_both_kept():
+    strategies = [
+        _strategy([tok_before_change_auto("WT")]),
+        _strategy([tok_before_change("MT", 6)]),
+    ]
+    assert ivbc.specs_for_strategies(strategies) == [("WT", None), ("MT", 6)]
+
+
 # ── resolve_formula_builder ──────────────────────────────────────────────
 
 def test_resolve_formula_builder_reported_mt_example():
@@ -106,6 +128,36 @@ def test_resolve_formula_builder_no_specs_is_noop():
     assert ivbc.resolve_formula_builder([], "ABB_I", _bars(10)) == {}
 
 
+def test_resolve_formula_builder_auto_walks_daily_not_monthly():
+    """The no-months_back "auto" spec (months_back=None) should find a
+    value that changed only a few TRADING days ago, walking bar by bar
+    rather than sampling only month-ends."""
+    bars = _bars(10)
+
+    def fake_compute_for_bars(symbol, bar_slice):
+        return {"WT": 100 if len(bar_slice) >= 8 else 50}
+
+    with patch("services.inception_formula_builder_columns.compute_for_bars", side_effect=fake_compute_for_bars):
+        result = ivbc.resolve_formula_builder([("WT", None)], "ABB_I", bars)
+
+    assert result == {("WT", ("daily_before_change",)): {"ABB_I": {"First": 50}}}
+
+
+def test_resolve_formula_builder_auto_respects_cap():
+    """Nothing differs within VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS -> None,
+    even though an earlier bar (beyond the cap) really does differ."""
+    bars = _bars(20)
+
+    def fake_compute_for_bars(symbol, bar_slice):
+        return {"WT": 100 if len(bar_slice) >= 3 else 50}
+
+    with patch("services.inception_formula_builder_columns.compute_for_bars", side_effect=fake_compute_for_bars), \
+         patch.object(ivbc, "VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS", 5):
+        result = ivbc.resolve_formula_builder([("WT", None)], "ABB_I", bars)
+
+    assert result[("WT", ("daily_before_change",))]["ABB_I"]["First"] is None
+
+
 # ── resolve_group_a_b ─────────────────────────────────────────────────────
 
 def test_resolve_group_a_b_reported_style_example():
@@ -136,3 +188,74 @@ def test_resolve_group_a_b_missing_current_day_skips_symbol():
     with patch("services.inception_compute_service.range_rows", return_value={"days": []}):
         result = ivbc.resolve_group_a_b([("52WH", 6)], date(2025, 7, 29))
     assert result == {("52WH", ("months_before_change", 6)): {}}
+
+
+def test_resolve_group_a_b_auto_walks_daily_not_monthly():
+    """The no-months_back "auto" spec should find a value that changed only
+    a few days ago (2025-01-14, six days before as-of), not just whatever
+    the most recent month-end happens to be."""
+    as_of = date(2025, 1, 20)
+
+    def fake_range_rows(date_from, date_to, progress_cb=None):
+        days = []
+        d = date_from
+        while d <= date_to:
+            value = 100 if d >= date(2025, 1, 15) else 50
+            days.append({"trade_date": d.isoformat(), "stocks": [
+                {"symbol": "ABB_I", "display_name": "ABB_I", "metrics": {"WT": value}},
+            ]})
+            d += timedelta(days=1)
+        return {"days": days}
+
+    with patch("services.inception_compute_service.range_rows", side_effect=fake_range_rows):
+        result = ivbc.resolve_group_a_b([("WT", None)], as_of)
+
+    assert result == {("WT", ("daily_before_change",)): {"ABB_I": {"First": 50}}}
+
+
+def test_resolve_group_a_b_auto_respects_cap():
+    """The real change (2025-01-10, ten days back) is outside a 3-day cap
+    -> None, not 50."""
+    as_of = date(2025, 1, 20)
+
+    def fake_range_rows(date_from, date_to, progress_cb=None):
+        days = []
+        d = date_from
+        while d <= date_to:
+            value = 100 if d >= date(2025, 1, 10) else 50
+            days.append({"trade_date": d.isoformat(), "stocks": [
+                {"symbol": "ABB_I", "display_name": "ABB_I", "metrics": {"WT": value}},
+            ]})
+            d += timedelta(days=1)
+        return {"days": days}
+
+    with patch("services.inception_compute_service.range_rows", side_effect=fake_range_rows), \
+         patch.object(ivbc, "VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS", 3), \
+         patch.object(ivbc, "_DAILY_LOOKBACK_CALENDAR_DAYS", 30):
+        result = ivbc.resolve_group_a_b([("WT", None)], as_of)
+
+    assert result[("WT", ("daily_before_change",))]["ABB_I"]["First"] is None
+
+
+def test_resolve_group_a_b_auto_and_explicit_specs_combined_date_from():
+    """Mixing an "auto" spec with an explicit-months spec in one call should
+    still fetch a wide-enough date_from to cover whichever need is larger,
+    without crashing on the None entry."""
+    as_of = date(2025, 7, 29)
+
+    def fake_range_rows(date_from, date_to, progress_cb=None):
+        days = []
+        d = date_from
+        while d <= date_to:
+            days.append({"trade_date": d.isoformat(), "stocks": [
+                {"symbol": "ABB_I", "display_name": "ABB_I",
+                 "metrics": {"WT": 1, "52WH": 400 if d >= date(2025, 6, 15) else 382}},
+            ]})
+            d += timedelta(days=1)
+        return {"days": days}
+
+    with patch("services.inception_compute_service.range_rows", side_effect=fake_range_rows):
+        result = ivbc.resolve_group_a_b([("WT", None), ("52WH", 6)], as_of)
+
+    assert result[("WT", ("daily_before_change",))]["ABB_I"]["First"] is None  # WT never changes
+    assert result[("52WH", ("months_before_change", 6))]["ABB_I"]["First"] == 382

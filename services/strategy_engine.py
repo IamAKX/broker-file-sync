@@ -352,6 +352,7 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
             # aggregate functions have _ALL suffix; map to a single computed number
             fname = v.rstrip("(").upper()
             if (fname in _DAYS_AGG_BASE or fname in _POINT_LOOKUP_FUNCS
+                    or fname == "VALUE_BEFORE_CHANGE"
                     or fname in _VALUE_AT_EXTREME_FUNCS or fname in _VALUE_AT_EXTREME_DATE_FUNCS):
                 # No historic fetch happens at compile-test time (see the
                 # module docstring's "Historic (N days) aggregates"/
@@ -464,6 +465,20 @@ _VALUE_AT_EXTREME_DATE_FUNCS = {"VALUE_AT_MAX_DATES": True, "VALUE_AT_MIN_DATES"
 # Builder columns don't have an LMV-side equivalent this could resolve
 # against, so it's not offered in LMV's own Strategy Builder).
 VALUE_BEFORE_CHANGE_TAG = "months_before_change"
+
+# The no-argument form — VALUE_BEFORE_CHANGE([col]) with days_arg omitted —
+# for a field that changes on no fixed calendar schedule (e.g. weekly, or
+# irregularly): rather than sampling month-ends, this walks back TRADING
+# DAY by trading day (up to services.inception_value_before_change.
+# VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS days) and returns the first one that
+# actually differs. window is a bare (VALUE_BEFORE_CHANGE_DAILY_TAG,) 1-
+# tuple — its own tag (not VALUE_BEFORE_CHANGE_TAG) since it's a genuinely
+# different resolution (day-by-day, not month-end) that needs its own
+# day_history entries. There's only ever one cap (no per-formula tuning),
+# so every such call shares the identical bare (VALUE_BEFORE_CHANGE_DAILY_
+# TAG,) 1-tuple window — kept as a tuple (not the bare string) only for
+# shape-consistency with VALUE_BEFORE_CHANGE_TAG's own tagged window above.
+VALUE_BEFORE_CHANGE_DAILY_TAG = "daily_before_change"
 
 
 class _Compiled:
@@ -602,6 +617,13 @@ def _build_compiled(tokens: list):
                 col_name = tok.get("col_arg", "")
                 var = f"_d{len(day_specs)}"
                 day_specs.append((var, "First", col_name, (VALUE_BEFORE_CHANGE_TAG, int(days_arg))))
+                parts.append(var)
+            elif fname == "VALUE_BEFORE_CHANGE" and tok.get("col_arg") and days_arg is None:
+                # No months_back given — the "auto" day-granularity form
+                # (see VALUE_BEFORE_CHANGE_DAILY_TAG's own docstring).
+                col_name = tok.get("col_arg", "")
+                var = f"_d{len(day_specs)}"
+                day_specs.append((var, "First", col_name, (VALUE_BEFORE_CHANGE_DAILY_TAG,)))
                 parts.append(var)
             elif (fname in _VALUE_AT_EXTREME_FUNCS and tok.get("col_arg")
                   and tok.get("driver_col_arg") and days_arg is not None):
