@@ -39,6 +39,39 @@ def tok_extreme_dates(fname, col, driver_col, date_from, date_to):
             "driver_col_arg": driver_col, "date_from_arg": date_from, "date_to_arg": date_to}
 
 
+def tok_before_change(col, months=None):
+    tok = {"type": "func", "value": "VALUE_BEFORE_CHANGE(", "col_arg": col}
+    if months is not None:
+        tok["days_arg"] = months
+    return tok
+
+
+def test_raw_day_specs_excludes_value_before_change_auto_form():
+    """Regression: VALUE_BEFORE_CHANGE([HIGH]) (no months_back — the "auto"
+    form) also passes the "col_name in RAW_FIELDS" filter, but its window
+    is services.strategy_engine.VALUE_BEFORE_CHANGE_DAILY_TAG's own tagged
+    tuple, not a plain _DAYS/VALUE_ON_DATE window — build() would misread
+    the tag string as a literal target_date to scan bars for (never
+    matches) and silently produce a bogus {"First": None} entry that
+    shadows the real one services.inception_value_before_change resolves
+    separately. Must not appear in raw_day_specs at all."""
+    strategies = [_strategy([tok_before_change("HIGH")])]
+    assert idh.raw_day_specs(strategies) == []
+
+
+def test_raw_day_specs_excludes_value_before_change_months_form():
+    strategies = [_strategy([tok_before_change("HIGH", 6)])]
+    assert idh.raw_day_specs(strategies) == []
+
+
+def test_raw_day_specs_value_before_change_alongside_real_days_spec():
+    """A strategy using BOTH AVG_DAYS([HIGH], 20) and VALUE_BEFORE_CHANGE(
+    [HIGH]) in the same or different columns should keep the real spec and
+    drop only the VALUE_BEFORE_CHANGE one."""
+    strategies = [_strategy([tok_days("AVG_DAYS", "HIGH", 20), tok_before_change("HIGH")])]
+    assert idh.raw_day_specs(strategies) == [("Average", "HIGH", 20)]
+
+
 def test_raw_day_specs_picks_up_raw_field_only():
     strategies = [_strategy([tok_days("AVG_DAYS", "CLOSE", 200)])]
     specs = idh.raw_day_specs(strategies)

@@ -795,12 +795,16 @@ def test_months_back_picker_dialog_selected_n_real_class(qapp):
     of bug; this one constructs the real class."""
     from screens.formula_editor import _MonthsBackPickerDialog
     dlg = _MonthsBackPickerDialog(theme=None)
-    assert dlg._auto_check.isChecked() is True
-    assert dlg.selected_n() is None          # auto (checked) -> None
-    dlg._auto_check.setChecked(False)
+    # Unchecked by default (reported confusing the other way round: a
+    # pre-checked box read as "the number field is stuck", not "auto mode
+    # is on") — so the plain months-count form is what a fresh dialog
+    # produces unless the user explicitly opts into auto.
+    assert dlg._auto_check.isChecked() is False
     assert dlg.selected_n() == dlg._spin.value()   # unchecked -> the spin value
     dlg._spin.setValue(9)
     assert dlg.selected_n() == 9
+    dlg._auto_check.setChecked(True)
+    assert dlg.selected_n() is None          # auto (checked) -> None
 
 
 def test_parse_expression_text_value_before_change_no_arg_form():

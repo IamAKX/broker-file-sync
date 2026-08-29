@@ -134,8 +134,8 @@ _VALUE_BEFORE_CHANGE_ENTRY = {
     "description": (
         "This stock's own column value immediately before its CURRENT "
         "value last changed. months_back is OPTIONAL — leave it out (in "
-        "the picker, keep the \"Just find the previous changed value\" box "
-        "checked) for a field that changes on no fixed schedule (weekly, "
+        "the picker, check the \"Just find the previous changed value\" "
+        "box) for a field that changes on no fixed schedule (weekly, "
         "irregularly, ...): it then walks back "
         "day by day, up to about a year, and returns the first day whose "
         "value actually differs from today's — e.g. WT changed last "

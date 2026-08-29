@@ -76,7 +76,7 @@ from PySide6.QtGui import QBrush, QColor
 from api.exceptions import ApiError, NetworkError
 from components.column_filter_popup import ColumnFilterPopup
 from components.frozen_table_columns import FrozenColumns
-from screens.inception_view_by_date import _display_symbol
+from screens.inception_view_by_date import _display_symbol, _remap_to_display_symbols
 from services import (
     inception_bars_store, inception_change_highlight, inception_compute_service,
     inception_day_history, inception_formula_builder_columns, inception_sector,
@@ -186,8 +186,9 @@ class _HmvLoadWorker(QThread):
                             vbc_fb_specs, symbol, bars))
         if vbc_other_specs:
             inception_day_history.merge_into(
-                day_history, inception_value_before_change.resolve_group_a_b(
-                    vbc_other_specs, as_of_date))
+                day_history, _remap_to_display_symbols(
+                    inception_value_before_change.resolve_group_a_b(
+                        vbc_other_specs, as_of_date)))
         return day_history
 
 

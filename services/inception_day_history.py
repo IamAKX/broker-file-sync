@@ -42,7 +42,25 @@ expects from a live LMV tick's own day_history (services.strategy_engine.
 compute_day_history).
 """
 from services.inception_columns import RAW_FIELDS
-from services.strategy_engine import get_compiled
+from services.strategy_engine import (
+    VALUE_BEFORE_CHANGE_DAILY_TAG, VALUE_BEFORE_CHANGE_TAG, get_compiled,
+)
+
+# window shapes raw_day_specs/build below actually understand: a plain int
+# (_DAYS-family/VALUE_DAYS_AGO) or a (date, date) string tuple (VALUE_ON_
+# DATE). VALUE_BEFORE_CHANGE's own window is ALSO a tuple — (VALUE_BEFORE_
+# CHANGE_TAG, months_back) or the bare (VALUE_BEFORE_CHANGE_DAILY_TAG,) —
+# but resolved entirely differently (services.inception_value_before_
+# change's build_extreme-style walk, not a date/window slice of bars). A
+# VALUE_BEFORE_CHANGE reference to a raw field (e.g. VALUE_BEFORE_CHANGE(
+# [HIGH])) would otherwise ALSO pass raw_day_specs' "col_name in RAW_
+# FIELDS" filter and get handed to build(), which would misread the tag
+# string itself as a literal target_date to scan bars for (never matches
+# any real date) and silently write a bogus {"First": None} entry for the
+# correct symbol — clobbering nothing (different key shape) but shadowing
+# what should have been resolved separately, since day_history lookups
+# key on (col_name, window) and this bogus window IS the real one.
+_VALUE_BEFORE_CHANGE_TAGS = (VALUE_BEFORE_CHANGE_TAG, VALUE_BEFORE_CHANGE_DAILY_TAG)
 
 # Formula col_arg name -> services.inception_bars_store.bars_for_symbol's
 # own (lowercase) bar dict key — same mapping services.inception_compute_
@@ -82,6 +100,12 @@ def raw_day_specs(strategies: list) -> list:
                 continue
             for _, agg_key, col_name, window in compiled.day_specs:
                 if col_name not in RAW_FIELDS:
+                    continue
+                if isinstance(window, tuple) and window and window[0] in _VALUE_BEFORE_CHANGE_TAGS:
+                    # VALUE_BEFORE_CHANGE's own tagged window — resolved by
+                    # services.inception_value_before_change (raw_extreme_
+                    # specs' sibling, effectively) instead, not here. See
+                    # _VALUE_BEFORE_CHANGE_TAGS' own comment above.
                     continue
                 key = (agg_key, col_name, window)
                 if key not in seen:

@@ -1227,6 +1227,53 @@ def test_view_by_date_resolves_avg_days_on_raw_field(qapp, controller, monkeypat
     assert rows[0][idx] == 209.5
 
 
+def test_view_by_date_resolves_value_before_change_on_raw_field(qapp, controller, monkeypatch, bars_db):
+    """Regression: VALUE_BEFORE_CHANGE([HIGH]) (any raw OHLCV or Group A/B
+    column — i.e. anything resolved via services.inception_value_before_
+    change.resolve_group_a_b rather than resolve_formula_builder) used to
+    always evaluate to None here for two independent reasons: (1)
+    services.inception_day_history.raw_day_specs also picked up VALUE_
+    BEFORE_CHANGE's own tagged window since HIGH passes its "col_name in
+    RAW_FIELDS" filter, producing a bogus {"First": None} entry that
+    shadowed the real one; (2) resolve_group_a_b's own output is keyed by
+    the raw "_I"-suffixed symbol (services.inception_compute_service.
+    range_rows's own convention) while the row's own "Symbol" column is
+    display-stripped — see screens.inception_view_by_date.
+    _remap_to_display_symbols' own docstring for both."""
+    from screens.inception_view_by_date import InceptionViewByDateScreen
+    from services import inception_strategy_store
+
+    # HIGH steady at 101 for the first 9 days, jumps to 150 on the last —
+    # the "auto" (no months_back) form should find 101.
+    highs = [101] * 9 + [150]
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2026, 8, 10) + timedelta(days=i), 100, h, 99, 100)
+        for i, h in enumerate(highs)
+    ])
+    as_of = date(2026, 8, 10) + timedelta(days=len(highs) - 1)
+
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "Prev High", "active": True, "row_filter": [],
+        "columns": [{"name": "Prev High", "formula": [
+            {"type": "func", "value": "VALUE_BEFORE_CHANGE(", "col_arg": "HIGH"},
+        ]}],
+    }])
+
+    from unittest.mock import MagicMock
+    from screens import inception_view_by_date as ivd
+    fake_viewer_cls = MagicMock()
+    monkeypatch.setattr(ivd, "HistoricDataViewer", fake_viewer_cls)
+
+    screen = InceptionViewByDateScreen(controller)
+    screen._selected_date = as_of
+    screen._on_view_clicked()
+    _run_worker(qapp, screen)
+
+    headers, rows = fake_viewer_cls.call_args.args[:2]
+    idx = headers.index("Prev High")
+    assert rows[0][idx] == 101
+
+
 # ── screens: HMV ─────────────────────────────────────────────────────────
 
 def test_hmv_screen_current_range_reads_the_date_pickers(qapp, controller):

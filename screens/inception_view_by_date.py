@@ -65,6 +65,26 @@ def _display_symbol(symbol: str) -> str:
     return symbol[: -len(_CANONICAL_SUFFIX)] if symbol.endswith(_CANONICAL_SUFFIX) else symbol
 
 
+def _remap_to_display_symbols(source: dict) -> dict:
+    """Re-keys a {(col_name, window): {symbol: {...}}} dict's per-symbol
+    entries from the RAW "_I"-suffixed symbol to the DISPLAY symbol.
+    Needed for services.inception_value_before_change.resolve_group_a_b's
+    own output: it's built straight from services.inception_compute_
+    service.range_rows, whose own docstring explicitly leaves suffix-
+    stripping to "a screens-layer concern" — so its stock entries (and
+    this function's own symbol keys) come back RAW ("ABB_I"). Every row
+    lookup this feeds into (services.strategy_engine.evaluate_compiled's
+    day_history param, via row_data["Symbol"]) uses the DISPLAY symbol
+    ("ABB") instead — the same one resolve_formula_builder's own callers
+    already pass in directly (see this method's per-row loop below).
+    Without this remap, VALUE_BEFORE_CHANGE([HIGH]) (or any other Group
+    A/B or raw-field reference — anything that isn't a Formula Builder
+    code) builds a real, correct value under a symbol key no row lookup
+    can ever match, leaving the whole column silently blank."""
+    return {key: {_display_symbol(sym): vals for sym, vals in entry.items()}
+            for key, entry in source.items()}
+
+
 def _reorder_by_saved_column_order(headers: list, rows: list) -> tuple:
     """Reorders *headers* (and every row in *rows* to match) to the Config
     Editor > "Inception Column Order" tab's saved list (services.
@@ -186,8 +206,9 @@ class _SnapshotLoadWorker(QThread):
                             vbc_fb_specs, symbol, bars))
         if vbc_other_specs:
             inception_day_history.merge_into(
-                day_history, inception_value_before_change.resolve_group_a_b(
-                    vbc_other_specs, as_of_date))
+                day_history, _remap_to_display_symbols(
+                    inception_value_before_change.resolve_group_a_b(
+                        vbc_other_specs, as_of_date)))
         return day_history
 
 

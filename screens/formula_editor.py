@@ -745,8 +745,14 @@ class _MonthsBackPickerDialog(QDialog):
         lay = QVBoxLayout(self)
         lay.setSpacing(10)
 
+        # Unchecked by default — reported as confusing the other way round
+        # (checked by default): a user opening this picker for the first
+        # time sees a pre-checked box and a greyed-out "12" and reads it as
+        # "the number is stuck at 12, I can't change it" rather than "auto
+        # mode is on". Defaulting to unchecked keeps the familiar "type a
+        # number" behavior the spinbox always had; auto is one click away
+        # for anyone who wants it.
         self._auto_check = QCheckBox("Just find the previous changed value")
-        self._auto_check.setChecked(True)
         self._auto_check.toggled.connect(self._on_auto_toggled)
         lay.addWidget(self._auto_check)
 
@@ -763,7 +769,6 @@ class _MonthsBackPickerDialog(QDialog):
         self._spin.setRange(1, 120)
         self._spin.setValue(12)
         lay.addWidget(self._spin)
-        self._on_auto_toggled(True)
 
         ok = QPushButton("OK")
         ok.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1146,28 +1151,65 @@ class ExpressionEditorDialog(QDialog):
         center_lay.addWidget(self._item_list, 1)
         body_lay.addWidget(center, 1)
 
-        # Right: description
+        # Right: description — scrollable, since a long entry (e.g.
+        # VALUE_BEFORE_CHANGE's multi-paragraph description) can easily run
+        # taller than the dialog's own height; without a scroll area the
+        # text just gets clipped at the bottom with no way to read the
+        # rest (reported: the "months_back" walkthrough was cut off
+        # mid-sentence). setWidgetResizable(True) lets the inner widget
+        # size itself to its content (so short descriptions still just sit
+        # at the top, no dead scroll space) while the QScrollArea itself
+        # stays fixed to the panel's allotted height.
         right = QWidget()
         right.setFixedWidth(220)
         right.setStyleSheet(f"background:{cbd};border-left:1px solid {bd};")
-        right_lay = QVBoxLayout(right)
+        right_outer_lay = QVBoxLayout(right)
+        right_outer_lay.setContentsMargins(0, 0, 0, 0)
+        right_outer_lay.setSpacing(0)
+
+        desc_scroll = QScrollArea()
+        desc_scroll.setWidgetResizable(True)
+        desc_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        desc_scroll.setStyleSheet("background:transparent;")
+        # A word-wrapping QLabel inside setWidgetResizable(True) has no
+        # inherent width limit of its own — left alone, it reports its
+        # UNWRAPPED preferred width as its size hint, so the scroll area
+        # grows sideways to fit instead of wrapping. Disable horizontal
+        # scrolling entirely; the explicit setMaximumWidth on the labels
+        # below is what actually makes them wrap.
+        desc_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        desc_inner = QWidget()
+        desc_inner.setStyleSheet("background:transparent;")
+        right_lay = QVBoxLayout(desc_inner)
         right_lay.setContentsMargins(12, 12, 12, 12)
         right_lay.setSpacing(8)
+
+        # right's own fixed width (220) minus its layout margins (12+12)
+        # and a little slack for the panel's vertical scrollbar when one
+        # is showing — without this cap the labels below default to their
+        # unwrapped natural width (see desc_scroll's own comment above).
+        _desc_label_max_width = 220 - 24 - 12
 
         self._desc_sig = QLabel()
         self._desc_sig.setFont(QFont("Menlo,Consolas,monospace", 10))
         self._desc_sig.setStyleSheet(f"color:{acc};font-weight:bold;")
         self._desc_sig.setWordWrap(True)
+        self._desc_sig.setMaximumWidth(_desc_label_max_width)
 
         self._desc_body = QLabel()
         self._desc_body.setFont(font_scale.font(font_scale.SMALL, False))
         self._desc_body.setStyleSheet(f"color:{txts};")
         self._desc_body.setWordWrap(True)
         self._desc_body.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._desc_body.setMaximumWidth(_desc_label_max_width)
 
         right_lay.addWidget(self._desc_sig)
         right_lay.addWidget(self._desc_body)
         right_lay.addStretch()
+
+        desc_scroll.setWidget(desc_inner)
+        right_outer_lay.addWidget(desc_scroll)
         body_lay.addWidget(right)
 
         root.addWidget(body_frame, 1)
