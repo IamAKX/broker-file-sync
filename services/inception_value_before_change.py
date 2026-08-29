@@ -48,12 +48,27 @@ shape services.strategy_engine.evaluate_compiled expects from day_history
 form or the bare (VALUE_BEFORE_CHANGE_DAILY_TAG,) 1-tuple for the "auto"
 day-granularity form — see those tags' own docstrings in services.
 strategy_engine for the tagged-window convention.
+
+VALUE_BEFORE_CHANGE_N(column, n) — a separate, related function (NOT a
+third argument on VALUE_BEFORE_CHANGE itself; see services.strategy_
+engine.VALUE_BEFORE_CHANGE_N_TAG's own docstring for why): "the n-th
+distinct value found walking backward" rather than just the first. n=1 is
+the same value the "auto" VALUE_BEFORE_CHANGE([col]) form returns; n=2 is
+the value from the change before THAT one; n=3 before that; and so on.
+Always day-granularity — resolve_formula_builder_n/resolve_group_a_b_n
+below are this function's own analogues of resolve_formula_builder/
+resolve_group_a_b's "auto" branch, just continuing past the first
+difference instead of stopping there, with the SAME total
+VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS cap on the whole walk (not a bigger
+cap for a bigger n). n_specs_for_strategies is the VALUE_BEFORE_CHANGE_N
+analogue of specs_for_strategies above.
 """
 from datetime import date, timedelta
 
 from services.formula_engine import FORMULA_CODES
 from services.strategy_engine import (
-    VALUE_BEFORE_CHANGE_DAILY_TAG, VALUE_BEFORE_CHANGE_TAG, get_compiled,
+    VALUE_BEFORE_CHANGE_DAILY_TAG, VALUE_BEFORE_CHANGE_N_TAG,
+    VALUE_BEFORE_CHANGE_TAG, get_compiled,
 )
 
 # Cap for the "auto" (no months_back) day-granularity walk — trading days,
@@ -110,6 +125,34 @@ def _window_for(months_back):
     if months_back is None:
         return (VALUE_BEFORE_CHANGE_DAILY_TAG,)
     return (VALUE_BEFORE_CHANGE_TAG, months_back)
+
+
+def n_specs_for_strategies(strategies: list) -> list:
+    """[(col_name, n), ...], deduped — every VALUE_BEFORE_CHANGE_N
+    reference across *strategies*' own columns' formulas (see this
+    module's own VALUE_BEFORE_CHANGE_N section for what it means).
+    Deliberately separate from specs_for_strategies above rather than
+    folded into the same list — VALUE_BEFORE_CHANGE_N is a DIFFERENT
+    function (services.strategy_engine.VALUE_BEFORE_CHANGE_N_TAG, not
+    VALUE_BEFORE_CHANGE_TAG/VALUE_BEFORE_CHANGE_DAILY_TAG), so a shared
+    list would need an extra tag on every entry anyway; two short
+    functions read more clearly than one with a mixed-meaning return
+    shape. Same "every saved strategy, active or not" scanning
+    convention as specs_for_strategies — see its own docstring."""
+    seen: set = set()
+    out = []
+    for strat in strategies:
+        for col in strat.get("columns", []):
+            compiled = get_compiled(col.get("formula", []))
+            if compiled is None:
+                continue
+            for _, _agg_key, col_name, window in compiled.day_specs:
+                if isinstance(window, tuple) and len(window) == 2 and window[0] == VALUE_BEFORE_CHANGE_N_TAG:
+                    key = (col_name, window[1])
+                    if key not in seen:
+                        seen.add(key)
+                        out.append(key)
+    return out
 
 
 def _month_first(d: date) -> date:
@@ -204,6 +247,42 @@ def resolve_formula_builder(specs: list, symbol: str, bars: list) -> dict:
     return out
 
 
+def resolve_formula_builder_n(specs: list, symbol: str, bars: list) -> dict:
+    """*specs*: [(col_name, n), ...] — VALUE_BEFORE_CHANGE_N's own spec
+    shape (see n_specs_for_strategies), already filtered to Formula
+    Builder codes. n is 1-based: n=1 is the same value VALUE_BEFORE_
+    CHANGE([col])'s "auto" form returns (the first day walking backward
+    whose value differs from today's); n=2 is the value from the change
+    before THAT one; n=3 before that; and so on. Always day-granularity
+    (no month-boundary variant — see this module's docstring), same
+    VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS cap on how far back the WHOLE walk
+    goes regardless of n (not a per-occurrence cap — finding the 3rd
+    change still gives up at the same total distance the 1st change
+    search would)."""
+    if not specs or not bars:
+        return {}
+    from services import inception_formula_builder_columns
+
+    out: dict = {}
+    for col_name, n in specs:
+        current = inception_formula_builder_columns.compute_for_bars(symbol, bars).get(col_name)
+        found = None
+        if isinstance(current, (int, float)):
+            ref = current
+            occurrences = 0
+            oldest_idx = max(0, len(bars) - 1 - VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS)
+            for idx in range(len(bars) - 2, oldest_idx - 1, -1):
+                value = inception_formula_builder_columns.compute_for_bars(symbol, bars[:idx + 1]).get(col_name)
+                if isinstance(value, (int, float)) and value != ref:
+                    occurrences += 1
+                    ref = value
+                    if occurrences == n:
+                        found = value
+                        break
+        out[(col_name, (VALUE_BEFORE_CHANGE_N_TAG, n))] = {symbol: {"First": found}}
+    return out
+
+
 # ── Group A/B (and raw) codes ────────────────────────────────────────────────
 
 def resolve_group_a_b(specs: list, as_of_date: date, progress_cb=None) -> dict:
@@ -266,4 +345,50 @@ def resolve_group_a_b(specs: list, as_of_date: date, progress_cb=None) -> dict:
                         break
             entries[symbol] = {"First": found}
         out[(col_name, _window_for(months_back))] = entries
+    return out
+
+
+def resolve_group_a_b_n(specs: list, as_of_date: date, progress_cb=None) -> dict:
+    """*specs*: [(col_name, n), ...] — VALUE_BEFORE_CHANGE_N's own spec
+    shape (see n_specs_for_strategies), already filtered to NON-Formula-
+    Builder codes (Group A/B or raw). n is 1-based — see resolve_
+    formula_builder_n's own docstring for exactly what it means and the
+    same total-walk cap. One services.inception_compute_service.range_rows
+    call covers every symbol, same reasoning as resolve_group_a_b above."""
+    if not specs:
+        return {}
+    from services import inception_compute_service
+
+    date_from = as_of_date - timedelta(days=_DAILY_LOOKBACK_CALENDAR_DAYS)
+    range_response = inception_compute_service.range_rows(date_from, as_of_date, progress_cb=progress_cb)
+
+    by_date: dict = {}
+    for day in range_response.get("days", []):
+        trade_date = date.fromisoformat(day["trade_date"])
+        by_date[trade_date] = {s["symbol"]: s.get("metrics", {}) for s in day.get("stocks", [])}
+    sorted_dates = sorted(by_date)
+    as_of_idx = sorted_dates.index(as_of_date) if as_of_date in sorted_dates else len(sorted_dates)
+
+    out: dict = {}
+    current_by_symbol = by_date.get(as_of_date, {})
+    for col_name, n in specs:
+        entries: dict = {}
+        for symbol, metrics in current_by_symbol.items():
+            current = metrics.get(col_name)
+            if not isinstance(current, (int, float)):
+                continue
+            found = None
+            ref = current
+            occurrences = 0
+            oldest_idx = max(0, as_of_idx - VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS)
+            for j in range(as_of_idx - 1, oldest_idx - 1, -1):
+                value = by_date[sorted_dates[j]].get(symbol, {}).get(col_name)
+                if isinstance(value, (int, float)) and value != ref:
+                    occurrences += 1
+                    ref = value
+                    if occurrences == n:
+                        found = value
+                        break
+            entries[symbol] = {"First": found}
+        out[(col_name, (VALUE_BEFORE_CHANGE_N_TAG, n))] = entries
     return out

@@ -50,7 +50,7 @@ from services import (
     inception_strategy_store, inception_value_before_change,
 )
 from services.formula_engine import FORMULA_CODES
-from services.strategy_engine import apply_strategies
+from services.strategy_engine import apply_strategies, build_symbol_index, get_row_fmt_colors
 
 _FROZEN_HEADERS = ["Sector", "Symbol"]
 
@@ -180,12 +180,15 @@ class _SnapshotLoadWorker(QThread):
         vbc_specs = inception_value_before_change.specs_for_strategies(strategies)
         vbc_fb_specs = [(c, m) for c, m in vbc_specs if c in FORMULA_CODES]
         vbc_other_specs = [(c, m) for c, m in vbc_specs if c not in FORMULA_CODES]
+        vbc_n_specs = inception_value_before_change.n_specs_for_strategies(strategies)
+        vbc_n_fb_specs = [(c, n) for c, n in vbc_n_specs if c in FORMULA_CODES]
+        vbc_n_other_specs = [(c, n) for c, n in vbc_n_specs if c not in FORMULA_CODES]
 
         day_history: dict = {}
         for row in rows:
             bars = inception_bars_store.bars_for_symbol(row["symbol"], date_to=as_of_date)
             row["values"].update(inception_formula_builder_columns.compute_for_bars(row["symbol"], bars))
-            if specs or extreme_specs or vbc_fb_specs:
+            if specs or extreme_specs or vbc_fb_specs or vbc_n_fb_specs:
                 # Keyed by the DISPLAY symbol (suffix stripped), not
                 # row["symbol"] (the raw "_I" roll-series name) — that's
                 # what ends up in the "Symbol" column apply_strategies'
@@ -204,11 +207,20 @@ class _SnapshotLoadWorker(QThread):
                     inception_day_history.merge_into(
                         day_history, inception_value_before_change.resolve_formula_builder(
                             vbc_fb_specs, symbol, bars))
+                if vbc_n_fb_specs:
+                    inception_day_history.merge_into(
+                        day_history, inception_value_before_change.resolve_formula_builder_n(
+                            vbc_n_fb_specs, symbol, bars))
         if vbc_other_specs:
             inception_day_history.merge_into(
                 day_history, _remap_to_display_symbols(
                     inception_value_before_change.resolve_group_a_b(
                         vbc_other_specs, as_of_date)))
+        if vbc_n_other_specs:
+            inception_day_history.merge_into(
+                day_history, _remap_to_display_symbols(
+                    inception_value_before_change.resolve_group_a_b_n(
+                        vbc_n_other_specs, as_of_date)))
         return day_history
 
 
@@ -527,9 +539,29 @@ class InceptionViewByDateScreen(QWidget):
         # lookup would never find a match, no matter how correctly it was
         # built (see services.strategy_engine.apply_strategies' symbol_col
         # docstring).
+        base_col_count = len(headers)
         headers, table_rows = apply_strategies(strategies, headers, table_rows,
                                                day_history=day_history, include_streak_columns=False,
                                                symbol_col="Symbol")
+        # Conditional formatting (services.strategy_engine.get_row_fmt_
+        # colors) — same mechanism screens.inception_hmv's own Load path
+        # now uses (see that module's _recompute_display for the full
+        # rationale), previously never wired up here either. Computed
+        # BEFORE the column reorder below: get_row_fmt_colors reads
+        # row[base_col_count + strat_idx] to find each strategy column's
+        # OWN computed value, which only lines up with strat_col_defs'
+        # order right after apply_strategies appended them, not after
+        # they've potentially been shuffled elsewhere in the row.
+        strat_col_defs = [col for s in strategies for col in s.get("columns", [])]
+        all_dicts = [dict(zip(headers, row)) for row in table_rows]
+        agg_cache: dict = {}
+        sym_index = build_symbol_index(all_dicts)
+        fmt_colors_by_row = [
+            get_row_fmt_colors(strat_col_defs, row, base_col_count, row_dict, all_dicts,
+                               agg_cache, sym_index, day_history)
+            for row, row_dict in zip(table_rows, all_dicts)
+        ]
+
         headers, table_rows = _reorder_by_saved_column_order(headers, table_rows)
 
         # "Changed since last View" (services.inception_change_highlight) —
@@ -545,6 +577,18 @@ class InceptionViewByDateScreen(QWidget):
         cell_highlights = {
             (r, c): self._effective_highlight_color(headers[c]) for r, c in changed
         }
+        # Conditional formatting wins over the "changed" amber highlight
+        # for the same cell (a color the user deliberately configured is
+        # more informative than "this happened to differ from last View")
+        # — fmt_colors_by_row stayed row-index-aligned across the reorder
+        # (which only permutes COLUMNS, not rows); target_column names are
+        # resolved against the now-reordered headers.
+        col_index_by_name = {h: i for i, h in enumerate(headers)}
+        for r, colors in enumerate(fmt_colors_by_row):
+            for target_name, color in colors.items():
+                c = col_index_by_name.get(target_name)
+                if c is not None:
+                    cell_highlights[(r, c)] = color
         self._previous_headers = list(headers)
         self._previous_data = [list(row) for row in table_rows]
 

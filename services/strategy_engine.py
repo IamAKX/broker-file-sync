@@ -352,7 +352,7 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
             # aggregate functions have _ALL suffix; map to a single computed number
             fname = v.rstrip("(").upper()
             if (fname in _DAYS_AGG_BASE or fname in _POINT_LOOKUP_FUNCS
-                    or fname == "VALUE_BEFORE_CHANGE"
+                    or fname in ("VALUE_BEFORE_CHANGE", "VALUE_BEFORE_CHANGE_N")
                     or fname in _VALUE_AT_EXTREME_FUNCS or fname in _VALUE_AT_EXTREME_DATE_FUNCS):
                 # No historic fetch happens at compile-test time (see the
                 # module docstring's "Historic (N days) aggregates"/
@@ -479,6 +479,22 @@ VALUE_BEFORE_CHANGE_TAG = "months_before_change"
 # TAG,) 1-tuple window — kept as a tuple (not the bare string) only for
 # shape-consistency with VALUE_BEFORE_CHANGE_TAG's own tagged window above.
 VALUE_BEFORE_CHANGE_DAILY_TAG = "daily_before_change"
+
+# VALUE_BEFORE_CHANGE_N(column, n) — a DIFFERENT function from VALUE_BEFORE_
+# CHANGE above, not a third argument bolted onto it: "n" here means "the
+# n-th distinct value found walking backward" (n=1 is the same value
+# VALUE_BEFORE_CHANGE([col])'s auto form returns; n=2 is the value before
+# THAT change; n=3 before that; ...), not a months/days count — reusing
+# VALUE_BEFORE_CHANGE's own (column, N) shape for this would make a typed
+# formula genuinely ambiguous (is the N months back, or the N-th change?).
+# Always day-granularity (no month-boundary variant — see services.
+# inception_value_before_change's module docstring for why: a field with
+# an irregular change cadence is exactly the case an occurrence count is
+# useful for, and month-sampling would miss changes between month-ends
+# the same way VALUE_BEFORE_CHANGE's own months_back form always has).
+# window is a (VALUE_BEFORE_CHANGE_N_TAG, n) tuple, same tagging
+# convention as the two tags above.
+VALUE_BEFORE_CHANGE_N_TAG = "nth_before_change"
 
 
 class _Compiled:
@@ -624,6 +640,14 @@ def _build_compiled(tokens: list):
                 col_name = tok.get("col_arg", "")
                 var = f"_d{len(day_specs)}"
                 day_specs.append((var, "First", col_name, (VALUE_BEFORE_CHANGE_DAILY_TAG,)))
+                parts.append(var)
+            elif fname == "VALUE_BEFORE_CHANGE_N" and tok.get("col_arg") and days_arg is not None:
+                # days_arg reused as "n" here (see VALUE_BEFORE_CHANGE_N_TAG's
+                # own docstring — a DIFFERENT function from VALUE_BEFORE_
+                # CHANGE, not a shared argument slot).
+                col_name = tok.get("col_arg", "")
+                var = f"_d{len(day_specs)}"
+                day_specs.append((var, "First", col_name, (VALUE_BEFORE_CHANGE_N_TAG, int(days_arg))))
                 parts.append(var)
             elif (fname in _VALUE_AT_EXTREME_FUNCS and tok.get("col_arg")
                   and tok.get("driver_col_arg") and days_arg is not None):

@@ -816,6 +816,71 @@ def test_parse_expression_text_value_before_change_no_arg_form():
     assert tokens == [{"type": "func", "value": "VALUE_BEFORE_CHANGE(", "col_arg": "WT"}]
 
 
+def test_parse_expression_text_value_before_change_n():
+    """VALUE_BEFORE_CHANGE_N([WT], 2) — a separate function, always
+    requires the (column, n) form (no bare-column "auto" fallback the
+    way VALUE_BEFORE_CHANGE itself gets)."""
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_BEFORE_CHANGE_N([WT], 2)")
+    assert tokens == [{"type": "func", "value": "VALUE_BEFORE_CHANGE_N(", "col_arg": "WT", "days_arg": 2}]
+
+
+def test_parse_expression_text_value_before_change_n_requires_arg():
+    """A bare VALUE_BEFORE_CHANGE_N([WT]) with no n is NOT the recognized
+    (column, n) shape — unlike VALUE_BEFORE_CHANGE, there's no "auto"
+    meaning for a missing n here. Same fallback every other days-
+    requiring function (AVG_DAYS([High]) with no days, etc.) already
+    gets: parses as a bare func-open token plus separate col/paren
+    tokens rather than raising, since the parser can't yet know this
+    text is "missing an argument" vs. "a function with no args at all"."""
+    from screens.formula_editor import parse_expression_text
+    tokens = parse_expression_text("VALUE_BEFORE_CHANGE_N([WT])")
+    assert tokens == [
+        {"type": "func", "value": "VALUE_BEFORE_CHANGE_N("},
+        {"type": "col", "value": "WT"},
+        {"type": "paren", "value": ")"},
+    ]
+
+
+def test_changes_ago_picker_inserts_full_call_text(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    from PySide6.QtWidgets import QDialog
+
+    dlg = ExpressionEditorDialog([], ["WT"], [], {"WT": 400.0})
+
+    class _FakeColDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_column(self): return "WT"
+
+    class _FakeNDlg:
+        def __init__(self, *a, **k): pass
+        def exec(self): return QDialog.DialogCode.Accepted
+        def selected_n(self): return 2
+
+    import screens.formula_editor as mod
+    orig_col, orig_n = mod._ColumnPickerDialog, mod._ChangesAgoPickerDialog
+    mod._ColumnPickerDialog = _FakeColDlg
+    mod._ChangesAgoPickerDialog = _FakeNDlg
+    try:
+        dlg._open_point_lookup_picker("VALUE_BEFORE_CHANGE_N", "changes_ago")
+    finally:
+        mod._ColumnPickerDialog = orig_col
+        mod._ChangesAgoPickerDialog = orig_n
+
+    assert dlg._preview_edit.toPlainText() == "VALUE_BEFORE_CHANGE_N([WT], 2)"
+
+
+def test_changes_ago_picker_dialog_real_class(qapp):
+    """Exercises the REAL _ChangesAgoPickerDialog (not mocked) — default
+    n=1, and setValue actually changes what selected_n() returns."""
+    from screens.formula_editor import _ChangesAgoPickerDialog
+    dlg = _ChangesAgoPickerDialog(theme=None)
+    assert dlg.selected_n() == 1
+    dlg._spin.setValue(3)
+    assert dlg.selected_n() == 3
+
+
 def test_on_date_picker_inserts_full_call_text(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     from PySide6.QtWidgets import QDialog

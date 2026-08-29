@@ -1158,6 +1158,44 @@ def test_view_by_date_highlights_cells_changed_since_last_view(qapp, controller,
     assert highlights.get((0, close_idx)) == "#ff0000"
 
 
+def test_view_by_date_applies_conditional_formatting(qapp, controller, monkeypatch, bars_db):
+    """Same fix as screens.inception_hmv's own (see that module's test of
+    the identical name) — a strategy column's fmt_rules were stored but
+    never applied here either. Piggybacks on HistoricDataViewer's existing
+    generic cell_highlights mechanism rather than needing its own."""
+    from screens.inception_view_by_date import InceptionViewByDateScreen
+    from services import inception_strategy_store
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+
+    from unittest.mock import MagicMock
+    from screens import inception_view_by_date as ivd
+    fake_viewer_cls = MagicMock()
+    monkeypatch.setattr(ivd, "HistoricDataViewer", fake_viewer_cls)
+
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "QT Buy", "active": True, "row_filter": [],
+        "columns": [{
+            "name": "Signal",
+            "formula": [{"type": "col", "value": "CLOSE"}],
+            "fmt_rules": [{
+                "condition": [{"type": "self"}, {"type": "op", "value": ">"}, {"type": "num", "value": "0"}],
+                "color": "#ff0000", "target_column": None,
+            }],
+        }],
+    }])
+
+    screen = InceptionViewByDateScreen(controller)
+    screen._selected_date = date(2026, 8, 18)
+    screen._on_view_clicked()
+    _run_worker(qapp, screen)
+
+    headers = fake_viewer_cls.call_args.args[0]
+    signal_idx = headers.index("Signal")
+    highlights = fake_viewer_cls.call_args.kwargs["cell_highlights"]
+    assert highlights.get((0, signal_idx)) == "#ff0000"
+
+
 def test_view_by_date_includes_formula_builder_columns(qapp, controller, monkeypatch, bars_db):
     """MT/MB and friends (services.inception_formula_builder_columns) used
     to be HMV-only — merged in here too now (_SnapshotLoadWorker, same
@@ -1343,6 +1381,79 @@ def test_hmv_screen_applies_active_strategies_locally(qapp, controller, monkeypa
     _run_worker(qapp, screen)
     assert "Day Range" in screen._headers
     assert screen._data[0][screen._headers.index("Day Range")] == 10.0
+
+
+def test_hmv_screen_applies_conditional_formatting(qapp, controller, monkeypatch, bars_db):
+    """Regression: a strategy column's fmt_rules (screens.inception_
+    strategy_builder's _InceptionColumnEditorDialog — "Conditional
+    Formatting") were stored but never actually applied anywhere in HMV's
+    own render (services.strategy_engine.get_row_fmt_colors was never
+    called at all here) — reported as "I set a rule on my strategy but it
+    isn't reflected [in the grid]"."""
+    from screens.inception_hmv import InceptionHmvScreen
+    from services import inception_strategy_store
+    from PySide6.QtCore import QDate
+    from PySide6.QtGui import QColor
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2026, 1, 1))
+    screen._to_date.setDate(QDate(2026, 8, 18))
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "QT Buy", "active": True, "row_filter": [],
+        "columns": [{
+            "name": "Signal",
+            "formula": [{"type": "col", "value": "CLOSE"}],
+            "fmt_rules": [{
+                "condition": [{"type": "self"}, {"type": "op", "value": ">"}, {"type": "num", "value": "0"}],
+                "color": "#ff0000", "target_column": None,
+            }],
+        }],
+    }])
+
+    screen._on_load()
+    _run_worker(qapp, screen)
+
+    signal_idx = screen._headers.index("Signal")
+    item = screen._table.item(0, signal_idx)
+    assert item.background().color() == QColor("#ff0000")
+
+
+def test_hmv_screen_conditional_formatting_can_target_another_column(qapp, controller, monkeypatch, bars_db):
+    """A fmt_rule's target_column paints a DIFFERENT column than the one
+    whose formula/condition drives it (services.strategy_engine.
+    get_row_fmt_colors' own docstring) — e.g. a "Signal" column's rule
+    coloring the raw CLOSE cell instead of itself."""
+    from screens.inception_hmv import InceptionHmvScreen
+    from services import inception_strategy_store
+    from PySide6.QtCore import QDate
+    from PySide6.QtGui import QColor
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2026, 1, 1))
+    screen._to_date.setDate(QDate(2026, 8, 18))
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{
+        "id": "s1", "name": "QT Buy", "active": True, "row_filter": [],
+        "columns": [{
+            "name": "Signal",
+            "formula": [{"type": "col", "value": "CLOSE"}],
+            "fmt_rules": [{
+                "condition": [{"type": "self"}, {"type": "op", "value": ">"}, {"type": "num", "value": "0"}],
+                "color": "#00ff00", "target_column": "CLOSE",
+            }],
+        }],
+    }])
+
+    screen._on_load()
+    _run_worker(qapp, screen)
+
+    close_idx = screen._headers.index("CLOSE")
+    signal_idx = screen._headers.index("Signal")
+    assert screen._table.item(0, close_idx).background().color() == QColor("#00ff00")
+    # The owning "Signal" cell itself keeps its normal (non-highlight)
+    # background — the rule redirected its color elsewhere.
+    assert screen._table.item(0, signal_idx).background().color() != QColor("#00ff00")
 
 
 def test_hmv_screen_does_not_add_row_filter_streak_columns(qapp, controller, monkeypatch, bars_db):

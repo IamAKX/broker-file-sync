@@ -17,6 +17,12 @@ def tok_before_change_auto(col):
     return {"type": "func", "value": "VALUE_BEFORE_CHANGE(", "col_arg": col}
 
 
+def tok_before_change_n(col, n):
+    """VALUE_BEFORE_CHANGE_N([col], n) — a separate function from
+    VALUE_BEFORE_CHANGE (n = which occurrence back, not months_back)."""
+    return {"type": "func", "value": "VALUE_BEFORE_CHANGE_N(", "col_arg": col, "days_arg": n}
+
+
 def _strategy(formula, active=True):
     return {
         "id": "s1", "name": "Test", "active": active,
@@ -259,3 +265,89 @@ def test_resolve_group_a_b_auto_and_explicit_specs_combined_date_from():
 
     assert result[("WT", ("daily_before_change",))]["ABB_I"]["First"] is None  # WT never changes
     assert result[("52WH", ("months_before_change", 6))]["ABB_I"]["First"] == 382
+
+
+# ── n_specs_for_strategies / resolve_formula_builder_n / resolve_group_a_b_n
+# (VALUE_BEFORE_CHANGE_N — "the n-th distinct value back") ──────────────────
+
+def test_n_specs_for_strategies_extracts_value_before_change_n():
+    strategies = [_strategy([tok_before_change_n("WT", 2)])]
+    assert ivbc.n_specs_for_strategies(strategies) == [("WT", 2)]
+
+
+def test_n_specs_for_strategies_ignores_plain_value_before_change():
+    """VALUE_BEFORE_CHANGE([WT], 6) is a DIFFERENT function/tag — must not
+    show up in n_specs_for_strategies."""
+    strategies = [_strategy([tok_before_change("WT", 6)])]
+    assert ivbc.n_specs_for_strategies(strategies) == []
+
+
+def test_n_specs_for_strategies_deduped():
+    strategies = [
+        _strategy([tok_before_change_n("WT", 2)]),
+        _strategy([tok_before_change_n("WT", 2)]),
+    ]
+    assert ivbc.n_specs_for_strategies(strategies) == [("WT", 2)]
+
+
+def test_resolve_formula_builder_n_walks_multiple_distinct_changes():
+    """MT: 400 for the last 5 bars, 390 for the 5 before that, 380 before
+    that -> n=1 finds 390 (the change right before today), n=2 finds 380
+    (the change before that one), n=3 finds nothing (only 2 real changes
+    exist)."""
+    bars = _bars(30)
+
+    def fake_compute_for_bars(symbol, bar_slice):
+        if not bar_slice:
+            return {}
+        idx = len(bar_slice) - 1
+        if idx >= 25:
+            return {"MT": 400}
+        elif idx >= 20:
+            return {"MT": 390}
+        else:
+            return {"MT": 380}
+
+    with patch("services.inception_formula_builder_columns.compute_for_bars", side_effect=fake_compute_for_bars):
+        r1 = ivbc.resolve_formula_builder_n([("MT", 1)], "ABB_I", bars)
+        r2 = ivbc.resolve_formula_builder_n([("MT", 2)], "ABB_I", bars)
+        r3 = ivbc.resolve_formula_builder_n([("MT", 3)], "ABB_I", bars)
+
+    assert r1 == {("MT", ("nth_before_change", 1)): {"ABB_I": {"First": 390}}}
+    assert r2 == {("MT", ("nth_before_change", 2)): {"ABB_I": {"First": 380}}}
+    assert r3[("MT", ("nth_before_change", 3))]["ABB_I"]["First"] is None
+
+
+def test_resolve_formula_builder_n_no_specs_or_bars_is_noop():
+    assert ivbc.resolve_formula_builder_n([], "ABB_I", _bars(10)) == {}
+    assert ivbc.resolve_formula_builder_n([("MT", 1)], "ABB_I", []) == {}
+
+
+def test_resolve_group_a_b_n_walks_multiple_distinct_changes():
+    as_of = date(2025, 1, 30)
+
+    def fake_range_rows(date_from, date_to, progress_cb=None):
+        days = []
+        d = date_from
+        while d <= date_to:
+            if d >= as_of - timedelta(days=4):
+                v = 400
+            elif d >= as_of - timedelta(days=9):
+                v = 390
+            else:
+                v = 380
+            days.append({"trade_date": d.isoformat(), "stocks": [
+                {"symbol": "ABB_I", "display_name": "ABB_I", "metrics": {"52WH": v}},
+            ]})
+            d += timedelta(days=1)
+        return {"days": days}
+
+    with patch("services.inception_compute_service.range_rows", side_effect=fake_range_rows):
+        result = ivbc.resolve_group_a_b_n([("52WH", 1), ("52WH", 2)], as_of)
+
+    assert result[("52WH", ("nth_before_change", 1))]["ABB_I"]["First"] == 390
+    assert result[("52WH", ("nth_before_change", 2))]["ABB_I"]["First"] == 380
+
+
+def test_resolve_group_a_b_n_no_specs_is_noop():
+    assert ivbc.resolve_group_a_b_n([], date(2025, 7, 29)) == {}

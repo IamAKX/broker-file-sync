@@ -303,6 +303,12 @@ _ON_DATE_FUNCS = {"value_on_date"}
 # services/strategy_engine.py's VALUE_BEFORE_CHANGE_TAG docstring.
 # Inception-only (services.inception_value_before_change).
 _VALUE_BEFORE_CHANGE_FUNCS = {"value_before_change"}
+# VALUE_BEFORE_CHANGE_N(column, n) — a DIFFERENT function from VALUE_
+# BEFORE_CHANGE above (n means "the n-th distinct value found walking
+# backward", not months_back or an optional arg — always required, no
+# no-arg "auto" fallback the way _VALUE_BEFORE_CHANGE_FUNCS gets below).
+# See services/strategy_engine.py's VALUE_BEFORE_CHANGE_N_TAG docstring.
+_VALUE_BEFORE_CHANGE_N_FUNCS = {"value_before_change_n"}
 # Historic value at a window extreme — TWO column args (the value to fetch,
 # then the driver column that decides which of the last N days wins) plus a
 # days count. See services/strategy_engine.py's "Historic value at a window
@@ -392,12 +398,14 @@ def _split_field_of(inner: str, known_headers=None):
 
 def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
     """For SUM_ALL(...)-style aggregates, try to read the single column
-    argument up to the matching ')'; for AVG_DAYS(...)/VALUE_DAYS_AGO(...)-
-    style functions, the column argument plus a required ", <days>"; for
-    VALUE_BEFORE_CHANGE(...), the column argument plus EITHER a ", <days>"
-    (months_back) OR nothing at all — VALUE_BEFORE_CHANGE([col]) is the
-    "auto" day-granularity form, see services.inception_value_before_change;
-    for VALUE_ON_DATE(...), the column argument plus a required
+    argument up to the matching ')'; for AVG_DAYS(...)/VALUE_DAYS_AGO(...)/
+    VALUE_BEFORE_CHANGE_N(...)-style functions, the column argument plus a
+    required ", <days>" (N means "n-th distinct value back" for VALUE_
+    BEFORE_CHANGE_N, not days); for VALUE_BEFORE_CHANGE(...), the column
+    argument plus EITHER a ", <days>" (months_back) OR nothing at all —
+    VALUE_BEFORE_CHANGE([col]) is the "auto" day-granularity form, see
+    services.inception_value_before_change; for VALUE_ON_DATE(...), the
+    column argument plus a required
     ", <YYYY-MM-DD>"; for VALUE_AT_MAX_DAYS(...)/VALUE_AT_MIN_DAYS(...), TWO
     column arguments plus a required ", <days>"; for VALUE_AT_MAX_DATES(...)/
     VALUE_AT_MIN_DATES(...), TWO column arguments plus a required
@@ -414,7 +422,8 @@ def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
         col = next(g for g in m.groups() if g is not None)
         return m.end(), col, {}
     if (func_name_lower in _DAYS_AGG_FUNCS or func_name_lower in _POINT_DAYS_AGO_FUNCS
-            or func_name_lower in _VALUE_BEFORE_CHANGE_FUNCS):
+            or func_name_lower in _VALUE_BEFORE_CHANGE_FUNCS
+            or func_name_lower in _VALUE_BEFORE_CHANGE_N_FUNCS):
         m = _DAYS_AGG_ARG_RE.match(text, start)
         if m:
             *col_groups, days = m.groups()
@@ -784,6 +793,46 @@ class _MonthsBackPickerDialog(QDialog):
         chosen months-back count."""
         if self._auto_check.isChecked():
             return None
+        return self._spin.value()
+
+
+class _ChangesAgoPickerDialog(QDialog):
+    """Step 2 of building VALUE_BEFORE_CHANGE_N (screens.
+    inception_strategy_builder, Inception-only): which occurrence, walking
+    backward, to return — 1 = the most recent distinct value (same as
+    VALUE_BEFORE_CHANGE([col])'s "auto" form), 2 = the value from the
+    change before that, and so on. A DIFFERENT question from _MonthsBack
+    PickerDialog's "how far back" — this is always day-granularity, no
+    month-boundary variant, so there's nothing to toggle here."""
+
+    def __init__(self, theme, parent=None):
+        super().__init__(parent)
+        self._theme = theme
+        self.setWindowTitle("VALUE_BEFORE_CHANGE_N — Which Previous Change")
+        self.setFixedWidth(320)
+        bg, txt = _t(theme, "background"), _t(theme, "text_primary")
+        self.setStyleSheet(
+            f"QDialog{{background:{bg};color:{txt};}}QWidget{{background:{bg};color:{txt};}}"
+            f"QLabel{{background:transparent;}}"
+        )
+        lay = QVBoxLayout(self)
+        lay.setSpacing(10)
+        label = QLabel(
+            "Which previous change? 1 = the most recent different value, "
+            "2 = the one before that, and so on:"
+        )
+        label.setWordWrap(True)
+        lay.addWidget(label)
+        self._spin = QSpinBox()
+        self._spin.setRange(1, 50)
+        self._spin.setValue(1)
+        lay.addWidget(self._spin)
+        ok = QPushButton("OK")
+        ok.setCursor(Qt.CursorShape.PointingHandCursor)
+        ok.clicked.connect(self.accept)
+        lay.addWidget(ok)
+
+    def selected_n(self) -> int:
         return self._spin.value()
 
 
@@ -1453,9 +1502,9 @@ class ExpressionEditorDialog(QDialog):
         VALUE_AT_MAX_DATES([High], [CWTO], 2026-08-10, 2026-08-14), instead
         of the plain "insert bare function name, fill in the rest by hand"
         flow every other catalogue entry uses. *picker* is "days_ago",
-        "on_date", "extreme_days", "extreme_dates", or "months_back" (see
-        POINT_LOOKUP_CATALOGUE / screens.inception_strategy_builder's
-        INCEPTION_HISTORIC_VALUE_CATALOGUE)."""
+        "on_date", "extreme_days", "extreme_dates", "months_back", or
+        "changes_ago" (see POINT_LOOKUP_CATALOGUE / screens.
+        inception_strategy_builder's INCEPTION_HISTORIC_VALUE_CATALOGUE)."""
         columns = self._lmv_headers + self._strategy_col_headers
         if not columns:
             QMessageBox.information(
@@ -1485,6 +1534,11 @@ class ExpressionEditorDialog(QDialog):
                 self._insert_at_cursor(f"{fname}([{column}])")
             else:
                 self._insert_at_cursor(f"{fname}([{column}], {n})")
+        elif picker == "changes_ago":
+            n_dlg = _ChangesAgoPickerDialog(self._theme, self)
+            if n_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            self._insert_at_cursor(f"{fname}([{column}], {n_dlg.selected_n()})")
         elif picker == "extreme_days":
             # Same full column list for the driver — any raw sheet column or
             # this/another strategy's own computed column is fair game (see

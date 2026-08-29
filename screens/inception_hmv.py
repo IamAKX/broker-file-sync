@@ -83,7 +83,7 @@ from services import (
     inception_strategy_store, inception_value_before_change,
 )
 from services.formula_engine import FORMULA_CODES
-from services.strategy_engine import apply_strategies
+from services.strategy_engine import apply_strategies, build_symbol_index, get_row_fmt_colors
 
 _FROZEN_HEADERS = ["Sector", "Symbol"]
 
@@ -133,7 +133,8 @@ class _HmvLoadWorker(QThread):
         200); build_extreme() for VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS/
         VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES) and services.
         inception_value_before_change (VALUE_BEFORE_CHANGE — "the value
-        this column had before it last changed"), all reusing the SAME
+        this column had before it last changed" — and its sibling VALUE_
+        BEFORE_CHANGE_N, "the n-th such value back"), all reusing the SAME
         per-symbol bars fetched for the Formula Builder merge rather than
         querying them again. Combined via inception_day_history.merge_into
         (not a bare dict.update) so a formula referencing both a plain
@@ -160,12 +161,15 @@ class _HmvLoadWorker(QThread):
         vbc_specs = inception_value_before_change.specs_for_strategies(strategies)
         vbc_fb_specs = [(c, m) for c, m in vbc_specs if c in FORMULA_CODES]
         vbc_other_specs = [(c, m) for c, m in vbc_specs if c not in FORMULA_CODES]
+        vbc_n_specs = inception_value_before_change.n_specs_for_strategies(strategies)
+        vbc_n_fb_specs = [(c, n) for c, n in vbc_n_specs if c in FORMULA_CODES]
+        vbc_n_other_specs = [(c, n) for c, n in vbc_n_specs if c not in FORMULA_CODES]
 
         day_history: dict = {}
         for row in rows:
             bars = inception_bars_store.bars_for_symbol(row["symbol"], date_to=as_of_date)
             row["values"].update(inception_formula_builder_columns.compute_for_bars(row["symbol"], bars))
-            if specs or extreme_specs or vbc_fb_specs:
+            if specs or extreme_specs or vbc_fb_specs or vbc_n_fb_specs:
                 # Keyed by the DISPLAY symbol (suffix stripped), not
                 # row["symbol"] (the raw "_I" roll-series name) — that's
                 # what ends up in the "Symbol" column apply_strategies'
@@ -184,11 +188,20 @@ class _HmvLoadWorker(QThread):
                     inception_day_history.merge_into(
                         day_history, inception_value_before_change.resolve_formula_builder(
                             vbc_fb_specs, symbol, bars))
+                if vbc_n_fb_specs:
+                    inception_day_history.merge_into(
+                        day_history, inception_value_before_change.resolve_formula_builder_n(
+                            vbc_n_fb_specs, symbol, bars))
         if vbc_other_specs:
             inception_day_history.merge_into(
                 day_history, _remap_to_display_symbols(
                     inception_value_before_change.resolve_group_a_b(
                         vbc_other_specs, as_of_date)))
+        if vbc_n_other_specs:
+            inception_day_history.merge_into(
+                day_history, _remap_to_display_symbols(
+                    inception_value_before_change.resolve_group_a_b_n(
+                        vbc_n_other_specs, as_of_date)))
         return day_history
 
 
@@ -201,6 +214,7 @@ class InceptionHmvScreen(QWidget):
         self._raw_headers: list = []   # headers before strategy columns were appended
         self._raw_data: list = []      # rows before strategy columns were appended
         self._day_history: dict = {}   # see services.inception_day_history / _recompute_display
+        self._fmt_colors: list = []    # [{target_column: color}, ...] per row — see _recompute_display
         self._strategies: list = []
         self._visible_cols: set = set()
         self._worker: _HmvLoadWorker | None = None
@@ -565,9 +579,33 @@ class InceptionHmvScreen(QWidget):
         # symbol-keyed lookup would never find a match, no matter how
         # correctly it was built (see services.strategy_engine.
         # apply_strategies' symbol_col docstring).
+        base_col_count = len(self._raw_headers)
         headers, data = apply_strategies(self._strategies, self._raw_headers, self._raw_data,
                                           day_history=self._day_history, include_streak_columns=False,
                                           symbol_col="Symbol")
+        # Conditional formatting (services.strategy_engine.get_row_fmt_
+        # colors) — same mechanism/shape screens.live_viewer's LMV grid
+        # already uses, previously never wired up here at all (a strategy
+        # column's fmt_rules were stored — see screens.inception_strategy_
+        # builder's _InceptionColumnEditorDialog — but nothing ever read
+        # them back). strat_col_defs must be built the identical way
+        # apply_strategies() built its OWN internal active-strategy list
+        # (order and membership both matter: get_row_fmt_colors reads
+        # row[base_col_count + strat_idx] to get each column's own
+        # computed value, so a mismatched order reads the wrong column's
+        # value against the wrong column's rules). One agg_cache/sym_index
+        # per render pass, not per row — same reasoning live_viewer's own
+        # render pass comment gives for building them once.
+        active_strategies = [s for s in self._strategies if s.get("active")]
+        strat_col_defs = [col for s in active_strategies for col in s.get("columns", [])]
+        all_dicts = [dict(zip(headers, row)) for row in data]
+        agg_cache: dict = {}
+        sym_index = build_symbol_index(all_dicts)
+        self._fmt_colors = [
+            get_row_fmt_colors(strat_col_defs, row, base_col_count, row_dict, all_dicts,
+                               agg_cache, sym_index, self._day_history)
+            for row, row_dict in zip(data, all_dicts)
+        ]
         # Keep any strategy-appended column (beyond the raw/base set)
         # visible by default, without undoing a column-visibility choice the
         # user already made for existing columns (same top-up-not-reset rule
@@ -609,11 +647,20 @@ class InceptionHmvScreen(QWidget):
         self._table.setHorizontalHeaderLabels(self._headers)
         self._table.setRowCount(len(self._data))
         for r, row in enumerate(self._data):
+            row_colors = self._fmt_colors[r] if r < len(self._fmt_colors) else {}
             for c, val in enumerate(row):
                 item = QTableWidgetItem(self._fmt_cell(val))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
-                if (r, c) in self._changed_cells:
-                    from screens.live_viewer import _contrasting_text
+                from screens.live_viewer import _contrasting_text
+                # Conditional formatting (a color the user deliberately
+                # configured) wins over the "changed since last Load" amber
+                # highlight when a cell qualifies for both — more
+                # informative than "this happened to differ from before".
+                cell_color = row_colors.get(self._headers[c])
+                if cell_color:
+                    item.setBackground(QBrush(QColor(cell_color)))
+                    item.setForeground(QBrush(QColor(_contrasting_text(cell_color))))
+                elif (r, c) in self._changed_cells:
                     fill = self._effective_highlight_color(self._headers[c])
                     item.setBackground(QBrush(QColor(fill)))
                     item.setForeground(QBrush(QColor(_contrasting_text(fill))))

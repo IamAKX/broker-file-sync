@@ -43,7 +43,8 @@ compute_day_history).
 """
 from services.inception_columns import RAW_FIELDS
 from services.strategy_engine import (
-    VALUE_BEFORE_CHANGE_DAILY_TAG, VALUE_BEFORE_CHANGE_TAG, get_compiled,
+    VALUE_BEFORE_CHANGE_DAILY_TAG, VALUE_BEFORE_CHANGE_N_TAG,
+    VALUE_BEFORE_CHANGE_TAG, get_compiled,
 )
 
 # window shapes raw_day_specs/build below actually understand: a plain int
@@ -60,7 +61,9 @@ from services.strategy_engine import (
 # correct symbol — clobbering nothing (different key shape) but shadowing
 # what should have been resolved separately, since day_history lookups
 # key on (col_name, window) and this bogus window IS the real one.
-_VALUE_BEFORE_CHANGE_TAGS = (VALUE_BEFORE_CHANGE_TAG, VALUE_BEFORE_CHANGE_DAILY_TAG)
+_VALUE_BEFORE_CHANGE_TAGS = (
+    VALUE_BEFORE_CHANGE_TAG, VALUE_BEFORE_CHANGE_DAILY_TAG, VALUE_BEFORE_CHANGE_N_TAG,
+)
 
 # Formula col_arg name -> services.inception_bars_store.bars_for_symbol's
 # own (lowercase) bar dict key — same mapping services.inception_compute_

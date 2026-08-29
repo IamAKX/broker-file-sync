@@ -18,8 +18,10 @@ VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS/VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES
 same as the "Functions" section's own AVG_DAYS/etc — the _AT_ four
 additionally need their DRIVER column to be raw too) plus Inception-only
 VALUE_BEFORE_CHANGE (services.inception_value_before_change — "the value
-this column had before its current value last changed"); `variable_store`
-points the Variables tab/"Save as Variable" at
+this column had before its current value last changed") and its sibling
+VALUE_BEFORE_CHANGE_N ("the n-th such value back", n=1 being the same as
+VALUE_BEFORE_CHANGE's own auto form); `variable_store` points the
+Variables tab/"Save as Variable" at
 services.inception_formula_variable_store instead of LMV's.
 
 Backed by its own store (services.inception_strategy_store) and its own
@@ -152,9 +154,36 @@ _VALUE_BEFORE_CHANGE_ENTRY = {
     "token": {"type": "func", "value": "VALUE_BEFORE_CHANGE(", "needs_point_picker": "months_back"},
 }
 
+# VALUE_BEFORE_CHANGE_N — a separate function from VALUE_BEFORE_CHANGE
+# above (not a third argument bolted onto it; see services.strategy_engine.
+# VALUE_BEFORE_CHANGE_N_TAG's own docstring for why that would be
+# ambiguous in typed text). needs_point_picker="changes_ago" gets it the
+# same column-then-N two-step flow, via _ChangesAgoPickerDialog instead of
+# _MonthsBackPickerDialog.
+_VALUE_BEFORE_CHANGE_N_ENTRY = {
+    "name": "VALUE_BEFORE_CHANGE_N",
+    "signature": "VALUE_BEFORE_CHANGE_N(column, n)",
+    "description": (
+        "The n-th distinct value this column has had, walking backward — "
+        "not just the value right before today's changed (that's what "
+        "VALUE_BEFORE_CHANGE([col]) already gives you), but further back "
+        "through EARLIER changes too. n=1 is the same as VALUE_BEFORE_"
+        "CHANGE([col])'s auto form; n=2 is the value from the change "
+        "before that one; n=3 before that; and so on — e.g. if WT read 10 "
+        "this week, 8 last week, and 5 the week before: VALUE_BEFORE_"
+        "CHANGE_N([WT], 1) -> 8, VALUE_BEFORE_CHANGE_N([WT], 2) -> 5. "
+        "Always searches day by day (not month-ends), up to about a year "
+        "back in total regardless of n — returns None if that many "
+        "distinct changes don't exist within range, or there isn't that "
+        "much synced history yet. Works for both Group A/B columns (52WH, "
+        "ATH, ...) and Formula Builder columns (MT, MB, DT, DB, ...)."
+    ),
+    "token": {"type": "func", "value": "VALUE_BEFORE_CHANGE_N(", "needs_point_picker": "changes_ago"},
+}
+
 INCEPTION_HISTORIC_VALUE_CATALOGUE = [
     e for e in POINT_LOOKUP_CATALOGUE if e["name"] in _INCEPTION_POINT_LOOKUPS
-] + [_VALUE_BEFORE_CHANGE_ENTRY]
+] + [_VALUE_BEFORE_CHANGE_ENTRY, _VALUE_BEFORE_CHANGE_N_ENTRY]
 
 
 def _dummy_row(fields: list) -> dict:

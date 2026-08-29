@@ -573,6 +573,17 @@ def test_compile_check_value_before_change_no_arg_form_also_compiles():
     assert "structured correctly" not in msg.lower()
 
 
+def test_compile_check_value_before_change_n_compiles():
+    """VALUE_BEFORE_CHANGE_N — a separate function from VALUE_BEFORE_
+    CHANGE (n = which occurrence, not months_back) — needs the same
+    placeholder treatment in the structural pre-check."""
+    from services.strategy_engine import compile_check
+    tokens = days_tok("VALUE_BEFORE_CHANGE_N", "WT", 2)
+    ok, msg = compile_check(tokens, {"WT": "100"}, [{"WT": "100"}])
+    assert ok is True
+    assert "structured correctly" not in msg.lower()
+
+
 # ── compile_check's lmv_headers param (historic/derived column reference) ────
 # Reproduces: [Last5Day]*1 where [Last5Day] is a Formula Builder field whose
 # own formula is MAX_OF([DAY TO], LAST_5_TRADING_DAYS) — a plain "col"
