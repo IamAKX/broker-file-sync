@@ -1111,6 +1111,55 @@ def test_condition_editor_passes_computed_self_value(qapp, monkeypatch):
     assert captured["self_value"] == 5000.0
 
 
+def test_condition_editor_self_value_resolves_days_functions(qapp, monkeypatch):
+    """Regression: a column whose Value formula uses a _DAYS/VALUE_DAYS_AGO
+    function (e.g. AVG_DAYS([CLOSE], 20) > 100) always reported "THIS has
+    no value to test against" when editing its conditional-formatting
+    condition — self_value was computed via evaluate() without ever
+    passing day_history, so it came back None regardless of whether
+    StrategyEditor._fetch_own_day_history's background fetch had actually
+    succeeded. Reported as: one strategy's column fails this way, a
+    sibling strategy with no _DAYS function in its formula doesn't —
+    exactly what a missing day_history parameter (not a network/timing
+    issue) would produce."""
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+    from screens import formula_editor
+
+    col = new_column("TestCol")
+    col["formula"] = [
+        {"type": "func", "value": "AVG_DAYS(", "col_arg": "CLOSE", "days_arg": 20},
+        {"type": "op", "value": ">"},
+        {"type": "num", "value": "100"},
+    ]
+    col["fmt_rules"].append(new_fmt_rule())
+
+    day_history = {("CLOSE", 20): {"TEST": {"Average": 150.0}}}
+    dlg = ColumnEditorDialog(
+        col, ["CLOSE"], None,
+        lmv_first_row={"CLOSE": "140", "Scrip Name": "TEST"},
+        all_lmv_data=[{"CLOSE": "140", "Scrip Name": "TEST"}],
+        day_history=day_history,
+    )
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, *a, **kw):
+            captured["self_value"] = kw.get("self_value")
+        def exec(self):
+            return 0
+        def get_tokens(self):
+            return []
+
+    monkeypatch.setattr(formula_editor, "ExpressionEditorDialog", _FakeDlg)
+    from PySide6.QtWidgets import QLabel
+    dlg._open_condition_editor(0, QLabel())
+    # AVG_DAYS([CLOSE], 20) resolves to 150.0 from day_history -> 150 > 100 -> True,
+    # not None ("THIS has no value").
+    assert captured["self_value"] is True
+
+
 def test_fmt_color_applies_when_this_condition_met():
     # End-to-end of get_cell_color with a THIS-based condition.
     from services.strategy_engine import get_cell_color

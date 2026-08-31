@@ -647,7 +647,7 @@ class _AggColDialog(QDialog):
 class ColumnEditorDialog(QDialog):
     def __init__(self, col_def: dict, lmv_headers: list, theme=None,
                  lmv_first_row: dict = None, all_lmv_data: list = None,
-                 extra_row_values: dict = None, parent=None):
+                 extra_row_values: dict = None, day_history: dict = None, parent=None):
         """
         lmv_headers: the full Fields list to offer — expected to already
         include this strategy's OTHER columns (see StrategyEditor.
@@ -661,6 +661,13 @@ class ColumnEditorDialog(QDialog):
         compile-test row, forwarded to every ExpressionEditorDialog opened
         from here so Compile & Test can actually resolve those sibling
         columns instead of reporting them as empty/unknown.
+
+        day_history: StrategyEditor's own self._day_history (see
+        _fetch_own_day_history), needed by _open_condition_editor to
+        compute THIS's real value for a column whose Value formula uses a
+        _DAYS/VALUE_DAYS_AGO/etc function — without it that computation
+        always comes back None regardless of whether the fetch itself
+        succeeded (see that method's own comment).
         """
         super().__init__(parent)
         self._col           = copy.deepcopy(col_def)
@@ -669,6 +676,7 @@ class ColumnEditorDialog(QDialog):
         self._lmv_first_row = lmv_first_row or {}
         self._all_lmv_data  = all_lmv_data or []
         self._extra_row_values = dict(extra_row_values or {})
+        self._day_history   = day_history or {}
         self.setWindowTitle("Edit Column")
         self.resize(720, 640)
         _apply_dialog_bg(self, theme)
@@ -958,9 +966,21 @@ class ColumnEditorDialog(QDialog):
         rule = self._col["fmt_rules"][idx]
         # THIS in a condition refers to this column's own computed value.
         # Evaluate the column's value formula on the first row so the compile
-        # test can resolve THIS.
+        # test can resolve THIS. day_history is required here (unlike
+        # compile_check's own "1.0" placeholder for a bare formula test —
+        # see ExpressionEditorDialog._compile_and_test) since this is a
+        # REAL evaluate() call: without it, any formula using a _DAYS/
+        # VALUE_DAYS_AGO/etc function anywhere (directly, or via a sibling
+        # column it references) always resolves to None regardless of
+        # whether _fetch_own_day_history's background fetch succeeded,
+        # reported as "THIS has no value to test against" no matter how
+        # correct the formula actually is. Same self._day_history
+        # _combined_headers_and_values already threads through correctly
+        # for sibling-column values — this was the one call site that
+        # didn't.
         self_value = evaluate(self._col.get("formula", []),
-                              self._lmv_first_row, self._all_lmv_data)
+                              self._lmv_first_row, self._all_lmv_data,
+                              day_history=self._day_history)
         dlg = ExpressionEditorDialog(
             tokens=list(rule.get("condition", [])),
             lmv_headers=self._lmv,
@@ -2112,7 +2132,8 @@ class StrategyEditor(QWidget):
         dlg = ColumnEditorDialog(col, headers, self._theme,
                                  lmv_first_row=self._lmv_first_row,
                                  all_lmv_data=self._all_lmv_data,
-                                 extra_row_values=extra_values, parent=self)
+                                 extra_row_values=extra_values,
+                                 day_history=self._day_history, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["columns"].append(dlg.result_col())
             self._refresh_columns()
@@ -2157,7 +2178,8 @@ class StrategyEditor(QWidget):
         dlg = ColumnEditorDialog(col, headers, self._theme,
                                  lmv_first_row=self._lmv_first_row,
                                  all_lmv_data=self._all_lmv_data,
-                                 extra_row_values=extra_values, parent=self)
+                                 extra_row_values=extra_values,
+                                 day_history=self._day_history, parent=self)
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["columns"][idx] = dlg.result_col()
             self._refresh_columns()

@@ -2056,6 +2056,88 @@ def test_strategy_editor_field_universe_includes_own_columns(qapp, controller):
     assert editor._field_names() == ["OPEN", "CLOSE", "Adjusted"]
 
 
+def test_extra_column_values_resolves_sibling_column_for_compile_test(qapp, controller):
+    """Regression: _field_names() already offered a sibling column (e.g.
+    [FP_10D]) as something you COULD reference in another column's
+    formula, but nothing ever computed its value for Compile & Test — so
+    a formula like [FP_10D] * (1+(1/100)) always reported "tried to do
+    math with an empty cell" even though the formula itself was correct.
+    _extra_column_values is the fix — same shape as LMV's screens.
+    strategy_builder.StrategyEditor._combined_headers_and_values."""
+    from screens.inception_strategy_builder import _InceptionStrategyEditor
+    from services.strategy_engine import compile_check
+    from screens.formula_editor import parse_expression_text
+
+    strategy = {
+        "id": "s1", "name": "Test", "active": True, "category": "Daily",
+        "row_filter": [],
+        "columns": [
+            {"name": "FP_10D", "formula": [{"type": "num", "value": "95.0"}], "fmt_rules": []},
+            {"name": "Trigger", "formula": [], "fmt_rules": []},
+        ],
+    }
+    editor = _InceptionStrategyEditor(strategy, ["LOW", "CLOSE"], theme=controller.theme,
+                                       sample_rows=[{"LOW": 95.0, "CLOSE": 100.0}])
+
+    # Editing "Trigger" (index 1): FP_10D's real value is offered, Trigger
+    # itself is excluded (it can't reference its own not-yet-saved formula).
+    extra = editor._extra_column_values(exclude_idx=1)
+    assert extra == {"FP_10D": 95.0}
+
+    tokens = parse_expression_text("[FP_10D] * (1+(1/100))", known_headers=["FP_10D"])
+    test_row = {"LOW": 95.0, "CLOSE": 100.0, **extra}
+    ok, msg = compile_check(tokens, test_row, [test_row], lmv_headers=["LOW", "CLOSE"])
+    assert ok is True
+    assert msg == "95.95"
+
+
+def test_extra_column_values_excludes_nothing_when_adding_new_column(qapp, controller):
+    """_add_column's own call (exclude_idx=None, the default) offers every
+    existing column — there's no "self" to exclude yet."""
+    from screens.inception_strategy_builder import _InceptionStrategyEditor
+
+    strategy = {
+        "id": "s1", "name": "Test", "active": True, "category": "Daily",
+        "row_filter": [],
+        "columns": [{"name": "FP_10D", "formula": [{"type": "num", "value": "95.0"}], "fmt_rules": []}],
+    }
+    editor = _InceptionStrategyEditor(strategy, ["LOW"], theme=controller.theme,
+                                       sample_rows=[{"LOW": 95.0}])
+    assert editor._extra_column_values() == {"FP_10D": 95.0}
+
+
+def test_edit_column_dialog_receives_sibling_values(qapp, controller):
+    """The real _edit_column click path — not just the helper in
+    isolation — actually threads extra_row_values into the constructed
+    _InceptionColumnEditorDialog."""
+    from screens.inception_strategy_builder import _InceptionStrategyEditor, _InceptionColumnEditorDialog
+    from PySide6.QtWidgets import QDialog
+
+    strategy = {
+        "id": "s1", "name": "Test", "active": True, "category": "Daily",
+        "row_filter": [],
+        "columns": [
+            {"name": "FP_10D", "formula": [{"type": "num", "value": "95.0"}], "fmt_rules": []},
+            {"name": "Trigger", "formula": [], "fmt_rules": []},
+        ],
+    }
+    editor = _InceptionStrategyEditor(strategy, ["LOW"], theme=controller.theme,
+                                       sample_rows=[{"LOW": 95.0}])
+
+    captured = {}
+    orig_exec = _InceptionColumnEditorDialog.exec
+    def fake_exec(self):
+        captured["extra_row_values"] = dict(self._extra_row_values)
+        return QDialog.DialogCode.Rejected
+    _InceptionColumnEditorDialog.exec = fake_exec
+    try:
+        editor._edit_column(1)   # editing "Trigger"
+    finally:
+        _InceptionColumnEditorDialog.exec = orig_exec
+
+    assert captured["extra_row_values"] == {"FP_10D": 95.0}
+
+
 def test_column_editor_always_shows_editable_formula(qapp, controller):
     from screens.inception_strategy_builder import _InceptionColumnEditorDialog
 

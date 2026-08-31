@@ -191,7 +191,8 @@ def _dummy_row(fields: list) -> dict:
 
 
 def _open_expression_editor(tokens: list, fields: list, theme, mode: str,
-                             self_value=None, parent=None, sample_rows: list = None) -> list | None:
+                             self_value=None, parent=None, sample_rows: list = None,
+                             extra_row_values: dict = None) -> list | None:
     """Opens the real Expression Editor scoped to Inception's fields/store —
     returns the resulting token list, or None if the user cancelled.
 
@@ -199,6 +200,18 @@ def _open_expression_editor(tokens: list, fields: list, theme, mode: str,
     see this module's "Real sample data" docstring section), is used both as
     the Compile & Test row and as the aggregate-function data set instead of
     the all-1.0 dummy row.
+
+    *extra_row_values* ({sibling_column_name: computed_value}, from
+    _InceptionStrategyEditor._extra_column_values) is forwarded to
+    ExpressionEditorDialog so Compile & Test can actually resolve a formula
+    that references one of this strategy's OTHER columns by name — e.g.
+    "Trigger Price" = [FP_10D] * 1.01, [FP_10D] itself defined as a
+    separate column — instead of reporting it as an empty cell. LMV's own
+    Strategy Builder already does this (screens.strategy_builder.
+    StrategyEditor._combined_headers_and_values); this was the one call
+    site here that never got it wired up, even though _field_names()
+    already offers sibling columns in the Fields list, so the formula
+    looked buildable but could never actually compile-test.
     """
     if sample_rows:
         row = _pick_compile_test_row(sample_rows)
@@ -208,7 +221,7 @@ def _open_expression_editor(tokens: list, fields: list, theme, mode: str,
         all_data = [row]
     dlg = ExpressionEditorDialog(
         tokens, fields, [], row, all_lmv_data=all_data, theme=theme, mode=mode,
-        self_value=self_value, real_lmv_headers=fields,
+        self_value=self_value, extra_row_values=extra_row_values, real_lmv_headers=fields,
         sections=INCEPTION_SECTIONS, variable_store=var_store,
         historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE, parent=parent,
     )
@@ -220,12 +233,19 @@ def _open_expression_editor(tokens: list, fields: list, theme, mode: str,
 # ── column editor dialog (name + formula + conditional formatting) ──────────
 
 class _InceptionColumnEditorDialog(QDialog):
-    def __init__(self, col_def: dict, fields: list, theme=None, parent=None, sample_rows: list = None):
+    def __init__(self, col_def: dict, fields: list, theme=None, parent=None, sample_rows: list = None,
+                 extra_row_values: dict = None):
         super().__init__(parent)
         self._col = copy.deepcopy(col_def)
         self._col.setdefault("fmt_rules", [])
         self._fields = fields
         self._theme = theme
+        # {sibling_column_name: computed_value} — forwarded to every
+        # ExpressionEditorDialog this dialog opens (Value formula AND
+        # fmt-rule conditions) so Compile & Test can resolve a formula
+        # referencing another of this strategy's columns. See
+        # _open_expression_editor's own docstring.
+        self._extra_row_values = dict(extra_row_values or {})
         self._sample_rows = sample_rows
         self.setWindowTitle("Edit Column")
         self.resize(680, 600)
@@ -280,8 +300,8 @@ class _InceptionColumnEditorDialog(QDialog):
 
         hint = QLabel(
             "Rules are checked top to bottom — the first one whose condition is "
-            "true wins. Not applied anywhere yet (HMV coloring lands separately) — "
-            "stored here so they're ready when it does."
+            "true wins. Applied in both HMV and View by Date; \"Apply color to\" "
+            "picks which column gets painted — defaults to this column."
         )
         hint.setFont(font_scale.font(font_scale.SMALL, False))
         hint.setStyleSheet(f"color:{txts};background:transparent;")
@@ -315,7 +335,7 @@ class _InceptionColumnEditorDialog(QDialog):
     def _open_formula_editor(self):
         tokens = _open_expression_editor(
             list(self._col.get("formula", [])), self._fields, self._theme, "value", parent=self,
-            sample_rows=self._sample_rows,
+            sample_rows=self._sample_rows, extra_row_values=self._extra_row_values,
         )
         if tokens is not None:
             self._col["formula"] = tokens
@@ -441,6 +461,7 @@ class _InceptionColumnEditorDialog(QDialog):
         tokens = _open_expression_editor(
             list(rule.get("condition", [])), self._fields, self._theme, "condition",
             self_value=1.0, parent=self, sample_rows=self._sample_rows,
+            extra_row_values=self._extra_row_values,
         )
         if tokens is not None:
             rule["condition"] = tokens
@@ -488,6 +509,31 @@ class _InceptionStrategyEditor(QWidget):
         # earlier one.
         own_cols = [c["name"] for c in self._strategy.get("columns", [])]
         return self._fields + [c for c in own_cols if c not in self._fields]
+
+    def _extra_column_values(self, exclude_idx: int | None = None) -> dict:
+        """{sibling_column_name: computed_value} on the compile-test row,
+        for every column in this strategy OTHER than exclude_idx — the
+        Inception analogue of LMV's screens.strategy_builder.StrategyEditor.
+        _combined_headers_and_values (see _open_expression_editor's own
+        docstring for why this exists: _field_names() above already offers
+        sibling columns to reference, but without this their compile-test
+        value was always missing, reported as an empty cell no matter how
+        correct the formula actually was).
+
+        Uses the exact same test-row/all-data resolution _open_expression_
+        editor itself falls back to (the real "sample_rows" when a sheet's
+        loaded, else the all-1.0 dummy row) so a sibling column's compile-
+        test value here matches what its OWN Compile & Test would have
+        shown."""
+        from services.strategy_engine import evaluate
+        cols = [c for i, c in enumerate(self._strategy.get("columns", [])) if i != exclude_idx]
+        if self._sample_rows:
+            row = _pick_compile_test_row(self._sample_rows)
+            all_data = self._sample_rows
+        else:
+            row = _dummy_row(self._fields)
+            all_data = [row]
+        return {c["name"]: evaluate(c.get("formula", []), row, all_data) for c in cols}
 
     def _build(self):
         t = self._theme
@@ -588,8 +634,12 @@ class _InceptionStrategyEditor(QWidget):
 
     def _add_column(self):
         col = store.new_column(f"Col{len(self._strategy['columns']) + 1}")
+        # Not excluding anything here (unlike _edit_column) — the new
+        # column isn't in self._strategy["columns"] yet, so every existing
+        # column is a valid sibling to reference.
         dlg = _InceptionColumnEditorDialog(col, self._field_names(), self._theme, parent=self,
-                                            sample_rows=self._sample_rows)
+                                            sample_rows=self._sample_rows,
+                                            extra_row_values=self._extra_column_values())
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["columns"].append(dlg.result_col())
             self._refresh_columns()
@@ -599,7 +649,8 @@ class _InceptionStrategyEditor(QWidget):
         # This column can't reference its own formula.
         fields = [f for f in self._field_names() if f != col.get("name")]
         dlg = _InceptionColumnEditorDialog(col, fields, self._theme, parent=self,
-                                            sample_rows=self._sample_rows)
+                                            sample_rows=self._sample_rows,
+                                            extra_row_values=self._extra_column_values(exclude_idx=idx))
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["columns"][idx] = dlg.result_col()
             self._refresh_columns()
@@ -681,6 +732,7 @@ class _InceptionStrategyEditor(QWidget):
         tokens = _open_expression_editor(
             list(self._strategy.get("row_filter", [])), self._field_names(), self._theme,
             "condition", parent=self, sample_rows=self._sample_rows,
+            extra_row_values=self._extra_column_values(),
         )
         if tokens is not None:
             self._strategy["row_filter"] = tokens
