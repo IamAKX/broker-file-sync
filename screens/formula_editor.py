@@ -992,7 +992,7 @@ class ExpressionEditorDialog(QDialog):
     #: since sections defaults to None. See screens.inception_strategy_builder
     #: for a caller that trims it ("Rows" doesn't apply there; "Historic
     #: Value" stays but is scoped down via historic_value_catalogue).
-    _ALL_SECTIONS = ["Functions", "Historic Value", "Operators", "Fields", "Rows", "Constants", "Variables"]
+    _ALL_SECTIONS = ["Functions", "Historic Value", "Operators", "Fields", "Inception Field", "Rows", "Constants", "Variables"]
 
     def __init__(self, tokens: list, lmv_headers: list,
                  strategy_col_headers: list, lmv_first_row: dict,
@@ -1003,6 +1003,7 @@ class ExpressionEditorDialog(QDialog):
                  sections: list = None, variable_store=None,
                  extra_functions: list = None,
                  historic_value_catalogue: list = None,
+                 inception_field_codes: list = None,
                  parent=None):
         """sections/variable_store: added for screens.inception_strategy_builder's
         reuse of this dialog with Inception's own field set — both default to
@@ -1048,6 +1049,18 @@ class ExpressionEditorDialog(QDialog):
             list(historic_value_catalogue) if historic_value_catalogue is not None
             else POINT_LOOKUP_CATALOGUE
         )
+        # The "Inception Field" nav section's field codes (HMV's Group A/B
+        # historical columns — 52WH, ATH, the DAY/WEEK gap codes, ...).
+        # Defaults to the full LMV set (services.lmv_inception_fields); a
+        # caller that trims the nav via `sections` (screens.
+        # inception_strategy_builder, which drops this section entirely)
+        # never reaches the branch that reads this.
+        if inception_field_codes is not None:
+            self._inception_field_codes = list(inception_field_codes)
+        else:
+            from services.lmv_inception_fields import FIELD_CODES
+            self._inception_field_codes = list(FIELD_CODES)
+        self._inception_field_code_set = set(self._inception_field_codes)
         # The sheet's OWN currently-loaded columns — a strict subset of
         # self._lmv_headers above, which is really "every name offered in
         # the Fields list" (Formula Builder fields, other strategy columns,
@@ -1425,7 +1438,15 @@ class ExpressionEditorDialog(QDialog):
         if section == "Operators":
             return OPERATOR_CATALOGUE
         if section == "Fields":
-            return FIELD_CATALOGUE_FROM_HEADERS(all_headers)
+            # Inception fields live in their own "Inception Field" section
+            # below, not doubled into the generic Fields list.
+            return FIELD_CATALOGUE_FROM_HEADERS(
+                [h for h in all_headers if h not in self._inception_field_code_set]
+            )
+        if section == "Inception Field":
+            from services.lmv_inception_fields import field_catalogue
+            return [e for e in field_catalogue()
+                    if e["token"]["value"] in self._inception_field_code_set]
         if section == "Rows":
             return ROW_CATALOGUE_FROM_DATA(self._all_lmv_data)
         if section == "Constants":

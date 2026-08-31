@@ -72,6 +72,7 @@ formula_variables.json
 strategy_alert_state_*.json
 inception_strategies.json
 inception_formula_variables.json
+inception_lmv_snapshot.json
 inception_bars.db
 inception_bars.db-wal
 inception_bars.db-shm

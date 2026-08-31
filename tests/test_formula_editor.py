@@ -98,7 +98,7 @@ def test_expression_editor_has_seven_nav_items(qapp):
     nav = dlg._nav_list
     texts = [nav.item(i).text() for i in range(nav.count())]
     assert texts == ["Functions", "Historic Value", "Operators", "Fields",
-                     "Rows", "Constants", "Variables"]
+                     "Inception Field", "Rows", "Constants", "Variables"]
 
 
 def test_expression_editor_get_tokens_empty(qapp):
@@ -228,10 +228,42 @@ def test_editor_field_catalogue_includes_lmv_headers(qapp):
     assert "[CLOSE]" in items
 
 
+def _section_items(dlg, name):
+    dlg._nav_list.setCurrentRow(dlg._sections.index(name))
+    return [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
+
+
+def test_inception_field_section_lists_historical_codes(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    from services.lmv_inception_fields import FIELD_CODES
+    dlg = ExpressionEditorDialog([], ["LTP"], [], {})
+    items = _section_items(dlg, "Inception Field")
+    assert len(items) == len(FIELD_CODES)
+    assert "[52WH]" in items and "[ATH]" in items and "[DAY UF GUP 1]" in items
+
+
+def test_inception_codes_not_duplicated_into_fields_section(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    # even when an inception code is also passed as a header (as
+    # StrategyEditor._field_names does), it shows only under Inception Field.
+    dlg = ExpressionEditorDialog([], ["LTP", "52WH"], [], {})
+    assert "[52WH]" not in _section_items(dlg, "Fields")
+    assert "[52WH]" in _section_items(dlg, "Inception Field")
+    assert "[LTP]" in _section_items(dlg, "Fields")
+
+
+def test_inception_field_section_absent_when_sections_trimmed(qapp):
+    from screens.formula_editor import ExpressionEditorDialog
+    from screens.inception_strategy_builder import INCEPTION_SECTIONS
+    dlg = ExpressionEditorDialog([], ["LTP"], [], {}, sections=INCEPTION_SECTIONS)
+    nav = [dlg._nav_list.item(i).text() for i in range(dlg._nav_list.count())]
+    assert "Inception Field" not in nav
+
+
 def test_editor_constants_include_true_false(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     dlg = ExpressionEditorDialog([], [], [], {})
-    dlg._nav_list.setCurrentRow(5)  # Constants
+    dlg._nav_list.setCurrentRow(6)  # Constants
     items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
     assert "True" in items
     assert "False" in items
@@ -947,7 +979,7 @@ def test_row_catalogue_lists_distinct_scrip_names(qapp):
     all_data = [{"Scrip Name": "NIFTY", "Open": 100}, {"Scrip Name": "NIFTY", "Open": 100},
                 {"Scrip Name": "BANKNIFTY", "Open": 200}]
     dlg = ExpressionEditorDialog([], ["Open"], [], {}, all_lmv_data=all_data)
-    dlg._nav_list.setCurrentRow(4)  # Rows
+    dlg._nav_list.setCurrentRow(5)  # Rows
     items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
     assert sorted(items) == ["BANKNIFTY", "NIFTY"]
 
@@ -1026,7 +1058,7 @@ def test_variables_nav_tab_lists_saved_variable(qapp, var_store):
     v = var_store.new_variable("Threshold")
     var_store.save_variable(v)
     dlg = ExpressionEditorDialog([], ["Open"], [], {})
-    dlg._nav_list.setCurrentRow(6)  # Variables
+    dlg._nav_list.setCurrentRow(7)  # Variables
     items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
     assert "{Threshold}" in items
 

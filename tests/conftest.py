@@ -115,3 +115,14 @@ def _isolate_disk_stores(tmp_path, monkeypatch):
                           "page_size": kwargs.get("page_size", 25), "total_pages": 0},
     )
     monkeypatch.setattr(strategy_signals_api, "clear_signals", lambda: None)
+
+    # screens/live_viewer.py kicks services.lmv_inception_fields.
+    # ensure_loaded_async() on construction — a real ~45s Group A/B walk
+    # over the local inception_bars.db on a daemon thread, plus a network
+    # inception_settings.load(). Neither blocks a test, but every
+    # LiveViewerWindow test would otherwise spawn that walk (and write the
+    # repo-root inception_lmv_snapshot.json). Stub it to a no-op; the tests
+    # that exercise this module patch it back themselves.
+    from services import lmv_inception_fields
+    monkeypatch.setattr(lmv_inception_fields, "ensure_loaded_async",
+                        lambda on_ready=None: None)

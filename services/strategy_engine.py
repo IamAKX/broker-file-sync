@@ -279,6 +279,13 @@ def build_symbol_index(all_data: list, symbol_col: str = SYMBOL_COLUMN) -> dict:
     return idx
 
 
+def _norm_for_inception(sym) -> str:
+    """Collapse punctuation so LMV's "BAJAJ-AUTO"/"M&M" match Inception's
+    "BAJAJ_AUTO"/"M_M" spelling — same key services.lmv_inception_fields
+    (and services.inception_sector) build their maps with."""
+    return re.sub(r"[^A-Z0-9]", "", str(sym or "").strip().upper())
+
+
 # ── formula variables ("{Name}" tokens) ──────────────────────────────────────
 #
 # services.formula_variable_store lets a user name a reusable formula (e.g. a
@@ -1198,7 +1205,8 @@ def evaluate_condition(tokens: list, row_data: dict, all_data: list,
 def apply_strategies(strategies: list, headers: list, data: list[list],
                      day_history: dict | None = None,
                      include_streak_columns: bool = True,
-                     symbol_col: str = SYMBOL_COLUMN) -> tuple[list, list[list]]:
+                     symbol_col: str = SYMBOL_COLUMN,
+                     inception_values: dict | None = None) -> tuple[list, list[list]]:
     """
     Append strategy columns to headers and data rows.
     Returns (new_headers, new_data).
@@ -1234,13 +1242,30 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
     for a strategy type this function is also shared with. (Inception's
     day_history param IS populated for everything services.
     inception_day_history covers — see those two screens' own workers.)
+
+    ``inception_values`` (LMV only — see services.lmv_inception_fields):
+    ``{normalized_symbol: {code: value}}`` of HMV's historical Group A/B
+    columns (52WH, ATH, the DAY/WEEK gap codes, ...). Merged into each row
+    by normalized symbol so a strategy formula can reference [52WH] etc.,
+    but deliberately NOT added to ``new_headers`` — these stay invisible in
+    the grid, formula-only. An unmatched row (no F&O series) simply doesn't
+    get the keys, so a reference reads as None — the usual "blank rather
+    than crash". Defaults to None (no merge), the exact prior behavior for
+    every non-LMV caller.
     """
     active = [s for s in strategies if s.get("active")]
     if not active:
         return headers, data
 
+    inception_values = inception_values or None
+
     # Build list of all dicts for aggregate functions
     all_dicts = [dict(zip(headers, row)) for row in data]
+    if inception_values:
+        for rd in all_dicts:
+            fields = inception_values.get(_norm_for_inception(rd.get(symbol_col)))
+            if fields:
+                rd.update(fields)
     # Memoizes SUM_ALL/AVG_ALL/etc. by (base_op, col_name) for this call, so an
     # aggregate over all rows is computed once instead of once per row.
     agg_cache: dict = {}
@@ -1281,6 +1306,10 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
     new_data = []
     for row in data:
         row_dict = dict(zip(headers, row))
+        if inception_values:
+            fields = inception_values.get(_norm_for_inception(row_dict.get(symbol_col)))
+            if fields:
+                row_dict.update(fields)
 
         # Compute each active strategy's columns in order, against a row
         # enriched with every earlier column's own just-computed value (not

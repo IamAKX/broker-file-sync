@@ -51,7 +51,7 @@ from PySide6.QtWidgets import (
 from api.exceptions import ApiError, NetworkError
 from services import (
     inception_bars_store, inception_compute_service, inception_formula_builder_columns,
-    inception_settings, inception_sync_service,
+    inception_settings, inception_sync_service, lmv_inception_fields,
 )
 
 # Prefill for the "Fetch from Equal Solution" section's Username/Password/
@@ -451,6 +451,7 @@ class InceptionSettingsScreen(QWidget):
         # read — just tidies up entries computed under the old settings
         # that would otherwise sit unused in memory until the app restarts.
         inception_compute_service.clear_cache()
+        lmv_inception_fields.clear_cache()
         t = self._controller.theme
         self._sync_progress_lbl.setStyleSheet(f"color: {t.get('accent')};")
         self._sync_progress_lbl.setText(
@@ -537,6 +538,7 @@ class InceptionSettingsScreen(QWidget):
         # inception_formula_builder_columns), keyed the same way.
         inception_compute_service.clear_cache()
         inception_formula_builder_columns.clear_cache()
+        lmv_inception_fields.clear_cache()
         self._refresh_sync_status()
 
     def _on_sync_failed(self, message: str):

@@ -1878,8 +1878,17 @@ class StrategyEditor(QWidget):
         invisible to it.
         """
         from services.formula_tokens import all_field_codes
-        extra = [c for c in all_field_codes() if c not in self._lmv_headers]
-        return self._lmv_headers + extra
+        from services.lmv_inception_fields import FIELD_CODES as _inception_codes
+        offered = self._lmv_headers + [
+            c for c in all_field_codes() if c not in self._lmv_headers
+        ]
+        seen = set(offered)
+        # Inception (HMV) historical fields — offered like Formula Builder
+        # fields above so a strategy can reference [52WH]/[ATH]/etc. right
+        # away; resolved at render time by services.strategy_engine.
+        # apply_strategies (inception_values), blank until then.
+        offered += [c for c in _inception_codes if c not in seen]
+        return offered
 
     def _combined_headers_and_values(self, exclude_idx: int | None = None) -> tuple:
         """This strategy's own column names + the loaded LMV's columns +
@@ -2589,8 +2598,13 @@ class StrategyBuilderScreen(QWidget):
         columns plus every Formula Builder (Data menu) field not already
         one of them, so a saved Variable can reference one too."""
         from services.formula_tokens import all_field_codes
-        extra = [c for c in all_field_codes() if c not in self._lmv_headers]
-        return self._lmv_headers + extra
+        from services.lmv_inception_fields import FIELD_CODES as _inception_codes
+        offered = self._lmv_headers + [
+            c for c in all_field_codes() if c not in self._lmv_headers
+        ]
+        seen = set(offered)
+        offered += [c for c in _inception_codes if c not in seen]
+        return offered
 
     def _open_variables_manager(self):
         from screens.formula_editor import VariablesManagerDialog

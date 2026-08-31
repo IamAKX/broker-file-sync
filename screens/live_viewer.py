@@ -218,7 +218,11 @@ class _LiveDataWorker(QObject):
             active = [s for s in strategies if s.get("active")]
             if active:
                 from services.strategy_engine import apply_strategies
-                disp_headers, disp_data = apply_strategies(active, headers, data, day_history)
+                from services import lmv_inception_fields
+                disp_headers, disp_data = apply_strategies(
+                    active, headers, data, day_history,
+                    inception_values=lmv_inception_fields.current_snapshot(),
+                )
             else:
                 disp_headers, disp_data = headers, data
         except Exception as exc:
@@ -341,7 +345,11 @@ class _LiveDataWorker(QObject):
             active = [s for s in strategies if s.get("active")]
             if active:
                 from services.strategy_engine import apply_strategies
-                disp_headers, disp_data = apply_strategies(active, headers, data, day_history)
+                from services import lmv_inception_fields
+                disp_headers, disp_data = apply_strategies(
+                    active, headers, data, day_history,
+                    inception_values=lmv_inception_fields.current_snapshot(),
+                )
             else:
                 disp_headers, disp_data = headers, data
         except Exception as exc:
@@ -935,6 +943,11 @@ class LiveViewerWindow(QWidget):
     # always seeing an empty one. See _refresh_day_history/
     # _on_day_history_from_store_ready.
     day_history_updated = Signal(object)
+    # Fired (queued, from a daemon thread) by services.lmv_inception_fields
+    # when the Inception historical-field snapshot finishes loading, so any
+    # strategy formula referencing [52WH]/[ATH]/etc. re-renders with real
+    # values instead of blanks. See __init__'s ensure_loaded_async wiring.
+    _inception_fields_ready = Signal()
 
     def __init__(self, sharekhan_path: str, reliable_path: str,
                  nifty_paths, script_name_data: list,
@@ -1293,6 +1306,22 @@ class LiveViewerWindow(QWidget):
         self._worker.day_history_result.connect(self._on_day_history_from_store_ready)
         self._worker.day_history_failed.connect(self._on_day_history_from_store_failed)
         self._worker_thread.start()
+
+        # Load HMV's historical Group A/B fields (52WH, ATH, gap codes, ...)
+        # for the "Inception Field" formula section, off the GUI thread and
+        # disk-cached (see services.lmv_inception_fields). LMV renders now;
+        # these fields are blank until the walk finishes, then _recompute_
+        # display() re-runs apply_strategies with the real values. Queued so
+        # the daemon-thread (or already-loaded synchronous) callback always
+        # lands on the GUI thread's event loop, never mid-__init__.
+        self._inception_fields_ready.connect(
+            self._recompute_display, Qt.ConnectionType.QueuedConnection
+        )
+        try:
+            from services import lmv_inception_fields
+            lmv_inception_fields.ensure_loaded_async(self._inception_fields_ready.emit)
+        except Exception:
+            pass
 
         # Opening Range High/Low only changes once a day (the capture job
         # fires once, ~15min after market open) — a coarse 60s poll here,
@@ -1822,8 +1851,10 @@ class LiveViewerWindow(QWidget):
             disp_headers, disp_data = precomputed_disp
         elif active_strategies:
             # Apply active strategies — may extend headers and data
+            from services import lmv_inception_fields
             disp_headers, disp_data = apply_strategies(
-                active_strategies, self._headers, data, self._day_history
+                active_strategies, self._headers, data, self._day_history,
+                inception_values=lmv_inception_fields.current_snapshot(),
             )
         else:
             disp_headers, disp_data = self._headers, data

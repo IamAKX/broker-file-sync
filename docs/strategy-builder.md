@@ -230,6 +230,34 @@ own per-symbol bar history to resolve.
 
 ---
 
+## Inception Field (LMV Strategy Builder only)
+
+LMV's Expression Editor has an **Inception Field** section in the left nav
+(right after Fields) listing the ~65 historical derived columns HMV computes
+on the shared continuous-futures EOD dataset — `52WH`, `52WL`, `ATH`, `ATL`,
+`CQO`/`CQH`/`CQL`, `PQC`, `QT`/`QB`, the half-year/year/financial-year
+high/low/open/close set, and the 24 `DAY`/`WEEK … GUP/GDN …` gap-area codes.
+Reference one exactly like any other field, e.g. `[Current] > [52WH]` or
+`[52WH] - [Current]`.
+
+- **Values match HMV exactly** — they come from the same computation
+  (`services.inception_compute_service.snapshot`) that builds the Inception →
+  HMV grid, as of the latest synced trading day.
+- **Formula-only** — these do *not* appear as columns in the LMV table; they
+  exist only to be referenced in formulas.
+- **Matched by symbol** — an LMV row resolves against its F&O continuous-
+  futures series (`RELIANCE` ↔ `RELIANCE_I`, `BAJAJ-AUTO` ↔ `BAJAJ_AUTO_I`,
+  `M&M` ↔ `M_M_I`). A cash-only name with no futures series reads blank.
+- **Loaded in the background** — the first time you open LMV after an app
+  start these fields may be blank for a few seconds while the historical
+  walk runs (then it's disk-cached and instant on every later start); the
+  table re-renders automatically when they're ready. No hit to LMV load time.
+- **Point value only** — historic aggregates *over* an Inception field
+  (`AVG_DAYS([52WH], 20)`, a Row-Filter Streak referencing one) don't
+  resolve in LMV; use the field directly.
+
+---
+
 ## Row-Filter Streak ("Days True" / "Since")
 
 Any strategy that has a **Row Filter** automatically gets two extra

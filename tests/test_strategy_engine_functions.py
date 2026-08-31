@@ -343,6 +343,66 @@ def test_apply_strategies_later_column_can_reference_earlier_own_column():
     assert new_data[0][new_headers.index("Floor_10D")] == 100.0
     assert new_data[0][new_headers.index("Trigger Price")] == 101.0
 
+
+# ── inception_values (HMV historical fields in LMV formulas) ─────────────────
+
+def _inception_strat():
+    return {
+        "id": "i1", "active": True, "row_filter": [],
+        "columns": [{"name": "Gap to 52WH",
+                     "formula": [tok_col("52WH"), tok_op("-"), tok_col("Close")]}],
+    }
+
+
+def test_apply_strategies_resolves_inception_field_for_matched_row():
+    from services.strategy_engine import apply_strategies
+    headers = ["Scrip Name", "Close"]
+    data = [["BAJAJ-AUTO", "9000"], ["RANDOMCASH", "50"]]
+    inception_values = {"BAJAJAUTO": {"52WH": 9500.0}}
+    new_headers, new_data = apply_strategies(
+        [_inception_strat()], headers, data, inception_values=inception_values,
+    )
+    col = new_headers.index("Gap to 52WH")
+    assert new_data[0][col] == 500.0          # matched by normalized symbol
+    assert new_data[1][col] is None           # no inception series -> blank
+
+
+def test_apply_strategies_inception_fields_not_added_as_columns():
+    from services.strategy_engine import apply_strategies
+    headers = ["Scrip Name", "Close"]
+    data = [["BAJAJ-AUTO", "9000"]]
+    new_headers, _ = apply_strategies(
+        [_inception_strat()], headers, data,
+        inception_values={"BAJAJAUTO": {"52WH": 9500.0}},
+    )
+    assert "52WH" not in new_headers          # formula-only, never a grid column
+
+
+def test_apply_strategies_inception_cross_row_reference():
+    from services.strategy_engine import apply_strategies
+    strat = {
+        "id": "i2", "active": True, "row_filter": [],
+        "columns": [{"name": "RelATH",
+                     "formula": [tok_col_of("ATH", "RELIANCE")]}],
+    }
+    headers = ["Scrip Name", "Close"]
+    data = [["INFY", "1500"], ["RELIANCE", "2900"]]
+    inception_values = {"RELIANCE": {"ATH": 3100.0}}
+    new_headers, new_data = apply_strategies(
+        [strat], headers, data, inception_values=inception_values,
+    )
+    assert new_data[0][new_headers.index("RelATH")] == 3100.0
+
+
+def test_apply_strategies_without_inception_values_is_unchanged():
+    from services.strategy_engine import apply_strategies
+    headers = ["Scrip Name", "Close"]
+    data = [["BAJAJ-AUTO", "9000"]]
+    a = apply_strategies([_inception_strat()], headers, [r[:] for r in data])
+    b = apply_strategies([_inception_strat()], headers, [r[:] for r in data],
+                         inception_values=None)
+    assert a == b
+
 def test_apply_strategies_row_filter_can_still_reference_own_column():
     """Same fix, from the row-filter side: this already worked (row filter
     was evaluated against `enriched`) — kept as a regression guard alongside
