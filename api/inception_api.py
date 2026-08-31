@@ -3,6 +3,7 @@ from datetime import date
 
 from api.client import api_client
 from api.endpoints import (
+    INCEPTION_ADMIN_SYNC_LMV_METRICS,
     INCEPTION_AVAILABILITY,
     INCEPTION_BARS,
     INCEPTION_FORMULA_VARIABLES,
@@ -95,3 +96,21 @@ def sync_vendor_data(email: str, password: str, exchange: str) -> dict:
         json_body={"email": email, "password": password, "exchange": exchange},
         timeout=_VENDOR_SYNC_TIMEOUT_SECONDS,
     )
+
+
+# Copies hari_dss.LmvDailySnapshot's turnover/avg-traded-price metrics into
+# public.EodBar (see app/services/inception_admin_sync_service.py in
+# broker-sync-api) — scans the WHOLE synced date range each call (not just
+# "since last time"), so a few thousand UPDATE statements on the server
+# side; generous but bounded timeout, same reasoning as vendor-sync above.
+_ADMIN_SYNC_TIMEOUT_SECONDS = 300
+
+
+def sync_admin_lmv_metrics() -> dict:
+    """POST /inception/admin/sync-lmv-metrics — server-side gated to one
+    named account (screens.inception_admin_sync's own client-side menu
+    gating mirrors this, but the server enforces it regardless of what
+    the client shows). Returns {"metrics": [{"name", "column",
+    "candidate_rows", "rows_updated"}, ...], "date_from", "date_to",
+    "symbols_matched"}."""
+    return api_client.post(INCEPTION_ADMIN_SYNC_LMV_METRICS, timeout=_ADMIN_SYNC_TIMEOUT_SECONDS)

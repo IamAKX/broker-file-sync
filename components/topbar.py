@@ -10,6 +10,15 @@ from PySide6.QtGui import QFont, QAction, QIcon, QPixmap, QPainter
 from PySide6.QtSvg import QSvgRenderer
 from theme import ThemeManager
 from version import APP_VERSION
+from api.token_store import token_manager
+
+# The one account Admin Controls > Inception Sync is shown for — matches
+# the backend's own app.core.deps._ADMIN_EMAIL (broker-sync-api repo)
+# exactly; that server-side check is what actually enforces this, not
+# this menu's visibility — hiding the menu here is just so nobody else
+# sees an entry that would 403 if they clicked it. Case-insensitive, same
+# as the backend's own comparison.
+_ADMIN_EMAIL = "sundarhari10@gmail.com"
 
 
 def _restart_app():
@@ -104,6 +113,14 @@ class TopBar(QWidget):
                 ("---",               None),
                 ("Data & Settings",   lambda: self.navigate.emit("inception_settings")),
             ]),
+            # Hidden for everyone except _ADMIN_EMAIL — see refresh_user's
+            # own docstring. Always built (never conditionally skipped
+            # here) so there's one stable button instance to toggle
+            # setVisible() on rather than rebuilding the whole menu bar on
+            # every login.
+            ("Admin Controls", [
+                ("Inception Sync", lambda: self.navigate.emit("inception_admin_sync")),
+            ]),
             ("Help", [
                 ("About",              lambda: self._show_about()),
                 ("Terms & Conditions", lambda: None),
@@ -111,6 +128,7 @@ class TopBar(QWidget):
             ]),
         ]
 
+        self._menu_buttons = {}
         for menu_name, items in menus:
             btn = QPushButton(menu_name)
             btn.setFlat(True)
@@ -139,8 +157,15 @@ class TopBar(QWidget):
                 "QPushButton::menu-indicator { width: 0; image: none; }"
             )
             layout.addWidget(btn)
+            self._menu_buttons[menu_name] = btn
 
         layout.addStretch()
+
+        # Admin Controls is gated to one specific account — must run after
+        # every button above exists (needs self._menu_buttons populated)
+        # but before the theme toggle so an early return / exception here
+        # can't skip building the rest of the bar.
+        self.refresh_user()
 
         # Theme toggle pill with SVG icon
         self._toggle_btn = QPushButton()
@@ -152,6 +177,21 @@ class TopBar(QWidget):
         self._toggle_btn.setIcon(self._toggle_icon())
         self._toggle_btn.clicked.connect(self._on_toggle)
         layout.addWidget(self._toggle_btn)
+
+    def refresh_user(self):
+        """Shows/hides the "Admin Controls" menu for the CURRENT user —
+        called once at construction (self._menu_buttons is already
+        populated by the time _build() reaches this) and again on every
+        re-login (app_window.MainWindow.refresh_user), since MainWindow/
+        TopBar are reused across a logout/login cycle within the same
+        running process (see app.AppController.show_main_window's own
+        comment on that) — without this, a different user logging in on
+        the same device would keep seeing whatever the PREVIOUS user's
+        admin status left the menu showing."""
+        email = (token_manager.get_user_email() or "").strip().lower()
+        btn = self._menu_buttons.get("Admin Controls")
+        if btn is not None:
+            btn.setVisible(email == _ADMIN_EMAIL)
 
     def _toggle_icon(self) -> QIcon:
         if self._theme.current_mode == "dark":

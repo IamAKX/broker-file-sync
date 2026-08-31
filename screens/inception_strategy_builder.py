@@ -933,6 +933,16 @@ class InceptionStrategyBuilderScreen(QWidget):
         # the built-ins, never a custom External Import formula, so only
         # those are guaranteed to actually resolve to a value here.
         self._fields += [c for c in formula_engine.FORMULA_CODES if c not in self._fields]
+        # "Avg Rate" — Inception-only (see services.
+        # inception_formula_builder_columns.compute_for_bars's own
+        # _LMV_SYNCED_CODE_MAP comment): not one of formula_engine's own
+        # FORMULA_CODES outputs, since it's a value Admin Controls >
+        # Inception Sync copies onto the bar directly rather than
+        # something formula_engine computes. Added here rather than to
+        # formula_engine.FORMULA_CODES itself so this doesn't also affect
+        # LMV's own (unrelated) Formula Builder field list.
+        if "Avg Rate" not in self._fields:
+            self._fields.append("Avg Rate")
         self._fields += [v["name"] for v in var_store.load_all()]
         self._strategies = store.load_all()
         self._refresh_list()

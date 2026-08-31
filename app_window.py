@@ -70,6 +70,7 @@ class MainWindow(QMainWindow):
         from screens.inception_hmv import InceptionHmvScreen
         from screens.inception_formula_stats import InceptionFormulaStatsScreen
         from screens.inception_settings import InceptionSettingsScreen
+        from screens.inception_admin_sync import InceptionAdminSyncScreen
 
         dashboard        = DashboardScreen(self._controller)
         data_import      = DataImportScreen(self._controller)
@@ -128,6 +129,7 @@ class MainWindow(QMainWindow):
             ("inception_hmv",              InceptionHmvScreen(self._controller)),
             ("inception_formula_stats",    InceptionFormulaStatsScreen(self._controller)),
             ("inception_settings",         InceptionSettingsScreen(self._controller)),
+            ("inception_admin_sync",       InceptionAdminSyncScreen(self._controller)),
         ]
         for name, widget in screens:
             self._screens[name] = widget
@@ -135,6 +137,11 @@ class MainWindow(QMainWindow):
 
     def refresh_user(self):
         self._sidebar.refresh_user()
+        # Admin Controls (components.topbar) is gated to one specific
+        # account — must be re-evaluated on every re-login too, not just
+        # at TopBar's own construction, since MainWindow/TopBar are reused
+        # across a logout/login cycle within the same process.
+        self._topbar.refresh_user()
 
     def navigate(self, screen_name: str):
         if self._navigation_locked and screen_name != "holidays":

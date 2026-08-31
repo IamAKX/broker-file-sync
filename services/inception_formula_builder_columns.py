@@ -64,10 +64,39 @@ def _holidays_for(bars: list[dict]) -> set:
     return holidays
 
 
+# Codes services.formula_engine can't compute from Inception's own bars at
+# all — see this module's own docstring: no AvgRate/DiffPcnt input, since
+# rows_by_date below never sets them. Admin Controls > Inception Sync
+# (services.inception_bars_store.LMV_METRIC_COLUMNS) can populate these
+# directly on the bar itself instead, copied from LMV's own archive
+# (hari_dss.LmvDailySnapshot) rather than recomputed here — a different
+# instrument's own daily turnover/ATP figure isn't something Inception's
+# bars have the inputs to derive independently, so this takes LMV's
+# already-computed answer as-is (see app/services/
+# inception_admin_sync_service.py in the backend repo) instead of trying
+# to reproduce it and risking drift from two slightly different
+# implementations of the same math. code -> bar dict key.
+_LMV_SYNCED_CODE_MAP = {
+    "PATP": "patp", "CWATP": "cwatp", "PWATP": "pwatp",
+    "CMATP": "cmatp", "PMATP": "pmatp",
+    "DAY TO": "day_to", "PDTO": "pdto", "CWTO": "cwto", "PWTO": "pwto",
+}
+
+
 def compute_for_bars(symbol: str, bars: list[dict]) -> dict:
     """{code: value} for every services.formula_engine.FORMULA_CODES code,
     as of the LAST bar in *bars* — ascending-by-trade_date, same shape
     services.inception_bars_store.bars_for_symbol returns. {} for no bars.
+
+    _LMV_SYNCED_CODE_MAP's own codes (PATP/CWATP/etc.) are overridden
+    with that same last bar's own synced value (None if Admin Controls >
+    Inception Sync hasn't run for this instrument/date, same "blank
+    rather than crash" convention as everywhere else here) AFTER
+    formula_engine's own computation, not instead of calling it — the
+    override always wins for these specific codes regardless of what
+    formula_engine returned for them. "Avg Rate" is added the same way —
+    a new field, not a FORMULA_CODES override, since formula_engine has
+    no output of that name to collide with.
     """
     if not bars:
         return {}
@@ -87,5 +116,8 @@ def compute_for_bars(symbol: str, bars: list[dict]) -> dict:
     }
     hist = formula_engine.StockHistory(rows_by_date, _holidays_for(bars))
     values = formula_engine.compute_for_symbol(hist, target)
+    for code, bar_key in _LMV_SYNCED_CODE_MAP.items():
+        values[code] = bars[-1].get(bar_key)
+    values["Avg Rate"] = bars[-1].get("avg_rate")
     _cache[cache_key] = values
     return dict(values)

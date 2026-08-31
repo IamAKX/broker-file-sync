@@ -39,6 +39,30 @@ CREATE TABLE IF NOT EXISTS eod_bars (
 CREATE INDEX IF NOT EXISTS ix_eod_bars_date ON eod_bars (trade_date);
 """
 
+# Admin Controls > Inception Sync's own fields (services.
+# inception_admin_sync_service in the backend repo; api.inception_api.
+# get_bars/services.inception_sync_service on this side) — turnover/
+# average-traded-price figures, populated only where that admin sync has
+# actually run, null everywhere else. Same "blank rather than crash"
+# convention as open_interest above.
+LMV_METRIC_COLUMNS = [
+    "avg_rate", "patp", "pwatp", "pmatp", "cwatp", "cmatp",
+    "day_to", "pdto", "cwto", "pwto",
+]
+
+
+def _ensure_lmv_metric_columns(conn: sqlite3.Connection) -> None:
+    """ALTER TABLE ADD COLUMN for each of LMV_METRIC_COLUMNS — CREATE
+    TABLE IF NOT EXISTS above is a no-op against an eod_bars.db that
+    already existed before this feature shipped, so a real column-
+    presence check + ALTER is what actually adds them to an existing
+    local install. Cheap (one PRAGMA query) and safe to run on every
+    connection — sqlite3 has no "ADD COLUMN IF NOT EXISTS" of its own."""
+    existing = {row[1] for row in conn.execute("PRAGMA table_info(eod_bars)")}
+    for col in LMV_METRIC_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE eod_bars ADD COLUMN {col} REAL")
+
 
 @contextmanager
 def _connect():
@@ -46,6 +70,7 @@ def _connect():
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.executescript(_SCHEMA)
+        _ensure_lmv_metric_columns(conn)
         yield conn
         conn.commit()
     finally:
@@ -64,8 +89,12 @@ def clear_local_cache() -> None:
 
 def upsert_bars(rows: list[dict]) -> int:
     """rows: [{"symbol", "trade_date" (date or ISO str), "open", "high",
-    "low", "close", "volume", "open_interest"}, ...]. Returns the number of
-    rows written."""
+    "low", "close", "volume", "open_interest", <LMV_METRIC_COLUMNS, each
+    optional>}, ...]. Returns the number of rows written. A row missing an
+    LMV_METRIC_COLUMNS key (e.g. api.inception_api.get_bars against a
+    backend that hasn't run Admin Controls > Inception Sync for that
+    instrument/date yet) writes None for it, same as a genuinely-absent
+    value — not a KeyError."""
     if not rows:
         return 0
     values = [
@@ -74,14 +103,17 @@ def upsert_bars(rows: list[dict]) -> int:
             r["trade_date"].isoformat() if isinstance(r["trade_date"], date) else r["trade_date"],
             float(r["open"]), float(r["high"]), float(r["low"]), float(r["close"]),
             int(r["volume"]), r.get("open_interest"),
+            *[r.get(col) for col in LMV_METRIC_COLUMNS],
         )
         for r in rows
     ]
+    columns_sql = ", ".join(LMV_METRIC_COLUMNS)
+    placeholders = ", ".join("?" * len(LMV_METRIC_COLUMNS))
     with _connect() as conn:
         conn.executemany(
             "INSERT OR REPLACE INTO eod_bars "
-            "(symbol, trade_date, open, high, low, close, volume, open_interest) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            f"(symbol, trade_date, open, high, low, close, volume, open_interest, {columns_sql}) "
+            f"VALUES (?, ?, ?, ?, ?, ?, ?, ?, {placeholders})",
             values,
         )
     return len(values)
@@ -125,7 +157,11 @@ def bars_for_symbol(symbol: str, date_from: date | None = None, date_to: date | 
     """Ascending-by-trade_date bars for one symbol — the shape
     services.inception_formula_engine.compute_group_a/compute_group_b
     expect (trade_date as a date object, not a string)."""
-    sql = "SELECT trade_date, open, high, low, close, volume, open_interest FROM eod_bars WHERE symbol = ?"
+    metric_cols_sql = ", " + ", ".join(LMV_METRIC_COLUMNS)
+    sql = (
+        f"SELECT trade_date, open, high, low, close, volume, open_interest{metric_cols_sql} "
+        f"FROM eod_bars WHERE symbol = ?"
+    )
     params: list = [symbol]
     if date_from is not None:
         sql += " AND trade_date >= ?"
@@ -142,9 +178,10 @@ def bars_for_symbol(symbol: str, date_from: date | None = None, date_to: date | 
 def bars_for_date(trade_date: date) -> list[dict]:
     """Every symbol's bar on one date — {"symbol": ..., "trade_date": ...,
     "open": ..., ...}."""
+    metric_cols_sql = ", " + ", ".join(LMV_METRIC_COLUMNS)
     with _connect() as conn:
         rows = conn.execute(
-            "SELECT symbol, trade_date, open, high, low, close, volume, open_interest "
+            f"SELECT symbol, trade_date, open, high, low, close, volume, open_interest{metric_cols_sql} "
             "FROM eod_bars WHERE trade_date = ?",
             (trade_date.isoformat(),),
         ).fetchall()
@@ -153,6 +190,7 @@ def bars_for_date(trade_date: date) -> list[dict]:
             "symbol": r[0], "trade_date": date.fromisoformat(r[1]),
             "open": r[2], "high": r[3], "low": r[4], "close": r[5],
             "volume": r[6], "open_interest": r[7],
+            **dict(zip(LMV_METRIC_COLUMNS, r[8:])),
         }
         for r in rows
     ]
@@ -163,4 +201,5 @@ def _row_to_bar(r) -> dict:
         "trade_date": date.fromisoformat(r[0]),
         "open": r[1], "high": r[2], "low": r[3], "close": r[4],
         "volume": r[5], "open_interest": r[6],
+        **dict(zip(LMV_METRIC_COLUMNS, r[7:])),
     }

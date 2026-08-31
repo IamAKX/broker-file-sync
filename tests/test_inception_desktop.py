@@ -457,6 +457,56 @@ def test_clear_local_cache_resets_store(bars_db, tmp_path):
     assert bars_db.row_count() == 0
 
 
+def test_upsert_bars_round_trips_lmv_metric_columns(bars_db):
+    """Admin Controls > Inception Sync's own fields (services.
+    inception_bars_store.LMV_METRIC_COLUMNS) — a row missing them
+    defaults to None (a plain OHLCV-only row, no admin sync run for it
+    yet), a row including them round-trips the real values through both
+    bars_for_symbol and bars_for_date."""
+    row = _bar("ABB_I", date(2025, 1, 1), 100, 101, 99, 100)
+    row["avg_rate"] = 99.5
+    row["patp"] = 100.1
+    row["cwto"] = 3.2
+    bars_db.upsert_bars([row, _bar("TCS_I", date(2025, 1, 1), 200, 201, 199, 200)])
+
+    abb = bars_db.bars_for_symbol("ABB_I")[0]
+    assert abb["avg_rate"] == 99.5
+    assert abb["patp"] == 100.1
+    assert abb["cwto"] == 3.2
+    assert abb["pwto"] is None   # not set on this row -> None, not KeyError
+
+    tcs = next(r for r in bars_db.bars_for_date(date(2025, 1, 1)) if r["symbol"] == "TCS_I")
+    assert tcs["avg_rate"] is None   # never set at all -> None
+    abb_by_date = next(r for r in bars_db.bars_for_date(date(2025, 1, 1)) if r["symbol"] == "ABB_I")
+    assert abb_by_date["patp"] == 100.1
+
+
+def test_ensure_lmv_metric_columns_migrates_a_pre_existing_db(bars_db, tmp_path):
+    """Regression: CREATE TABLE IF NOT EXISTS is a no-op against an
+    eod_bars.db that already existed before this feature shipped — a real
+    ALTER TABLE is what actually adds the new columns to an existing
+    local install. Simulates that by creating the table with the OLD
+    schema directly (no LMV metric columns), then confirming a normal
+    connect + upsert still works."""
+    import sqlite3
+    from services import inception_bars_store as store
+
+    with sqlite3.connect(store._DB_FILE) as conn:
+        conn.execute("""
+            CREATE TABLE eod_bars (
+                symbol TEXT NOT NULL, trade_date TEXT NOT NULL,
+                open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL,
+                close REAL NOT NULL, volume INTEGER NOT NULL, open_interest INTEGER,
+                PRIMARY KEY (symbol, trade_date)
+            )
+        """)
+
+    row = _bar("ABB_I", date(2025, 1, 1), 100, 101, 99, 100)
+    row["avg_rate"] = 42.0
+    store.upsert_bars([row])
+    assert store.bars_for_symbol("ABB_I")[0]["avg_rate"] == 42.0
+
+
 # ── services.inception_sync_service ──────────────────────────────────────
 
 def test_incremental_sync_fetches_from_day_after_last_synced(bars_db, monkeypatch):
@@ -874,15 +924,46 @@ def test_compute_for_bars_computes_month_top_bottom_from_close_only():
 
 
 def test_compute_for_bars_avgrate_dependent_codes_are_none_not_crash():
-    """Inception bars carry no AvgRate/DiffPcnt — turnover/ATP codes must
-    come back None (services.formula_engine's own "blank rather than crash"
-    fallback for missing input), not raise."""
+    """Inception bars carry no AvgRate/DiffPcnt of their own, so formula_
+    engine itself can't compute these — and _daily_bars' plain OHLC bars
+    haven't been through Admin Controls > Inception Sync either (no patp/
+    cwatp/etc key at all), so _LMV_SYNCED_CODE_MAP's override also finds
+    nothing to substitute. Must come back None either way (services.
+    formula_engine's own "blank rather than crash" fallback for missing
+    input), not raise. See test_compute_for_bars_uses_synced_lmv_metric_
+    values_when_present for the case where a real value IS available."""
     from services import inception_formula_builder_columns as fbc
 
     bars = _daily_bars("ABB_I", date(2026, 1, 1), 40)
     values = fbc.compute_for_bars("ABB_I", bars)
     for code in ("PATP", "CWATP", "PWATP", "CMATP", "PMATP", "DAY TO", "PDTO", "CWTO", "PWTO"):
         assert values[code] is None
+    assert values["Avg Rate"] is None
+
+
+def test_compute_for_bars_uses_synced_lmv_metric_values_when_present():
+    """Regression: once Admin Controls > Inception Sync has copied real
+    values onto the LAST bar (services.inception_bars_store.
+    LMV_METRIC_COLUMNS), compute_for_bars must return THOSE — not
+    formula_engine's own always-None computation for the same code names
+    (see inception_formula_builder_columns._LMV_SYNCED_CODE_MAP's own
+    comment for why these two would otherwise collide)."""
+    from services import inception_formula_builder_columns as fbc
+
+    bars = _daily_bars("ABB_I", date(2026, 1, 1), 10)
+    bars[-1]["patp"] = 123.45
+    bars[-1]["cwto"] = 6.78
+    bars[-1]["avg_rate"] = 99.9
+    # An EARLIER bar's synced value must NOT leak into today's — only the
+    # last bar's own value is used.
+    bars[0]["patp"] = 1.0
+
+    values = fbc.compute_for_bars("ABB_I", bars)
+    assert values["PATP"] == 123.45
+    assert values["CWTO"] == 6.78
+    assert values["Avg Rate"] == 99.9
+    # A code with no synced value on the last bar stays None, same as before.
+    assert values["PWATP"] is None
 
 
 def test_compute_for_bars_caches_and_clear_cache_forces_recompute(monkeypatch):
@@ -2185,6 +2266,72 @@ def test_strategy_builder_toggle_active_reverts_on_api_failure(qapp, controller,
 
     screen._on_toggle("s1", False)
     assert screen._strategies[0]["active"] is True   # reverted
+
+
+# ── screens: admin sync ───────────────────────────────────────────────────
+
+def test_admin_sync_screen_constructs(qapp, controller):
+    from screens.inception_admin_sync import InceptionAdminSyncScreen
+
+    screen = InceptionAdminSyncScreen(controller)
+    assert screen._sync_btn.text() == "Sync Now"
+    assert screen._results_table.isHidden() is True
+
+
+def test_admin_sync_screen_on_succeeded_populates_results_and_pulls_locally(qapp, controller, monkeypatch):
+    """Drives the worker's own succeeded slot directly rather than
+    spinning up a real network-backed QThread — same convention screens/
+    inception_settings' own tests use. Also confirms the auto-follow-up
+    local pull (services.inception_sync_service.incremental_sync) this
+    module's own docstring promises actually fires."""
+    from screens.inception_admin_sync import InceptionAdminSyncScreen
+    from services import inception_sync_service
+
+    pulled = []
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", lambda *a, **kw: pulled.append(1) or 0)
+
+    screen = InceptionAdminSyncScreen(controller)
+    result = {
+        "metrics": [
+            {"name": "Avg Rate", "column": "avg_rate", "candidate_rows": 100, "rows_updated": 95},
+            {"name": "PATP", "column": "patp", "candidate_rows": 100, "rows_updated": 90},
+        ],
+        "date_from": "2026-07-21", "date_to": "2026-08-31", "symbols_matched": 210,
+    }
+    screen._on_sync_succeeded(result)
+    assert screen._local_sync_worker.wait(2000)
+    qapp.processEvents()
+
+    assert pulled == [1]
+    assert screen._results_table.isHidden() is False
+    assert screen._results_table.rowCount() == 2
+    assert screen._results_table.item(0, 0).text() == "Avg Rate"
+    assert screen._results_table.item(1, 2).text() == "90"
+    assert "2026-07-21" in screen._status_lbl.text()
+
+
+def test_admin_sync_screen_on_succeeded_with_no_data_reports_nothing_to_sync(qapp, controller, monkeypatch):
+    from screens.inception_admin_sync import InceptionAdminSyncScreen
+    from services import inception_sync_service
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", lambda *a, **kw: 0)
+
+    screen = InceptionAdminSyncScreen(controller)
+    screen._on_sync_succeeded({"metrics": [], "date_from": None, "date_to": None, "symbols_matched": 0})
+    assert screen._local_sync_worker.wait(2000)
+    qapp.processEvents()
+
+    assert "Nothing to sync" in screen._status_lbl.text()
+    assert screen._results_table.isHidden() is True
+
+
+def test_admin_sync_screen_on_failed_shows_error_and_reenables_button(qapp, controller):
+    from screens.inception_admin_sync import InceptionAdminSyncScreen
+
+    screen = InceptionAdminSyncScreen(controller)
+    screen._sync_btn.setEnabled(False)
+    screen._on_sync_failed("403: This action is restricted to the Inception admin account")
+    assert screen._sync_btn.isEnabled() is True
+    assert "restricted to the Inception admin account" in screen._status_lbl.text()
 
 
 # ── screens: settings ────────────────────────────────────────────────────
