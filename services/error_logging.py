@@ -38,7 +38,7 @@ def _build_logger() -> logging.Logger:
 
         try:
             file_handler = RotatingFileHandler(
-                _LOG_FILE, maxBytes=2_000_000, backupCount=2, encoding="utf-8",
+                _LOG_FILE, maxBytes=5_000_000, backupCount=5, encoding="utf-8",
             )
             file_handler.setFormatter(fmt)
             logger.addHandler(file_handler)

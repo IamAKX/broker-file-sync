@@ -29,6 +29,7 @@ _IDLE_TICKS    = 15     # consecutive no-change ticks before backing off (~3s)
 _HIGHLIGHT_MS  = 4000   # how long a changed cell stays amber
 _SWEEP_MS      = 500    # how often expired highlights are cleared
 _FILE_SETTLE_S = 0.2    # brief wait so disk writes finish before re-reading
+_REFRESH_STALL_S = 30   # a read in flight longer than this = wedged worker; force-reset
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
 
@@ -94,6 +95,22 @@ _HIGHLIGHT_PRESETS = [
 
 
 # ── Off-thread reader worker ────────────────────────────────────────────────
+
+def _log_worker_error(context: str) -> None:
+    """Append the current exception (with full traceback) to error.log.
+
+    _LiveDataWorker's failure paths only emit a short, truncated message to
+    the status bar, which then scrolls away — this keeps a permanent,
+    appended record with the real stack trace in the app-root error.log
+    (see services.error_logging), which is the only durable trail a
+    packaged build leaves. Best-effort: logging must never itself break a
+    tick, hence the guard."""
+    try:
+        from services.error_logging import error_logger
+        error_logger.exception(context)
+    except Exception:
+        pass
+
 
 def _inject_sector_rows(headers: list, data: list, sector_map: dict) -> tuple:
     """Prepend a Sector column to headers and every data row. Module-level
@@ -226,6 +243,7 @@ class _LiveDataWorker(QObject):
             else:
                 disp_headers, disp_data = headers, data
         except Exception as exc:
+            _log_worker_error("LMV strategy recompute failed (toggle/category change)")
             self.recompute_failed.emit(f"Strategy error: {exc}"[:200])
             return
         self.recompute_result.emit(disp_headers, disp_data)
@@ -319,6 +337,7 @@ class _LiveDataWorker(QObject):
             # do_read/recompute are equally defensive; keep the window
             # usable (whatever day-history/strategies it already had) rather
             # than dying silently.
+            _log_worker_error("LMV N-day/day-history refresh failed unexpectedly")
             self.day_history_failed.emit(f"N-day column refresh failed: {exc}"[:200], strategies)
 
     def do_read(self, force_slow: bool, settle_s: float, strategies: list,
@@ -332,30 +351,46 @@ class _LiveDataWorker(QObject):
         # Settle delay runs here on the worker thread, never blocking the UI.
         if settle_s > 0:
             time.sleep(settle_s)
+        # One catch-all around the whole tick: anything that escapes here
+        # (previously the _inject_* calls and any other un-try'd line) reaches
+        # the global sys.excepthook, gets swallowed, and — because nothing
+        # emits result/failed — leaves LiveViewerWindow._refreshing stuck True,
+        # which silently wedges the 200ms poll loop for the rest of the
+        # session with the status bar frozen on the last "Updated: …". Every
+        # exit path from here must emit exactly one of result/failed so the
+        # window always resets _refreshing and the next tick can run.
         try:
-            headers, data = self._reader.read_merged(force_slow=force_slow)
-        except Exception as exc:
-            self.failed.emit(f"Read error: {exc}"[:200])
-            return
-        headers, data = _inject_sector_rows(headers, data, self._sector_map)
-        headers, data = _inject_opening_range_columns(
-            headers, data, self._opening_range_map, self._name_to_symbol
-        )
-        try:
-            active = [s for s in strategies if s.get("active")]
-            if active:
-                from services.strategy_engine import apply_strategies
-                from services import lmv_inception_fields
-                disp_headers, disp_data = apply_strategies(
-                    active, headers, data, day_history,
-                    inception_values=lmv_inception_fields.current_snapshot(),
+            try:
+                headers, data = self._reader.read_merged(force_slow=force_slow)
+                headers, data = _inject_sector_rows(headers, data, self._sector_map)
+                headers, data = _inject_opening_range_columns(
+                    headers, data, self._opening_range_map, self._name_to_symbol
                 )
-            else:
-                disp_headers, disp_data = headers, data
+            except Exception as exc:
+                _log_worker_error("LMV live read/merge failed")
+                self.failed.emit(f"Read error: {exc}"[:200])
+                return
+            try:
+                active = [s for s in strategies if s.get("active")]
+                if active:
+                    from services.strategy_engine import apply_strategies
+                    from services import lmv_inception_fields
+                    disp_headers, disp_data = apply_strategies(
+                        active, headers, data, day_history,
+                        inception_values=lmv_inception_fields.current_snapshot(),
+                    )
+                else:
+                    disp_headers, disp_data = headers, data
+            except Exception as exc:
+                _log_worker_error("LMV strategy evaluation failed on a live tick")
+                self.failed.emit(f"Strategy error: {exc}"[:200])
+                return
+            self.result.emit(headers, data, disp_headers, disp_data)
         except Exception as exc:
-            self.failed.emit(f"Strategy error: {exc}"[:200])
-            return
-        self.result.emit(headers, data, disp_headers, disp_data)
+            # Belt-and-braces: a failure in an emit slot's cross-thread
+            # marshaling, or anything else not covered above, still self-heals.
+            _log_worker_error("LMV live tick failed unexpectedly")
+            self.failed.emit(f"Live update error: {exc}"[:200])
 
     def shutdown(self) -> None:
         if self._started:
@@ -1271,6 +1306,7 @@ class LiveViewerWindow(QWidget):
 
         self._use_com    = com_available()
         self._refreshing = False   # re-entrancy guard so fast ticks don't pile up
+        self._refresh_started_at = None   # when the in-flight read began (stall watchdog)
 
         # Stateful reader: caches COM handles + slow sources (Reliable/Nifty).
         # Used exclusively by the worker thread — including the very first
@@ -1466,13 +1502,39 @@ class LiveViewerWindow(QWidget):
     def _request_refresh(self, settle: float, force: bool = False):
         # Skip if a previous read is still in flight, so fast ticks collapse
         # instead of queueing up and lagging behind.
-        if self._refreshing or self._worker is None:
+        if self._worker is None:
             return
+        if self._refreshing:
+            # Stall watchdog: a read that's been "in flight" far longer than
+            # any real tick could take means the worker is wedged — a COM
+            # .Value call blocking on a busy Excel, or a do_read exit path
+            # that emitted nothing (shouldn't happen after the guards there,
+            # but this is the last line of defence). Force-reset so the poll
+            # loop recovers instead of freezing on the last "Updated: …" for
+            # the rest of the session.
+            started = getattr(self, "_refresh_started_at", None)
+            if started is None or (time.monotonic() - started) < _REFRESH_STALL_S:
+                return
+            from services.error_logging import error_logger
+            error_logger.error(
+                "LMV refresh stalled %.0fs — force-resetting the poll loop",
+                time.monotonic() - started,
+            )
         self._refreshing = True
+        self._refresh_started_at = time.monotonic()
         # Snapshot, not a live reference — the worker thread must never touch
-        # GUI-thread-owned state concurrently.
-        strategies_snapshot = list(self._filtered_strategies())
-        self._request_read.emit(force, settle, strategies_snapshot, dict(self._day_history))
+        # GUI-thread-owned state concurrently. If building the snapshot or the
+        # emit itself throws, reset _refreshing here — otherwise it stays True
+        # and every later tick early-returns above, silently wedging the poll
+        # loop for the rest of the session (the worker's do_read has the same
+        # guarantee for its own exit paths).
+        try:
+            strategies_snapshot = list(self._filtered_strategies())
+            self._request_read.emit(force, settle, strategies_snapshot, dict(self._day_history))
+        except Exception as exc:
+            self._refreshing = False
+            _log_worker_error("LMV refresh dispatch failed")
+            self._status_lbl.setText(f"Live update error: {exc}"[:200])
 
     def _on_read_failed(self, msg: str):
         self._refreshing = False
