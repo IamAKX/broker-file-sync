@@ -4,13 +4,15 @@ its generic (non-LMV-specific) building blocks directly: StrategyCard,
 _CategorySection, _AddCategoryDialog, _tokens_to_display, _btn/_sep/
 _apply_dialog_bg/_svg_icon. Formula editing reuses the actual Expression
 Editor (screens.formula_editor.ExpressionEditorDialog/VariablesManagerDialog)
-— the same searchable Functions/Historic Value/Operators/Fields/Constants/
-Variables catalogue LMV's Strategy Builder uses — via three small,
-backward-compatible additions to those classes (`sections`/`variable_store`/
-`historic_value_catalogue` params, all defaulting to prior LMV behavior; see
-that module for the full rationale): `sections` drops "Rows" (cross-
-instrument "[Field] of Symbol" references, which really aren't wired up at
-all for Inception's field set) but keeps "Historic Value";
+— the same searchable Functions/Historic Value/Operators/Fields/Rows/
+Constants/Variables catalogue LMV's Strategy Builder uses — via four
+small, backward-compatible additions to those classes (`sections`/
+`variable_store`/`historic_value_catalogue`/`row_symbol_col` params, all
+defaulting to prior LMV behavior; see that module for the full rationale):
+`sections` includes "Rows" (cross-instrument "[Field] of Symbol"
+references — resolved generically by services.strategy_engine, same
+engine LMV uses, once `row_symbol_col`/`symbol_col` is set to "Symbol"
+instead of LMV's "Scrip Name", see INCEPTION_ROW_SYMBOL_COL below);
 `historic_value_catalogue` narrows THAT section to
 INCEPTION_HISTORIC_VALUE_CATALOGUE below — VALUE_DAYS_AGO/VALUE_ON_DATE/
 VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS/VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES
@@ -97,12 +99,27 @@ from screens.formula_editor import (
     ExpressionEditorDialog, VariablesManagerDialog, POINT_LOOKUP_CATALOGUE,
 )
 
-# Rows (cross-instrument "[Field] of Symbol") isn't implemented for
-# Inception's field set at all — see module docstring. Historic Value IS
-# offered (unlike the old "stays hidden by choice" state), scoped down to
+# Rows (cross-instrument "[Field] of Symbol") — the shared engine
+# (services.strategy_engine) already resolves this generically once
+# symbol_col is threaded through (which it now is everywhere: evaluate_
+# compiled/_tokens_to_expr/compile_check, plus apply_strategies' own
+# symbol_col="Symbol" already used by inception_hmv.py/inception_view_
+# by_date.py — see that module's own docstring). Was previously left out
+# of this nav on the (by-then-stale) belief that Inception had no
+# cross-row support at all — see issue #16: it was really just this
+# nav list + ROW_CATALOGUE_FROM_DATA's own symbol_col never being passed
+# "Symbol" here. Historic Value is scoped down to
 # INCEPTION_HISTORIC_VALUE_CATALOGUE below rather than the LMV-only full
 # POINT_LOOKUP_CATALOGUE.
-INCEPTION_SECTIONS = ["Functions", "Historic Value", "Operators", "Fields", "Constants", "Variables"]
+INCEPTION_SECTIONS = ["Functions", "Historic Value", "Operators", "Fields", "Rows", "Constants", "Variables"]
+
+# ROW_CATALOGUE_FROM_DATA's/compile_check's row-identity column — Inception
+# rows carry "Symbol" (e.g. "RELIANCE_I"), never LMV's "Scrip Name". Must
+# match apply_strategies' own symbol_col="Symbol" (inception_hmv.py/
+# inception_view_by_date.py) or a "[Field of Symbol]" formula would
+# compile-test fine here yet always evaluate to None in the real HMV/View
+# by Date render.
+INCEPTION_ROW_SYMBOL_COL = "Symbol"
 
 # Point-lookup functions Inception's own day_history actually resolves —
 # see services.inception_day_history's module docstring: all six work for
@@ -223,7 +240,8 @@ def _open_expression_editor(tokens: list, fields: list, theme, mode: str,
         tokens, fields, [], row, all_lmv_data=all_data, theme=theme, mode=mode,
         self_value=self_value, extra_row_values=extra_row_values, real_lmv_headers=fields,
         sections=INCEPTION_SECTIONS, variable_store=var_store,
-        historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE, parent=parent,
+        historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE,
+        row_symbol_col=INCEPTION_ROW_SYMBOL_COL, parent=parent,
     )
     if dlg.exec() == QDialog.DialogCode.Accepted:
         return dlg.get_tokens()
@@ -987,7 +1005,21 @@ class InceptionStrategyBuilderScreen(QWidget):
     def _on_sample_succeeded(self, rows: list):
         t = self._theme
         self._sample_progress.setVisible(False)
-        self._sample_rows = [r.get("values", {}) for r in rows if r.get("values")]
+        # INCEPTION_ROW_SYMBOL_COL ("Symbol") injected into each row's own
+        # values dict, DISPLAY-form (via _display_symbol, e.g. "RELIANCE"
+        # not "RELIANCE_I") — matches exactly what apply_strategies'
+        # symbol_col="Symbol" resolves against in the real HMV/View by Date
+        # render (screens.inception_hmv/inception_view_by_date build their
+        # own "Symbol" column the same way), so a "[Field of Symbol]"
+        # reference built/compile-tested here against a real sample row
+        # actually matches a real row at render time. Without this, "Rows"
+        # would offer no symbols at all (ROW_CATALOGUE_FROM_DATA finds no
+        # "Symbol" key in a bare `values` dict) — see issue #16.
+        from screens.inception_view_by_date import _display_symbol
+        self._sample_rows = [
+            dict(r["values"], **{INCEPTION_ROW_SYMBOL_COL: _display_symbol(r["symbol"])})
+            for r in rows if r.get("values")
+        ]
         if self._sample_rows:
             self._sample_status_lbl.setText(
                 f"Testing formulas against real Inception data as of "
@@ -1158,7 +1190,8 @@ class InceptionStrategyBuilderScreen(QWidget):
         dlg = VariablesManagerDialog(
             self._fields, row, all_lmv_data=all_data, theme=self._theme,
             sections=INCEPTION_SECTIONS, variable_store=var_store,
-            historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE, parent=self,
+            historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE,
+            row_symbol_col=INCEPTION_ROW_SYMBOL_COL, parent=self,
         )
         dlg.exec()
         # A variable may have been renamed/added/deleted — refresh the field

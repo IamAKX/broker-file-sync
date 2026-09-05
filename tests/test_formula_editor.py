@@ -984,6 +984,30 @@ def test_row_catalogue_lists_distinct_scrip_names(qapp):
     assert sorted(items) == ["BANKNIFTY", "NIFTY"]
 
 
+def test_row_catalogue_uses_custom_row_symbol_col(qapp):
+    # issue #16: Inception rows carry "Symbol" (e.g. "RELIANCE_I"), not
+    # LMV's "Scrip Name" — row_symbol_col lets a caller point the "Rows"
+    # nav's cross-row symbol list at that column instead.
+    from screens.formula_editor import ExpressionEditorDialog
+    all_data = [{"Symbol": "RELIANCE_I", "Close": 2900}, {"Symbol": "ADANIENT_I", "Close": 2400}]
+    dlg = ExpressionEditorDialog([], ["Close"], [], {}, all_lmv_data=all_data,
+                                 row_symbol_col="Symbol")
+    dlg._nav_list.setCurrentRow(5)  # Rows
+    items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
+    assert sorted(items) == ["ADANIENT_I", "RELIANCE_I"]
+
+
+def test_row_catalogue_defaults_to_scrip_name_when_row_symbol_col_omitted(qapp):
+    # Every existing (LMV) call site omits row_symbol_col — must behave
+    # exactly as before (ROW_SYMBOL_COLUMN, "Scrip Name").
+    from screens.formula_editor import ExpressionEditorDialog
+    all_data = [{"Symbol": "RELIANCE_I", "Scrip Name": "NIFTY", "Close": 2900}]
+    dlg = ExpressionEditorDialog([], ["Close"], [], {}, all_lmv_data=all_data)
+    dlg._nav_list.setCurrentRow(5)  # Rows
+    items = [dlg._item_list.item(i).text() for i in range(dlg._item_list.count())]
+    assert items == ["NIFTY"]
+
+
 def test_add_row_symbol_after_field_extends_bracket(qapp):
     from screens.formula_editor import ExpressionEditorDialog
     dlg = ExpressionEditorDialog([{"type": "col", "value": "Open"}], ["Open"], [], {})

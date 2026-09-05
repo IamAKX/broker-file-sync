@@ -331,7 +331,7 @@ def _expand_var_tokens(tokens: list, _seen: frozenset = frozenset()) -> list:
 # ── token → expression string ──────────────────────────────────────────────
 
 def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
-                    self_value=None) -> str:
+                    self_value=None, symbol_col: str = SYMBOL_COLUMN) -> str:
     tokens = _expand_var_tokens(tokens)
     parts = []
     sym_index = None
@@ -343,7 +343,7 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
             of_sym = tok.get("of")
             if of_sym:
                 if sym_index is None:
-                    sym_index = build_symbol_index(all_data)
+                    sym_index = build_symbol_index(all_data, symbol_col)
                 target = sym_index.get(str(of_sym).strip().upper())
                 parts.append(_col_literal(target.get(v) if target else None))
             else:
@@ -812,7 +812,16 @@ def evaluate_compiled(compiled, row_data: dict, all_data: list,
     for col_name, var in compiled.col_vars.items():
         ns[var] = _col_value(row_data.get(col_name))
     if compiled.col_of_vars:
-        idx = sym_index if sym_index is not None else build_symbol_index(all_data)
+        # BUG (fixed): this used to call build_symbol_index(all_data) with
+        # no symbol_col, silently falling back to "Scrip Name" even when
+        # the caller passed a different symbol_col (e.g. Inception's
+        # "Symbol") — a "[Col of Symbol]" reference evaluated bare (no
+        # pre-built sym_index — see apply_strategies, which DOES pass
+        # symbol_col correctly and so masked this) always came back None
+        # for any row_data whose rows are keyed by anything other than
+        # "Scrip Name". Reachable from evaluate()/compile_check() (Compile
+        # & Test in the Strategy Builder editor) for Inception.
+        idx = sym_index if sym_index is not None else build_symbol_index(all_data, symbol_col)
         for var, col_name, symbol in compiled.col_of_vars:
             target = idx.get(str(symbol).strip().upper())
             ns[var] = _col_value(target.get(col_name)) if target else None
@@ -865,7 +874,7 @@ def evaluate_compiled(compiled, row_data: dict, all_data: list,
 
 
 def _evaluate_verbose(tokens: list, row_data: dict, all_data: list,
-                      self_value=None):
+                      self_value=None, symbol_col: str = SYMBOL_COLUMN):
     """Like evaluate() but returns (result, error). error is None on success.
 
     Unlike evaluate(), this surfaces the real exception object (rather than
@@ -874,7 +883,7 @@ def _evaluate_verbose(tokens: list, row_data: dict, all_data: list,
     """
     if not tokens:
         return None, "Formula is empty."
-    expr = _tokens_to_expr(tokens, row_data, all_data, self_value)
+    expr = _tokens_to_expr(tokens, row_data, all_data, self_value, symbol_col)
     if not expr.strip():
         return None, "Formula is empty."
     try:
@@ -1436,7 +1445,8 @@ def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
 
 
 def compile_check(tokens: list, row_data: dict, all_data: list,
-                  self_value=None, lmv_headers: list | None = None) -> tuple:
+                  self_value=None, lmv_headers: list | None = None,
+                  symbol_col: str = SYMBOL_COLUMN) -> tuple:
     """
     Validate tokens against the actual loaded LMV sheet (never dummy data).
     Returns (True, result_str) on success, (False, error_message) on failure.
@@ -1459,6 +1469,12 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     placeholder instead of being evaluated strictly — see the
     used_placeholder block below. Omit it (None) to test every referenced
     field strictly, historic or not — the old, stricter behaviour.
+
+    ``symbol_col`` names *row_data*/*all_data*'s own row-identity column,
+    forwarded to a "[Col of Symbol]" cross-row reference's symbol lookup
+    (see evaluate_compiled's own symbol_col docstring) — defaults to
+    SYMBOL_COLUMN ("Scrip Name", LMV's), screens.inception_strategy_builder
+    passes "Symbol" instead.
     """
     if not tokens:
         return False, "Formula is empty."
@@ -1477,7 +1493,7 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     # Editor already checks brackets/parentheses against the raw text before
     # reaching here, so this is mainly a safety net for tokens built some
     # other way, e.g. a JSON import.)
-    expr = _tokens_to_expr(tokens, row_data, all_data, self_value)
+    expr = _tokens_to_expr(tokens, row_data, all_data, self_value, symbol_col)
     try:
         compile(expr, "<formula>", "eval")  # noqa: S307
     except SyntaxError:
@@ -1530,7 +1546,7 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
         row_data = substituted
 
     # 5. Evaluate against the real first row, surfacing the actual error.
-    result, err = _evaluate_verbose(tokens, row_data, all_data, self_value)
+    result, err = _evaluate_verbose(tokens, row_data, all_data, self_value, symbol_col)
     if err:
         return False, (_friendly_exception(err) if isinstance(err, Exception) else err)
 

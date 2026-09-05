@@ -1004,15 +1004,25 @@ class ExpressionEditorDialog(QDialog):
                  extra_functions: list = None,
                  historic_value_catalogue: list = None,
                  inception_field_codes: list = None,
+                 row_symbol_col: str = None,
                  parent=None):
         """sections/variable_store: added for screens.inception_strategy_builder's
         reuse of this dialog with Inception's own field set — both default to
         the exact prior behavior (full 7-section nav, services.
         formula_variable_store), so every existing (LMV) call site is
         unaffected. sections lets a caller drop nav entries that don't apply
-        to it (Inception has no cross-row "of Symbol" support, so it drops
-        "Rows"); variable_store swaps which store's variables the Variables
+        to it; variable_store swaps which store's variables the Variables
         tab/"Save as Variable" reads and writes.
+
+        row_symbol_col: names *all_lmv_data*'s own row-identity column for
+        the "Rows" section's cross-row "[Field of Symbol]" references
+        (ROW_CATALOGUE_FROM_DATA's own symbol_col, and compile_check's) —
+        defaults to ROW_SYMBOL_COLUMN ("Scrip Name", LMV's own column).
+        screens.inception_strategy_builder passes "Symbol" instead
+        (Inception rows have no "Scrip Name" column at all) — see
+        services.strategy_engine.evaluate_compiled's own symbol_col
+        docstring for why this must match apply_strategies' symbol_col
+        for the real render path, not just this editor's own preview.
 
         historic_value_catalogue: overrides what the "Historic Value" nav
         entry lists (defaults to the full POINT_LOOKUP_CATALOGUE, i.e. every
@@ -1061,6 +1071,7 @@ class ExpressionEditorDialog(QDialog):
             from services.lmv_inception_fields import FIELD_CODES
             self._inception_field_codes = list(FIELD_CODES)
         self._inception_field_code_set = set(self._inception_field_codes)
+        self._row_symbol_col = row_symbol_col if row_symbol_col is not None else ROW_SYMBOL_COLUMN
         # The sheet's OWN currently-loaded columns — a strict subset of
         # self._lmv_headers above, which is really "every name offered in
         # the Fields list" (Formula Builder fields, other strategy columns,
@@ -1448,7 +1459,7 @@ class ExpressionEditorDialog(QDialog):
             return [e for e in field_catalogue()
                     if e["token"]["value"] in self._inception_field_code_set]
         if section == "Rows":
-            return ROW_CATALOGUE_FROM_DATA(self._all_lmv_data)
+            return ROW_CATALOGUE_FROM_DATA(self._all_lmv_data, symbol_col=self._row_symbol_col)
         if section == "Constants":
             return CONSTANTS_CATALOGUE
         if section == "Variables":
@@ -1768,7 +1779,8 @@ class ExpressionEditorDialog(QDialog):
             test_all = [dict(test_all[0], **self._extra_row_values)] + list(test_all[1:])
         ok, msg = compile_check(tokens, test_row, test_all,
                                 self_value=self._self_value,
-                                lmv_headers=self._real_lmv_headers)
+                                lmv_headers=self._real_lmv_headers,
+                                symbol_col=self._row_symbol_col)
         if ok:
             self._compiled_tokens = tokens
             self._compiled_ok = True
@@ -1847,10 +1859,12 @@ class VariablesManagerDialog(QDialog):
                  all_lmv_data: list = None, theme=None,
                  sections: list = None, variable_store=None,
                  extra_functions: list = None,
-                 historic_value_catalogue: list = None, parent=None):
-        """sections/variable_store/extra_functions/historic_value_catalogue:
-        see ExpressionEditorDialog — all default to prior (LMV) behavior and
-        are forwarded to every ExpressionEditorDialog this dialog opens."""
+                 historic_value_catalogue: list = None,
+                 row_symbol_col: str = None, parent=None):
+        """sections/variable_store/extra_functions/historic_value_catalogue/
+        row_symbol_col: see ExpressionEditorDialog — all default to prior
+        (LMV) behavior and are forwarded to every ExpressionEditorDialog
+        this dialog opens."""
         super().__init__(parent)
         self._lmv_headers   = list(lmv_headers)
         self._lmv_first_row = lmv_first_row or {}
@@ -1860,6 +1874,7 @@ class VariablesManagerDialog(QDialog):
         self._variable_store = variable_store
         self._extra_functions = extra_functions
         self._historic_value_catalogue = historic_value_catalogue
+        self._row_symbol_col = row_symbol_col
         self.setWindowTitle("Manage Variables")
         self.setFixedSize(520, 440)
         self._build()
@@ -1991,7 +2006,8 @@ class VariablesManagerDialog(QDialog):
             real_lmv_headers=list(self._lmv_first_row.keys()),
             sections=self._sections, variable_store=self._variable_store,
             extra_functions=self._extra_functions,
-            historic_value_catalogue=self._historic_value_catalogue, parent=self,
+            historic_value_catalogue=self._historic_value_catalogue,
+            row_symbol_col=self._row_symbol_col, parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()
@@ -2011,7 +2027,8 @@ class VariablesManagerDialog(QDialog):
             real_lmv_headers=list(self._lmv_first_row.keys()),
             sections=self._sections, variable_store=self._variable_store,
             extra_functions=self._extra_functions,
-            historic_value_catalogue=self._historic_value_catalogue, parent=self,
+            historic_value_catalogue=self._historic_value_catalogue,
+            row_symbol_col=self._row_symbol_col, parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()

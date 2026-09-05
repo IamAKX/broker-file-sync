@@ -502,6 +502,58 @@ def test_apply_strategies_supports_col_of_formula():
     assert new_data[1][2] == 0.5    # INFY (50) / NIFTY (100)
 
 
+# ── "[Col of Symbol]" with a non-default symbol_col (issue #16: Inception's
+# row-identity column is "Symbol", not LMV's "Scrip Name") ───────────────────
+# Regression for a real bug: evaluate_compiled built an on-demand sym_index
+# via build_symbol_index(all_data) with NO symbol_col forwarded, always
+# defaulting to "Scrip Name" — invisible via apply_strategies (which
+# pre-builds sym_index with the right symbol_col and passes it in) but a
+# bare evaluate()/compile_check() call (Strategy Builder's own Compile &
+# Test) always got None for any row keyed by anything else.
+
+def test_col_of_resolves_with_custom_symbol_col_via_bare_evaluate():
+    row_a = {"Symbol": "RELIANCE_I", "Close": "2900"}
+    row_b = {"Symbol": "ADANIENT_I", "Close": "2400"}
+    result = evaluate([tok_col_of("Close", "RELIANCE_I")], row_b, [row_a, row_b],
+                      symbol_col="Symbol")
+    assert result == 2900.0
+
+
+def test_col_of_with_custom_symbol_col_still_none_under_default_symbol_col():
+    # Sanity check the other direction: without passing symbol_col="Symbol",
+    # rows keyed by "Symbol" (not "Scrip Name") genuinely don't resolve —
+    # confirms the fix is symbol_col-driven, not accidentally always-on.
+    row_a = {"Symbol": "RELIANCE_I", "Close": "2900"}
+    row_b = {"Symbol": "ADANIENT_I", "Close": "2400"}
+    result = evaluate([tok_col_of("Close", "RELIANCE_I")], row_b, [row_a, row_b])
+    assert result is None
+
+
+def test_compile_check_resolves_col_of_with_custom_symbol_col():
+    from services.strategy_engine import compile_check
+    row_a = {"Symbol": "RELIANCE_I", "Close": "2900"}
+    row_b = {"Symbol": "ADANIENT_I", "Close": "2400"}
+    ok, msg = compile_check([tok_col_of("Close", "RELIANCE_I")], row_b, [row_a, row_b],
+                            symbol_col="Symbol")
+    assert ok is True
+    assert msg == "2900.0"
+
+
+def test_apply_strategies_col_of_still_works_with_default_symbol_col():
+    # LMV's own default behavior (symbol_col omitted, "Scrip Name") must be
+    # completely unaffected by threading symbol_col through evaluate_
+    # compiled/_tokens_to_expr/compile_check.
+    from services.strategy_engine import apply_strategies
+    strat = {
+        "id": "1", "active": True, "row_filter": [],
+        "columns": [{"name": "VsNifty", "formula": [tok_col_of("LTP", "NIFTY")]}],
+    }
+    headers = ["Scrip Name", "LTP"]
+    data = [["NIFTY", "100"], ["INFY", "50"]]
+    new_headers, new_data = apply_strategies([strat], headers, data)
+    assert new_data[1][2] == 100.0
+
+
 # ── _DAYS historic aggregates ────────────────────────────────────────────────
 # Unlike _ALL, these can't be resolved from row_data/all_data alone — they
 # need a caller-supplied day_history (services.formula_stats_engine.

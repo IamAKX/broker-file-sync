@@ -2110,6 +2110,86 @@ def test_open_expression_editor_falls_back_to_dummy_row_without_sample_data(qapp
     assert captured["row_arg"] == {"OPEN": 1.0, "CLOSE": 1.0}
 
 
+# ── "Rows" (cross-instrument "[Field] of Symbol") — issue #16 ───────────────
+
+def test_inception_sections_includes_rows():
+    """Was previously dropped from the nav on the (stale) belief that
+    Inception had no cross-row support at all — see issue #16."""
+    from screens.inception_strategy_builder import INCEPTION_SECTIONS
+    assert "Rows" in INCEPTION_SECTIONS
+
+
+def test_open_expression_editor_passes_inception_row_symbol_col(qapp, controller, monkeypatch):
+    from screens import inception_strategy_builder as isb
+    from PySide6.QtWidgets import QDialog
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(isb, "ExpressionEditorDialog", _FakeDlg)
+    isb._open_expression_editor([], ["OPEN", "CLOSE"], None, "value", sample_rows=None)
+    assert captured["row_symbol_col"] == isb.INCEPTION_ROW_SYMBOL_COL == "Symbol"
+
+
+def test_strategy_builder_sample_rows_carry_display_symbol_for_rows_section(
+    qapp, controller, monkeypatch, bars_db,
+):
+    """The "Rows" nav (and cross-row Compile & Test) can only offer/resolve
+    a symbol if each sample row carries one under INCEPTION_ROW_SYMBOL_COL
+    ("Symbol"), in the SAME display form ("ABB", not the raw roll-series
+    "ABB_I") apply_strategies' own symbol_col="Symbol" uses at real HMV/
+    View by Date render time (screens.inception_hmv/inception_view_by_date)
+    — otherwise a formula built/tested here against a real sample row could
+    never match a real row later. See issue #16."""
+    from screens.inception_strategy_builder import InceptionStrategyBuilderScreen, INCEPTION_ROW_SYMBOL_COL
+
+    monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+
+    screen = InceptionStrategyBuilderScreen(controller)
+    screen._start_sample_load()
+    assert screen._sample_worker.wait(5000)
+    qapp.processEvents()
+
+    assert screen._sample_rows
+    assert screen._sample_rows[0][INCEPTION_ROW_SYMBOL_COL] == "ABB"
+
+
+def test_row_of_symbol_formula_resolves_against_real_inception_sample_data(
+    qapp, controller, monkeypatch, bars_db,
+):
+    """End-to-end: a "[CLOSE of ABB]"-style cross-row formula, compile-
+    tested against the real sample rows InceptionStrategyBuilderScreen
+    loads, actually resolves — not just the UI plumbing in isolation."""
+    from screens.inception_strategy_builder import InceptionStrategyBuilderScreen, INCEPTION_ROW_SYMBOL_COL
+    from services.strategy_engine import compile_check
+
+    monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
+    bars_db.upsert_bars([
+        _bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100),
+        _bar("ADANIENT_I", date(2026, 8, 18), 190, 205, 185, 200),
+    ])
+
+    screen = InceptionStrategyBuilderScreen(controller)
+    screen._start_sample_load()
+    assert screen._sample_worker.wait(5000)
+    qapp.processEvents()
+
+    row = next(r for r in screen._sample_rows if r[INCEPTION_ROW_SYMBOL_COL] == "ADANIENT")
+    tokens = [{"type": "col", "value": "CLOSE", "of": "ABB"}]
+    ok, msg = compile_check(tokens, row, screen._sample_rows, symbol_col=INCEPTION_ROW_SYMBOL_COL)
+    assert ok is True
+    assert msg == "100.0"
+
+
 def test_strategy_builder_new_strategy_opens_editor(qapp, controller, monkeypatch):
     from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
 
