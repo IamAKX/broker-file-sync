@@ -1860,11 +1860,12 @@ class VariablesManagerDialog(QDialog):
                  sections: list = None, variable_store=None,
                  extra_functions: list = None,
                  historic_value_catalogue: list = None,
-                 row_symbol_col: str = None, parent=None):
+                 row_symbol_col: str = None,
+                 inception_field_codes: list = None, parent=None):
         """sections/variable_store/extra_functions/historic_value_catalogue/
-        row_symbol_col: see ExpressionEditorDialog — all default to prior
-        (LMV) behavior and are forwarded to every ExpressionEditorDialog
-        this dialog opens."""
+        row_symbol_col/inception_field_codes: see ExpressionEditorDialog —
+        all default to prior (LMV) behavior and are forwarded to every
+        ExpressionEditorDialog this dialog opens."""
         super().__init__(parent)
         self._lmv_headers   = list(lmv_headers)
         self._lmv_first_row = lmv_first_row or {}
@@ -1875,6 +1876,7 @@ class VariablesManagerDialog(QDialog):
         self._extra_functions = extra_functions
         self._historic_value_catalogue = historic_value_catalogue
         self._row_symbol_col = row_symbol_col
+        self._inception_field_codes = inception_field_codes
         self.setWindowTitle("Manage Variables")
         self.setFixedSize(520, 440)
         self._build()
@@ -2007,7 +2009,8 @@ class VariablesManagerDialog(QDialog):
             sections=self._sections, variable_store=self._variable_store,
             extra_functions=self._extra_functions,
             historic_value_catalogue=self._historic_value_catalogue,
-            row_symbol_col=self._row_symbol_col, parent=self,
+            row_symbol_col=self._row_symbol_col,
+            inception_field_codes=self._inception_field_codes, parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()
@@ -2028,7 +2031,8 @@ class VariablesManagerDialog(QDialog):
             sections=self._sections, variable_store=self._variable_store,
             extra_functions=self._extra_functions,
             historic_value_catalogue=self._historic_value_catalogue,
-            row_symbol_col=self._row_symbol_col, parent=self,
+            row_symbol_col=self._row_symbol_col,
+            inception_field_codes=self._inception_field_codes, parent=self,
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             variable["formula"] = dlg.get_tokens()

@@ -2348,6 +2348,90 @@ def test_strategy_builder_toggle_active_reverts_on_api_failure(qapp, controller,
     assert screen._strategies[0]["active"] is True   # reverted
 
 
+# ── Group A/B columns missing from the Fields list — issue #17 ──────────────
+# Root cause: ExpressionEditorDialog's "Fields" catalogue excludes any
+# column named in inception_field_codes, on the assumption it lives in the
+# separate "Inception Field" nav section instead — but that section is
+# LMV-only (Inception strategies referencing Inception's OWN columns would
+# be nonsensical) and isn't in INCEPTION_SECTIONS. Leaving
+# inception_field_codes at its default (lmv_inception_fields.FIELD_CODES,
+# LMV's OWN ~65-code set) silently excluded any Inception Group A/B column
+# that happens to share a name with one of those (52WH, ATH, CQO, PQC, QT,
+# ...) from "Fields" entirely, with nowhere else to find it.
+
+def test_inception_field_codes_constant_is_empty():
+    from screens.inception_strategy_builder import INCEPTION_FIELD_CODES
+    assert INCEPTION_FIELD_CODES == []
+
+
+def test_group_a_codes_not_excluded_from_inception_fields_list(qapp):
+    """Direct repro of issue #17: 52WH/ATH/CQO (real Group A codes, also
+    coincidentally in LMV's lmv_inception_fields.FIELD_CODES) must appear
+    in the Fields list built for Inception's Strategy Builder."""
+    from screens.formula_editor import ExpressionEditorDialog
+    from screens.inception_strategy_builder import (
+        INCEPTION_SECTIONS, INCEPTION_HISTORIC_VALUE_CATALOGUE, INCEPTION_FIELD_CODES,
+    )
+    from services.lmv_inception_fields import FIELD_CODES as LMV_FIELD_CODES
+    assert {"52WH", "ATH", "CQO"} <= set(LMV_FIELD_CODES)  # sanity: real collision, not a made-up example
+
+    fields = ["OPEN", "CLOSE", "52WH", "ATH", "CQO"]
+    dlg = ExpressionEditorDialog(
+        [], fields, [], {f: 1.0 for f in fields}, all_lmv_data=[{f: 1.0 for f in fields}],
+        real_lmv_headers=fields, sections=INCEPTION_SECTIONS,
+        historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE,
+        inception_field_codes=INCEPTION_FIELD_CODES,
+    )
+    names = [e["name"] for e in dlg._catalogue_for_section("Fields")]
+    assert "[52WH]" in names and "[ATH]" in names and "[CQO]" in names
+
+
+def test_open_expression_editor_passes_empty_inception_field_codes(qapp, controller, monkeypatch):
+    from screens import inception_strategy_builder as isb
+    from PySide6.QtWidgets import QDialog
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(isb, "ExpressionEditorDialog", _FakeDlg)
+    isb._open_expression_editor([], ["OPEN", "52WH"], None, "value", sample_rows=None)
+    assert captured["inception_field_codes"] == []
+
+
+def test_variables_manager_dialog_also_passes_empty_inception_field_codes(qapp, controller, monkeypatch):
+    """The Variables tab opens its own ExpressionEditorDialog per variable
+    (VariablesManagerDialog._new_variable/_edit_selected) — must inherit
+    the same fix, not just the column-formula editor."""
+    import screens.formula_editor as fe_mod
+    from screens.inception_strategy_builder import INCEPTION_FIELD_CODES
+    from PySide6.QtWidgets import QDialog, QInputDialog
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, *args, **kwargs):
+            captured.update(kwargs)
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(fe_mod, "ExpressionEditorDialog", _FakeDlg)
+    from services import formula_variable_store as default_store
+    monkeypatch.setattr(default_store, "new_variable", lambda name: {"name": name, "formula": []})
+    monkeypatch.setattr(QInputDialog, "getText", lambda *a, **k: ("TestVar", True))
+
+    dlg = fe_mod.VariablesManagerDialog(["OPEN", "52WH"], {"OPEN": 1.0, "52WH": 1.0},
+                                        inception_field_codes=INCEPTION_FIELD_CODES)
+    dlg._new_variable()
+    assert captured.get("inception_field_codes") == []
+
+
 # ── screens: admin sync ───────────────────────────────────────────────────
 
 def test_admin_sync_screen_constructs(qapp, controller):

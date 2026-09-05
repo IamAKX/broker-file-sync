@@ -121,6 +121,19 @@ INCEPTION_SECTIONS = ["Functions", "Historic Value", "Operators", "Fields", "Row
 # by Date render.
 INCEPTION_ROW_SYMBOL_COL = "Symbol"
 
+# ExpressionEditorDialog.inception_field_codes — MUST be [] here, not the
+# default (lmv_inception_fields.FIELD_CODES, LMV's own ~65-code set). This
+# screen has no "Inception Field" nav section at all (that section is for
+# LMV strategies referencing Inception's historical columns — meaningless
+# here, we ARE Inception). Leaving the default in place silently excluded
+# every Inception column whose name happens to also be one of LMV's
+# FIELD_CODES (52WH, ATH, CQO, PQC, QT, ...) from the "Fields" list
+# entirely — _catalogue_for_section("Fields") filters OUT anything in that
+# set on the assumption it lives in "Inception Field" instead, which isn't
+# in this screen's nav — so those columns became completely unreachable
+# even though the underlying data has them. See issue #17.
+INCEPTION_FIELD_CODES: list = []
+
 # Point-lookup functions Inception's own day_history actually resolves —
 # see services.inception_day_history's module docstring: all six work for
 # raw OHLCV fields (OPEN/HIGH/LOW/CLOSE/VOL/OPENINT) only, same "blank on
@@ -241,7 +254,8 @@ def _open_expression_editor(tokens: list, fields: list, theme, mode: str,
         self_value=self_value, extra_row_values=extra_row_values, real_lmv_headers=fields,
         sections=INCEPTION_SECTIONS, variable_store=var_store,
         historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE,
-        row_symbol_col=INCEPTION_ROW_SYMBOL_COL, parent=parent,
+        row_symbol_col=INCEPTION_ROW_SYMBOL_COL,
+        inception_field_codes=INCEPTION_FIELD_CODES, parent=parent,
     )
     if dlg.exec() == QDialog.DialogCode.Accepted:
         return dlg.get_tokens()
@@ -1191,7 +1205,8 @@ class InceptionStrategyBuilderScreen(QWidget):
             self._fields, row, all_lmv_data=all_data, theme=self._theme,
             sections=INCEPTION_SECTIONS, variable_store=var_store,
             historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE,
-            row_symbol_col=INCEPTION_ROW_SYMBOL_COL, parent=self,
+            row_symbol_col=INCEPTION_ROW_SYMBOL_COL,
+            inception_field_codes=INCEPTION_FIELD_CODES, parent=self,
         )
         dlg.exec()
         # A variable may have been renamed/added/deleted — refresh the field
