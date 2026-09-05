@@ -185,6 +185,14 @@ class _LiveDataWorker(QObject):
     day_history_result = Signal(object, list)
     day_history_failed = Signal(str, list)    # error message (already prefixed), strategies
 
+    # LiveViewerWindow._show_strategy_picker's store reload — see
+    # sync_strategies_from_store below for why this moved off the GUI
+    # thread. strategies_sync_failed carries nothing: same "keep whatever
+    # the window already had" best-effort behavior the old GUI-thread
+    # version used, just reported explicitly instead of failing silently.
+    strategies_synced = Signal(list)          # merged strategy list
+    strategies_sync_failed = Signal()
+
     def __init__(self, reader, sector_map: dict, name_to_symbol: dict):
         super().__init__()
         self._reader         = reader
@@ -339,6 +347,36 @@ class _LiveDataWorker(QObject):
             # than dying silently.
             _log_worker_error("LMV N-day/day-history refresh failed unexpectedly")
             self.day_history_failed.emit(f"N-day column refresh failed: {exc}"[:200], strategies)
+
+    def sync_strategies_from_store(self, strategies: list) -> None:
+        """Reloads strategy definitions from services.strategy_store — used
+        right before the "⚡ Strategies" picker opens, so a strategy just
+        switched on in Strategy Builder shows up immediately instead of
+        needing the unrelated "↻ N-Day Data" button first (see
+        LiveViewerWindow._show_strategy_picker).
+
+        Runs on this worker thread, not the GUI thread: an earlier version
+        called services.strategy_store.load_all() directly from
+        _show_strategy_picker on the theory that "a discrete click, not a
+        per-tick path" made a synchronous network call acceptable there —
+        but that call uses the same server as every other request in this
+        window, so a slow/unreachable one froze the whole app (Windows'
+        "Not Responding" title included) for the request's full timeout on
+        every single click, exactly the class of bug do_read/recompute/
+        refresh_day_history were all already routed off the GUI thread to
+        avoid. Routing this the same way costs nothing on the happy path
+        (the picker still opens the moment the reply comes back) and keeps
+        the window responsive the rest of the time.
+        """
+        from services import strategy_store
+        from api.exceptions import ApiError, NetworkError
+        try:
+            fresh = strategy_store.load_all()
+        except (ApiError, NetworkError):
+            self.strategies_sync_failed.emit()
+            return
+        merged = strategy_store.merge_session_active(fresh, strategies)
+        self.strategies_synced.emit(merged)
 
     def do_read(self, force_slow: bool, settle_s: float, strategies: list,
                day_history: dict | None = None) -> None:
@@ -971,6 +1009,8 @@ class LiveViewerWindow(QWidget):
     # Data" path (True) — notif_configs is no longer a GUI-thread input,
     # the worker fetches it itself (see refresh_day_history's docstring).
     _request_day_history = Signal(list, str, bool)
+    # See _LiveDataWorker.sync_strategies_from_store — strategies snapshot in.
+    _request_strategies_sync = Signal(list)
     data_updated       = Signal(list, list)    # headers, data — for downstream consumers
     # self._day_history, whenever it's (re)computed — for downstream
     # consumers (Strategy Builder's compile-test) that need the same
@@ -1038,6 +1078,11 @@ class LiveViewerWindow(QWidget):
         self._day_history_refreshing = False
         self._day_history_pending = False
         self._day_history_pending_reload = False
+
+        # Guards _show_strategy_picker against a second click while its
+        # worker-routed store reload (_LiveDataWorker.sync_strategies_from_store)
+        # is already in flight — see that method's docstring.
+        self._strategy_picker_pending = False
 
         # Column sort — a snapshot of row order (by "Scrip Name") captured
         # at the moment the user clicks a header, not a live re-sort every
@@ -1342,6 +1387,7 @@ class LiveViewerWindow(QWidget):
         self._request_shutdown.connect(self._worker.shutdown)
         self._request_or_refresh.connect(self._worker.refresh_opening_range)
         self._request_day_history.connect(self._worker.refresh_day_history)
+        self._request_strategies_sync.connect(self._worker.sync_strategies_from_store)
         self._worker.result.connect(self._on_data_ready)
         self._worker.failed.connect(self._on_read_failed)
         self._worker.recompute_result.connect(self._on_recompute_ready)
@@ -1349,6 +1395,8 @@ class LiveViewerWindow(QWidget):
         self._worker.opening_range_ready.connect(self._on_opening_range_ready)
         self._worker.day_history_result.connect(self._on_day_history_from_store_ready)
         self._worker.day_history_failed.connect(self._on_day_history_from_store_failed)
+        self._worker.strategies_synced.connect(self._on_strategies_synced)
+        self._worker.strategies_sync_failed.connect(self._on_strategies_sync_failed)
         self._worker_thread.start()
 
         # Load HMV's historical Group A/B fields (52WH, ATH, gap codes, ...)
@@ -2610,33 +2658,56 @@ class LiveViewerWindow(QWidget):
         self._recompute_display()
 
     def _show_strategy_picker(self):
-        self._sync_strategies_from_store()
+        """Opens the "⚡ Strategies" picker after refreshing self._strategies
+        from services.strategy_store, so a strategy just switched on in
+        Strategy Builder shows up immediately instead of needing the
+        unrelated "↻ N-Day Data" button first.
+
+        The reload is routed through the worker thread
+        (_LiveDataWorker.sync_strategies_from_store) rather than called
+        here directly — a previous version called
+        services.strategy_store.load_all() straight from this method on
+        the GUI thread, which froze the whole window (Windows' "Not
+        Responding" title included) for that request's full timeout
+        whenever the server was slow or unreachable, on every single
+        click. The button disables itself and the popup opens the moment
+        the reply (or failure) arrives; the GUI event loop keeps pumping
+        the entire time, so the window stays responsive regardless of how
+        slow that turns out to be.
+        """
+        if self._worker is None:
+            # No worker yet (shouldn't happen once the window is visible) —
+            # nothing to route the reload through; open with whatever
+            # self._strategies already has rather than not opening at all.
+            self._open_strategy_picker()
+            return
+        if self._strategy_picker_pending:
+            return
+        self._strategy_picker_pending = True
+        self._strat_btn.setEnabled(False)
+        self._request_strategies_sync.emit(list(self._strategies))
+
+    def _on_strategies_synced(self, merged: list):
+        self._strategy_picker_pending = False
+        self._strat_btn.setEnabled(True)
+        self._strategies = merged
+        self._update_strat_btn_label()
+        self._open_strategy_picker()
+
+    def _on_strategies_sync_failed(self):
+        # Best-effort, same as every other store reload in this window —
+        # open with whatever self._strategies already had.
+        self._strategy_picker_pending = False
+        self._strat_btn.setEnabled(True)
+        self._open_strategy_picker()
+
+    def _open_strategy_picker(self):
         popup = StrategyPickerPopup(self._filtered_strategies(), self._theme, self)
         popup.applied.connect(self._on_strategies_applied)
         btn_pos = self._strat_btn.mapToGlobal(self._strat_btn.rect().bottomLeft())
         popup.adjustSize()
         popup.move(btn_pos.x(), btn_pos.y() + 4)
         popup.show()
-
-    def _sync_strategies_from_store(self):
-        """Reloads strategy definitions from services.strategy_store right
-        before the picker opens, so a strategy just switched on in Strategy
-        Builder shows up immediately instead of needing the unrelated
-        "↻ N-Day Data" button first (previously the only thing that resynced
-        self._strategies — see _refresh_day_history_from_store's docstring).
-        Synchronous rather than routed through the worker thread: this is a
-        discrete click, not a per-tick path, same rationale as
-        _refresh_day_history. A store-refresh hiccup here just means the
-        picker opens with whatever it already had, same as any other
-        best-effort reload in this window."""
-        from services import strategy_store
-        from api.exceptions import ApiError, NetworkError
-        try:
-            fresh = strategy_store.load_all()
-        except (ApiError, NetworkError):
-            return
-        self._strategies = strategy_store.merge_session_active(fresh, self._strategies)
-        self._update_strat_btn_label()
 
     def _on_strategies_applied(self, updated: list):
         # Merge updated strategies back by ID so strategies outside the current
