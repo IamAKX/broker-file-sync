@@ -854,6 +854,32 @@ def test_live_viewer_sector_map_built(qapp, tmp_path, monkeypatch):
     assert lmv._sector_map.get("HDFCBANK") == "BANKING"
 
 
+def test_live_viewer_sector_map_normalizes_config_editor_case(qapp, tmp_path, monkeypatch):
+    """issue #19: a stock saved via Config Editor's Sector Stock tab in
+    anything but all-caps/no-whitespace (e.g. "AtherEnerg", "Sagility" —
+    typed naturally, unlike "MAHABANK") used to never resolve, since
+    _inject_sector_rows looks up by str(scrip).strip().upper() against a
+    map keyed by the RAW (un-normalized) Config Editor text."""
+    from services import strategy_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    from services import config_store
+    monkeypatch.setattr(
+        config_store, "load_tab",
+        lambda key, default: [("BANKING", "MAHABANK"), ("POWER", "AtherEnerg"), ("IT", "Sagility")]
+        if key == "sector_stock" else default,
+    )
+    from screens.live_viewer import LiveViewerWindow, _inject_sector_rows
+    lmv = LiveViewerWindow("", "", "", [])
+    assert lmv._sector_map.get("ATHERENERG") == "POWER"
+    assert lmv._sector_map.get("SAGILITY") == "IT"
+
+    headers, data = _inject_sector_rows(["Scrip Name", "Open"], [["ATHERENERG", 100], ["SAGILITY", 50]],
+                                        lmv._sector_map)
+    assert headers[0] == "Sector"
+    assert data[0][0] == "POWER"
+    assert data[1][0] == "IT"
+
+
 def test_inject_sector_prepends_column(qapp, tmp_path, monkeypatch):
     from services import strategy_store as store
     monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))

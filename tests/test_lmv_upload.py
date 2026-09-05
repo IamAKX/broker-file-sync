@@ -89,3 +89,19 @@ def test_pivot_snapshot_for_viewer_builds_headers_and_rows():
     assert row_by_scrip["Infosys Limited"][2] == 1790.0
     assert row_by_scrip["Infosys Limited"][3] == 1780.0
     assert row_by_scrip["ABB LTD"][3] is None
+
+
+def test_pivot_snapshot_for_viewer_normalizes_config_editor_sector_case(monkeypatch):
+    """issue #19: a sector saved in Config Editor with natural (non-caps)
+    casing, e.g. "AtherEnerg", must still resolve — matches screens.
+    live_viewer's identical fix/test for the live-grid path."""
+    from services import config_store
+    monkeypatch.setattr(
+        config_store, "load_tab",
+        lambda key, default: [("POWER", "AtherEnerg")] if key == "sector_stock" else default,
+    )
+    from screens.lmv_upload import _pivot_snapshot_for_viewer
+
+    stocks = [{"symbol": "ATHERENERG", "display_name": "ATHERENERG", "metrics": {"Open": 1640.0}}]
+    headers, rows = _pivot_snapshot_for_viewer(stocks)
+    assert rows[0][0] == "POWER"

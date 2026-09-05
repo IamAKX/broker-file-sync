@@ -234,7 +234,10 @@ class LmvUploadScreen(QWidget):
 
         script_name_data = config_store.load_tab("script_name", SCRIPT_NAME_DATA)
         sector_stock_data = config_store.load_tab("sector_stock", SECTOR_STOCK_DATA)
-        sector_map = {stock: sector for sector, stock in sector_stock_data}
+        # .strip().upper() the key — see screens.live_viewer's identical
+        # fix (issue #19) for why an un-normalized key silently drops any
+        # stock not typed in Config Editor in exactly that case/whitespace.
+        sector_map = {stock.strip().upper(): sector for sector, stock in sector_stock_data}
         try:
             headers, data = read_merged_static(
                 self._cards["Sharekhan"]._selected_file,
@@ -479,7 +482,9 @@ def _pivot_snapshot_for_viewer(stocks: list) -> tuple:
     but Sector was never a "from file or DB" column to begin with.
     """
     sector_stock_data = config_store.load_tab("sector_stock", SECTOR_STOCK_DATA)
-    sector_map = {stock: sector for sector, stock in sector_stock_data}
+    # .strip().upper() the key — see screens.live_viewer's identical fix
+    # (issue #19).
+    sector_map = {stock.strip().upper(): sector for sector, stock in sector_stock_data}
     metric_keys = sorted({k for s in stocks for k in s.get("metrics", {})})
     headers = ["Sector", "Scrip Name"] + metric_keys
     rows = []

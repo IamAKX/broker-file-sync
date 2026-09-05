@@ -1059,7 +1059,15 @@ class LiveViewerWindow(QWidget):
         from config_defaults import SECTOR_STOCK_DATA
         from services import config_store
         sector_stock_data = config_store.load_tab("sector_stock", SECTOR_STOCK_DATA)
-        self._sector_map: dict = {stock: sector for sector, stock in sector_stock_data}
+        # .strip().upper() the key here — _inject_sector_rows looks up by
+        # str(scrip).strip().upper() (the live Scrip Name is what's
+        # normalized there, not user-typed data), so a stock saved in
+        # Config Editor in anything but that exact case/whitespace (e.g.
+        # "AtherEnerg" or "Sagility" typed naturally, vs. "MAHABANK" typed
+        # in caps) silently never matched — see issue #19.
+        self._sector_map: dict = {
+            stock.strip().upper(): sector for sector, stock in sector_stock_data
+        }
 
         # Same symbol resolution used by the Opening Range capture job
         # (services/scheduled_jobs.py::_build_opening_range_payload) — needed
