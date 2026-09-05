@@ -219,6 +219,110 @@ def test_delete_metric_removes_it(qapp):
     assert len(section.result_config()["metrics"]) == 1
 
 
+# ── Empty-formula Target/Stop Loss warning (issue #23) ───────────────────────
+# services.strategy_alerts.engine freezes a Target/Stop Loss metric's value
+# at signal-entry and never re-evaluates it — a metric saved with no formula
+# at all evaluates to None forever, so a target price is never "achieved"
+# no matter how far price moves, and the signal just stays open. Nothing in
+# the editor used to hint that an empty formula on one of these two roles
+# is a silent, permanent trap (unlike Trailing Exit, re-evaluated every
+# tick, or Informational, which never gates anything).
+
+def _preview_label(section, idx: int):
+    from PySide6.QtWidgets import QLabel
+    frame = section._metrics_layout.itemAt(idx).widget()
+    return frame.findChildren(QLabel)[0]
+
+
+def test_empty_target_metric_shows_warning(qapp):
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    section._add_metric()
+    section._config["metrics"][0]["role"] = "target"
+    section._refresh_metrics()
+
+    label = _preview_label(section, 0)
+    assert "never trigger" in label.text()
+    assert "Target" in label.text()
+
+
+def test_empty_stop_loss_metric_shows_warning(qapp):
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    section._add_metric()
+    section._config["metrics"][0]["role"] = "stop_loss"
+    section._refresh_metrics()
+
+    label = _preview_label(section, 0)
+    assert "never trigger" in label.text()
+    assert "Stop Loss" in label.text()
+
+
+def test_target_metric_with_formula_shows_normal_preview_not_warning(qapp):
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    section._add_metric()
+    section._config["metrics"][0]["role"] = "target"
+    section._config["metrics"][0]["formula"] = [{"type": "col", "value": "Target 1"}]
+    section._refresh_metrics()
+
+    label = _preview_label(section, 0)
+    assert "never trigger" not in label.text()
+    assert "Target 1" in label.text()
+
+
+def test_empty_informational_metric_shows_no_warning(qapp):
+    """Informational never gates anything and Trailing Exit re-evaluates
+    every tick — neither has Target/Stop Loss's "silently permanent"
+    failure mode, so only those two roles warn on an empty formula."""
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    section._add_metric()  # defaults to role "informational"
+    section._refresh_metrics()
+
+    label = _preview_label(section, 0)
+    assert "never trigger" not in label.text()
+    assert label.text() == "—"
+
+
+def test_changing_role_to_target_live_updates_the_warning(qapp):
+    """The role combo's own change handler must re-render the preview
+    immediately — a metric renamed from Informational to Target with an
+    already-blank formula shouldn't need a re-open of the screen to reveal
+    the trap."""
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    section._add_metric()
+    assert "never trigger" not in _preview_label(section, 0).text()
+
+    section._on_metric_role_changed(0, "target")
+    assert section._config["metrics"][0]["role"] == "target"
+    assert "never trigger" in _preview_label(section, 0).text()
+
+
+def test_accepting_metric_formula_editor_clears_the_warning(qapp, monkeypatch):
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    section._add_metric()
+    section._config["metrics"][0]["role"] = "target"
+    section._refresh_metrics()
+    label = _preview_label(section, 0)
+    assert "never trigger" in label.text()
+
+    from screens import formula_editor
+
+    class _FakeDlg:
+        def __init__(self, *a, **kw): pass
+        def exec(self): return 1
+        def get_tokens(self): return [{"type": "col", "value": "Target 1"}]
+
+    monkeypatch.setattr(formula_editor, "ExpressionEditorDialog", _FakeDlg)
+    section._open_metric_formula_editor(0, label)
+
+    assert "never trigger" not in label.text()
+    assert "Target 1" in label.text()
+
+
 def test_metric_formula_editor_uses_combined_headers(qapp, monkeypatch):
     editor = _make_editor(qapp, columns=[{"name": "Out", "formula": [], "fmt_rules": []}])
     section = editor._notif_section

@@ -1776,7 +1776,7 @@ class NotificationSection(QWidget):
             role_combo.addItems(list(alerts_models.ROLES))
             role_combo.setCurrentText(m.get("role", alerts_models.ROLE_INFORMATIONAL))
             role_combo.currentTextChanged.connect(
-                lambda v, i=idx: self._config["metrics"][i].update({"role": v})
+                lambda v, i=idx: self._on_metric_role_changed(i, v)
             )
             del_btn = _btn("✕", theme=t, small=True, danger=True)
             del_btn.setFixedWidth(30)
@@ -1787,10 +1787,10 @@ class NotificationSection(QWidget):
             lay.addLayout(top)
 
             formula_row = QHBoxLayout()
-            preview = QLabel(_tokens_to_display(m.get("formula", [])))
+            preview = QLabel()
             preview.setFont(QFont("Menlo,Consolas,monospace", 9))
-            preview.setStyleSheet(f"color:{_t(t,'accent')};background:transparent;")
             preview.setWordWrap(True)
+            self._set_metric_preview_text(preview, m, t)
             edit_btn = _btn("Edit Formula…", outlined=True, theme=t, small=True)
             edit_btn.clicked.connect(lambda _, i=idx, p=preview: self._open_metric_formula_editor(i, p))
             formula_row.addWidget(preview, 1)
@@ -1798,6 +1798,35 @@ class NotificationSection(QWidget):
             lay.addLayout(formula_row)
 
             self._metrics_layout.insertWidget(self._metrics_layout.count() - 1, frame)
+
+    def _set_metric_preview_text(self, preview_label: QLabel, metric: dict, t) -> None:
+        """A Target/Stop Loss metric with no formula can NEVER trigger —
+        it's frozen at signal-entry as None and never re-evaluated (see
+        services.strategy_alerts.engine._fire_entry/_update_open_signal) —
+        so a signal just stays open forever even once price clearly passes
+        it, with nothing in this editor hinting why (issue #23: reported as
+        "Target" showing "—"/never achieved in the Live Alerts detail
+        popup, weeks after this strategy was saved). Trailing Exit/
+        Informational have no such "silently permanent" failure mode
+        (Trailing Exit re-evaluates every tick; Informational never gates
+        anything), so only Target/Stop Loss get the warning.
+        """
+        formula = metric.get("formula", [])
+        role = metric.get("role")
+        if not formula and role in (alerts_models.ROLE_TARGET, alerts_models.ROLE_STOP_LOSS):
+            preview_label.setText(
+                "⚠ No formula set — this "
+                f"{'Target' if role == alerts_models.ROLE_TARGET else 'Stop Loss'} "
+                "will never trigger. Click Edit Formula to set one."
+            )
+            preview_label.setStyleSheet(f"color:{_t(t,'destructive')};background:transparent;")
+        else:
+            preview_label.setText(_tokens_to_display(formula) or "—")
+            preview_label.setStyleSheet(f"color:{_t(t,'accent')};background:transparent;")
+
+    def _on_metric_role_changed(self, idx: int, role: str):
+        self._config["metrics"][idx]["role"] = role
+        self._refresh_metrics()
 
     def _open_metric_formula_editor(self, idx: int, preview_label: QLabel):
         from screens.formula_editor import ExpressionEditorDialog
@@ -1812,7 +1841,7 @@ class NotificationSection(QWidget):
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             metric["formula"] = dlg.get_tokens()
-            preview_label.setText(_tokens_to_display(metric["formula"]) or "—")
+            self._set_metric_preview_text(preview_label, metric, self._theme)
 
 
 class _DayHistoryFetchWorker(QObject):
