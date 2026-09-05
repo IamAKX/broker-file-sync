@@ -199,3 +199,38 @@ def test_post_accepts_a_longer_per_call_timeout(monkeypatch):
     client.post("/inception/vendor-sync", json_body={}, timeout=300)
 
     assert captured["timeout"] == 300
+
+
+def test_get_default_timeout_matches_the_normal_ceiling(monkeypatch):
+    from api.client import ApiClient, _TIMEOUT_SECONDS
+
+    client = ApiClient()
+    captured = {}
+    monkeypatch.setattr(
+        client._session, "request",
+        lambda method, url, **kwargs: (captured.update(kwargs) or _FakeResponse(200, {})),
+    )
+
+    client.get("/some/path")
+
+    assert captured["timeout"] == _TIMEOUT_SECONDS
+
+
+def test_get_accepts_a_longer_per_call_timeout(monkeypatch):
+    """api.lmv_snapshot_api.get_range needs this — issue #22: the normal
+    15s ceiling was a frequent, spurious timeout on this specific endpoint
+    (payload scales with the full stock universe times the day count), and
+    ApiClient.get() (unlike post(), which already had this) had no way to
+    override it at all."""
+    from api.client import ApiClient
+
+    client = ApiClient()
+    captured = {}
+    monkeypatch.setattr(
+        client._session, "request",
+        lambda method, url, **kwargs: (captured.update(kwargs) or _FakeResponse(200, {})),
+    )
+
+    client.get("/lmv-snapshot/range", timeout=60)
+
+    assert captured["timeout"] == 60

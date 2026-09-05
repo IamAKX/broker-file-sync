@@ -40,6 +40,8 @@ def test_compute_populates_table(qapp, monkeypatch):
     columns = [{"name": "MyCol", "formula": [{"type": "col", "value": "High"}]}]
     panel = FormulaStatsPanel(None, columns=columns)
     panel.compute()
+    assert panel._worker.wait(5000)
+    qapp.processEvents()
 
     assert panel._table.rowCount() == 1
     headers = [panel._table.horizontalHeaderItem(c).text() for c in range(panel._table.columnCount())]
@@ -57,6 +59,8 @@ def test_symbol_filter_restricts_results_to_one_stock(qapp, monkeypatch):
     columns = [{"name": "MyCol", "formula": [{"type": "col", "value": "High"}]}]
     panel = FormulaStatsPanel(None, columns=columns, symbol_filter="TCS")
     panel.compute()
+    assert panel._worker.wait(5000)
+    qapp.processEvents()
 
     assert panel._table.rowCount() == 1
     assert panel._table.item(0, 0).text() == "TCS"
@@ -106,12 +110,94 @@ def test_compute_resolves_sibling_column_reference(qapp, monkeypatch):
     ]
     panel = FormulaStatsPanel(None, columns=columns)
     panel.compute()
+    assert panel._worker.wait(5000)
+    qapp.processEvents()
 
     trigger_daily = panel._computed["INFY"]["columns"]["Trigger Price"]["daily"]
     assert trigger_daily == [("2026-01-05", 101.0)]
     # set_columns' working list itself must stay untouched (unexpanded) —
     # only the copy handed to compute_stats is expanded.
     assert panel._columns[1]["formula"] == columns[1]["formula"]
+
+
+# ── compute() runs off the GUI thread; no blocking modal on failure ────────
+# issue #22: compute() used to fetch+compute synchronously, so a slow or
+# genuinely-timed-out response froze the whole app ("Not Responding") for
+# the entire wait, and ANY failure showed a blocking modal (components.
+# error_popup.show_api_error) instead of leaving the panel usable.
+
+def test_compute_runs_asynchronously_not_blocking_caller(qapp, monkeypatch):
+    """compute() must return immediately, with the actual fetch/compute
+    still in flight on the worker thread — not run it inline before
+    returning."""
+    import threading
+    from components.formula_stats_panel import FormulaStatsPanel
+    from api import lmv_snapshot_api
+
+    release = threading.Event()
+
+    def _slow_get_range(days):
+        release.wait(timeout=5)
+        return {"days": [_day("2026-01-05", [_stock("INFY", {"High": 100.0})])]}
+
+    monkeypatch.setattr(lmv_snapshot_api, "get_range", _slow_get_range)
+    columns = [{"name": "MyCol", "formula": [{"type": "col", "value": "High"}]}]
+    panel = FormulaStatsPanel(None, columns=columns)
+
+    panel.compute()
+    # compute() has returned — the fetch is still blocked on `release` — so
+    # if this were synchronous, we could never reach this line at all.
+    assert panel._worker.isRunning()
+    assert panel._compute_btn.isEnabled() is False
+
+    release.set()
+    assert panel._worker.wait(5000)
+    qapp.processEvents()
+    assert panel._table.rowCount() == 1
+
+
+def test_compute_failure_shows_status_text_not_a_modal(qapp, monkeypatch):
+    from api.exceptions import NetworkError
+    from components.formula_stats_panel import FormulaStatsPanel
+    from api import lmv_snapshot_api
+    from PySide6.QtWidgets import QMessageBox
+
+    def _boom(days):
+        raise NetworkError("Could not reach server: Read timed out. (read timeout=15)")
+
+    monkeypatch.setattr(lmv_snapshot_api, "get_range", _boom)
+    shown = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: shown.append(self.windowTitle()) or 0)
+
+    columns = [{"name": "MyCol", "formula": [{"type": "col", "value": "High"}]}]
+    panel = FormulaStatsPanel(None, columns=columns)
+    panel.compute()
+    assert panel._worker.wait(5000)
+    qapp.processEvents()
+
+    assert shown == []   # no modal shown at all
+    assert "Compute failed" in panel._status_lbl.text()
+    assert "Read timed out" in panel._status_lbl.text()
+    assert panel._compute_btn.isEnabled() is True
+    assert panel._compute_btn.text() == "Compute"
+
+
+def test_lmv_snapshot_range_uses_a_longer_timeout_than_the_default(monkeypatch):
+    """issue #22: the generic 15s api_client default was itself a frequent,
+    spurious "Read timed out" on this specific heavy endpoint (payload
+    scales with the full stock universe times the day count) even when the
+    server was perfectly reachable, just still generating the response."""
+    from api.client import api_client
+    from api import lmv_snapshot_api
+
+    captured = {}
+    monkeypatch.setattr(
+        api_client, "get",
+        lambda path, params=None, auth=True, timeout=None: captured.update(path=path, timeout=timeout) or {},
+    )
+    lmv_snapshot_api.get_range(30)
+    assert captured["timeout"] is not None
+    assert captured["timeout"] > 15
 
 
 def test_build_daily_popup_sorts_dates_descending(qapp):

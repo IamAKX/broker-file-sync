@@ -427,7 +427,7 @@ def test_reload_strategies_populates_combo_and_preserves_selection(controller, m
     assert screen._strategy_combo.currentText() == "Beta"
 
 
-def test_compute_populates_results_table(controller, monkeypatch):
+def test_compute_populates_results_table(controller, qapp, monkeypatch):
     from screens.formula_stats import FormulaStatsScreen
     from services import strategy_store
     from api import lmv_snapshot_api
@@ -447,6 +447,8 @@ def test_compute_populates_results_table(controller, monkeypatch):
 
     screen = FormulaStatsScreen(controller)
     screen._on_compute()
+    assert screen._panel._worker.wait(5000)
+    qapp.processEvents()
 
     assert screen._panel._table.rowCount() == 1
     headers = [screen._panel._table.horizontalHeaderItem(c).text() for c in range(screen._panel._table.columnCount())]

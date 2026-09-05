@@ -26,12 +26,11 @@ from PySide6.QtWidgets import (
     QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QMenu, QDialog, QFrame, QSizePolicy,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QAction
 
 from api import lmv_snapshot_api
 from api.exceptions import ApiError, NetworkError
-from components.error_popup import show_api_error
 from services.formula_stats_engine import (
     AGGREGATES, DEFAULT_AGGREGATES, compute_stats, fetch_range_response,
 )
@@ -78,6 +77,38 @@ def fmt_value(value) -> str:
     return str(value)
 
 
+class _ComputeWorker(QThread):
+    """Runs the network fetch (api.lmv_snapshot_api.get_range, via
+    fetch_range_response) AND the per-day/per-stock formula evaluation
+    (compute_stats) off the GUI thread — same shape as every other
+    network-backed worker in this app (e.g. screens.inception_admin_sync.
+    _AdminSyncWorker). compute() used to run both synchronously: on a slow
+    or genuinely-timed-out response, the whole app went "Not Responding"
+    for the entire wait, and any error (network or otherwise) left the
+    table showing nothing with no way to tell why short of a modal popup
+    that made the freeze feel even longer — see issue #22."""
+    succeeded = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, range_fetcher, window, columns: list, parent=None):
+        super().__init__(parent)
+        self._range_fetcher = range_fetcher
+        self._window = window
+        self._columns = columns
+
+    def run(self):
+        try:
+            range_response = fetch_range_response(self._range_fetcher, self._window)
+            computed = compute_stats(expand_columns_for_stats(self._columns), range_response)
+        except (ApiError, NetworkError) as exc:
+            self.failed.emit(str(exc))
+            return
+        except Exception as exc:  # never let an unexpected error kill the worker thread silently
+            self.failed.emit(f"Unexpected error: {exc}")
+            return
+        self.succeeded.emit(computed)
+
+
 class FormulaStatsPanel(QWidget):
     """*columns* is a list of {"name": str, "formula": tokens} dicts —
     either a strategy's saved columns, or ad-hoc ones built just for this
@@ -106,6 +137,7 @@ class FormulaStatsPanel(QWidget):
         self._computed: dict = {}
         self._table_columns: list = []
         self._agg_checks: dict = {}
+        self._worker: _ComputeWorker | None = None
         self._build(initial_days)
 
     def set_columns(self, columns: list):
@@ -196,6 +228,8 @@ class FormulaStatsPanel(QWidget):
         if not self._columns:
             self._status_lbl.setText("No formula columns to analyze.")
             return
+        if self._worker is not None and self._worker.isRunning():
+            return
         # An int (days spinbox) or the fixed (date_from, date_to) tuple —
         # fetch_range_response resolves either into the same {"days": [...]}
         # shape via lmv_snapshot_api.get_range, filtering client-side for
@@ -203,16 +237,19 @@ class FormulaStatsPanel(QWidget):
         window = self._fixed_window if self._fixed_window is not None else self._days_spin.value()
         self._compute_btn.setEnabled(False)
         self._compute_btn.setText("Computing…")
-        try:
-            range_response = fetch_range_response(lmv_snapshot_api.get_range, window)
-        except (ApiError, NetworkError) as exc:
-            self._compute_btn.setEnabled(True)
-            self._compute_btn.setText("Compute")
-            show_api_error(self._theme, self, exc)
-            return
-        self._compute_btn.setEnabled(True)
-        self._compute_btn.setText("Compute")
+        self._status_lbl.setText("Fetching and computing…")
 
+        # Both the network fetch AND the per-day/per-stock formula
+        # evaluation (compute_stats) run on a background thread — this
+        # used to be a synchronous GUI-thread call, so a slow response (a
+        # range request scales with the full stock universe times the day
+        # count) or a genuine timeout froze the whole app ("Not
+        # Responding") for the entire wait, on top of a modal popup on
+        # failure that made the freeze feel even longer. See issue #22 and
+        # api.lmv_snapshot_api.get_range's own docstring (also given a
+        # longer timeout, since the generic 15s default was itself a
+        # frequent, spurious failure on this specific heavy endpoint).
+        #
         # A column's formula can reference another of THIS SAME strategy's
         # own columns by name (e.g. "Trigger Price" = [Floor_10D] * 1.01) —
         # an already-supported pattern for live Live Master View rendering
@@ -224,9 +261,31 @@ class FormulaStatsPanel(QWidget):
         # those references first (scoped to self._columns only — the
         # live_viewer.py caller passes just the one clicked column, where
         # this is a no-op) — see services.strategy_engine._expand_col_refs
-        # for the full "why", including why it must be paren-wrapped.
-        self._computed = compute_stats(expand_columns_for_stats(self._columns), range_response)
+        # for the full "why", including why it must be paren-wrapped. Done
+        # inside the worker (not here) since expand_columns_for_stats/
+        # compute_stats are themselves part of the potentially-slow work.
+        self._worker = _ComputeWorker(lmv_snapshot_api.get_range, window, self._columns, parent=self)
+        self._worker.succeeded.connect(self._on_compute_succeeded)
+        self._worker.failed.connect(self._on_compute_failed)
+        self._worker.start()
+
+    def _on_compute_succeeded(self, computed: dict):
+        self._compute_btn.setEnabled(True)
+        self._compute_btn.setText("Compute")
+        self._computed = computed
         self._populate_table()
+
+    def _on_compute_failed(self, msg: str):
+        # Status text, not a blocking modal (show_api_error) — a transient
+        # network hiccup on this specific heavy endpoint was common enough
+        # ("Been happening a lot") that a modal every time was itself part
+        # of the reported problem; the button re-enabling means Compute can
+        # just be clicked again. Same non-blocking convention screens.
+        # live_viewer.py's own "N-Day Data" refresh already uses for the
+        # identical underlying call.
+        self._compute_btn.setEnabled(True)
+        self._compute_btn.setText("Compute")
+        self._status_lbl.setText(f"Compute failed: {msg}"[:200])
 
     def _populate_table(self):
         checked_aggs = [name for name in AGGREGATES if self._agg_checks[name].isChecked()]

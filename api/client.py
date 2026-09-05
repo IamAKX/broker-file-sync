@@ -47,8 +47,9 @@ class ApiClient:
     def set_session_expired_callback(self, callback) -> None:
         self._on_session_expired = callback
 
-    def get(self, path: str, params: dict | None = None, auth: bool = True) -> dict:
-        return self._request("GET", path, params=params, auth=auth)
+    def get(self, path: str, params: dict | None = None, auth: bool = True,
+            timeout: int | None = None) -> dict:
+        return self._request("GET", path, params=params, auth=auth, timeout=timeout)
 
     def post(self, path: str, json_body: dict | None = None, auth: bool = True,
              timeout: int | None = None) -> dict:
