@@ -247,8 +247,22 @@ _EVAL_BUILTINS = {
 
 
 def _col_literal(raw) -> str:
-    """Represent a column value as a safe Python literal (numeric or string)."""
-    if raw is None or raw == "":
+    """Represent a column value as a safe Python literal (numeric or string).
+
+    "—" (em dash, U+2014) is treated as blank too, same as None/"" —
+    that's the standard "not available yet" placeholder this app uses
+    throughout (screens.live_viewer's Sector/OR.High/OR.Low columns
+    before their respective data is ready, services.inception_sector's
+    unmapped-symbol fallback, ...). Without this, a genuinely-loaded LMV
+    column whose CURRENT value just happens to be that placeholder (e.g.
+    OR.Low before today's Opening Range capture has run for that stock)
+    compared against a number raised a real TypeError — "The formula
+    combines values that don't work together — for example mixing text
+    with a number" — instead of the same "blank rather than crash"
+    behavior every other not-yet-available value already gets. See
+    issue #24.
+    """
+    if raw is None or raw == "" or raw == "—":
         return "None"
     try:
         return str(float(raw))
@@ -410,8 +424,9 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
 
 
 def _col_value(raw):
-    """Like _col_literal, but returns the actual Python value (not source text)."""
-    if raw is None or raw == "":
+    """Like _col_literal, but returns the actual Python value (not source
+    text) — see _col_literal's own docstring for why "—" is blank too."""
+    if raw is None or raw == "" or raw == "—":
         return None
     try:
         return float(raw)

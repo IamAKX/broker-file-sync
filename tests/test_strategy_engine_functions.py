@@ -738,6 +738,46 @@ def test_compile_check_genuinely_loaded_column_still_strict_when_blank():
     assert "empty cell" in msg.lower()
 
 
+# ── "—" (em dash) placeholder treated as blank — issue #24 ──────────────────
+# Real LMV columns that aren't ready yet (screens.live_viewer's OR.High/
+# OR.Low before today's Opening Range capture has run for that stock,
+# Sector for an unmapped symbol, ...) show "—", not None/"" — a THIRD
+# "not available" representation _col_value/_col_literal never recognized,
+# so a comparison against one raised a real TypeError ("mixing text with a
+# number") instead of the same graceful "blank rather than crash" behavior
+# every other not-yet-available value already gets.
+
+def test_evaluate_em_dash_placeholder_is_blank():
+    row = {"Scrip Name": "INFY", "Current": 100.5, "OR.Low": "—"}
+    result = evaluate([tok_col("Current"), tok_op("<"), tok_col("OR.Low")], row, [row])
+    assert result is None   # blank, not a TypeError
+
+
+def test_evaluate_em_dash_placeholder_resolves_normally_once_real():
+    row = {"Scrip Name": "INFY", "Current": 100.5, "OR.Low": 95.0}
+    result = evaluate([tok_col("Current"), tok_op(">"), tok_col("OR.Low")], row, [row])
+    assert result is True
+
+
+def test_compile_check_em_dash_placeholder_reports_empty_cell_not_type_error():
+    from services.strategy_engine import compile_check
+    row = {"Scrip Name": "INFY", "Current": 100.5, "OR.Low": "—"}
+    tokens = [tok_col("Current"), tok_op("<"), tok_col("OR.Low")]
+    ok, msg = compile_check(tokens, row, [row], lmv_headers=["Scrip Name", "Current", "OR.Low"])
+    assert ok is False
+    assert "empty cell" in msg.lower()
+    assert "mixing text" not in msg.lower()
+
+
+def test_compile_check_em_dash_placeholder_resolves_normally_once_real():
+    from services.strategy_engine import compile_check
+    row = {"Scrip Name": "INFY", "Current": 100.5, "OR.High": 105.0}
+    tokens = [tok_col("Current"), tok_op("<"), tok_col("OR.High")]
+    ok, msg = compile_check(tokens, row, [row], lmv_headers=["Scrip Name", "Current", "OR.High"])
+    assert ok is True
+    assert msg == "True"
+
+
 def test_compile_check_historic_field_uses_real_value_when_available():
     # A referenced historic/derived field that DOES already have a real
     # value (e.g. Strategy Builder's own proactive day_history fetch
