@@ -82,6 +82,21 @@ _LMV_SYNCED_CODE_MAP = {
     "DAY TO": "day_to", "PDTO": "pdto", "CWTO": "cwto", "PWTO": "pwto",
 }
 
+# Options-OI/max-pain, Market Profile, and Opening Range — like "Avg Rate"
+# below, these are brand-new fields (not a FORMULA_CODES override; formula_
+# engine has no output of these names to collide with), added straight
+# from the synced bar value under the exact same header string LMV itself
+# uses, so they read as familiar columns. code -> bar dict key.
+_LMV_SYNCED_NEW_FIELD_MAP = {
+    "callstrikehighestoi": "call_strike_highest_oi",
+    "Callstrikewithsecondhighestoi": "call_strike_with_second_highest_oi",
+    "PutStrikeWithsecondHighestOI": "put_strike_with_second_highest_oi",
+    "TodayPutHighestStrike": "today_put_highest_strike",
+    "Max Pain": "max_pain",
+    "VAH": "vah", "POC": "poc", "VAL": "val",
+    "OR.High": "or_high", "OR.Low": "or_low",
+}
+
 
 def compute_for_bars(symbol: str, bars: list[dict]) -> dict:
     """{code: value} for every services.formula_engine.FORMULA_CODES code,
@@ -119,5 +134,7 @@ def compute_for_bars(symbol: str, bars: list[dict]) -> dict:
     for code, bar_key in _LMV_SYNCED_CODE_MAP.items():
         values[code] = bars[-1].get(bar_key)
     values["Avg Rate"] = bars[-1].get("avg_rate")
+    for code, bar_key in _LMV_SYNCED_NEW_FIELD_MAP.items():
+        values[code] = bars[-1].get(bar_key)
     _cache[cache_key] = values
     return dict(values)

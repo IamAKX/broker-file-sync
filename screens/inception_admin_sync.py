@@ -3,10 +3,15 @@ Inception Sync (see components/topbar.py's own gating comment for why this
 menu only ever appears for one account). Triggers POST /inception/admin/
 sync-lmv-metrics (api.inception_api.sync_admin_lmv_metrics), which copies
 hari_dss.LmvDailySnapshot's turnover/average-traded-price metrics (Avg
-Rate, PATP, PWATP, PMATP, CWATP, CMATP, DAY TO, PDTO, CWTO, PWTO) into
-public.EodBar's own columns of the same name — see app/services/
-inception_admin_sync_service.py in the broker-sync-api repo for the actual
-sync/matching logic; this screen only calls it and shows the result.
+Rate, PATP, PWATP, PMATP, CWATP, CMATP, DAY TO, PDTO, CWTO, PWTO), the
+options-OI/max-pain sheet columns (callstrikehighestoi, Max Pain, ...), and
+Market Profile (VAH/POC/VAL) — plus OR.High/OR.Low, sourced from the
+separate hari_dss.OpeningRangeCapture table — into public.EodBar's own
+columns of the same name — see app/services/inception_admin_sync_service.py
+in the broker-sync-api repo for the actual sync/matching logic; this screen
+only calls it and shows the result (the results table below is a generic
+render of whatever "metrics" rows the response carries, so it needs no
+changes when the backend's own column set grows).
 
 Runs on a QThread — mirrors screens.inception_settings' own
 _VendorSyncWorker (same shape: one POST, generous timeout, no progress
@@ -69,12 +74,14 @@ class InceptionAdminSyncScreen(QWidget):
 
         desc = QLabel(
             "Copies Avg Rate, PATP, PWATP, PMATP, CWATP, CMATP, DAY TO, PDTO, "
-            "CWTO and PWTO — the turnover/average-traded-price figures LMV's "
-            "own daily grid already computes and archives — into Inception's "
-            "shared historic dataset, so Strategy Builder can reference them "
-            "as plain fields the same way OPEN/HIGH/LOW/CLOSE already work. "
-            "Safe to run any time; re-running just re-copies the current "
-            "values, it never duplicates anything."
+            "CWTO, PWTO, callstrikehighestoi, Callstrikewithsecondhighestoi, "
+            "PutStrikeWithsecondHighestOI, TodayPutHighestStrike, Max Pain, "
+            "VAH, POC, VAL, OR.High and OR.Low — figures LMV's own daily grid "
+            "already computes and archives — into Inception's shared historic "
+            "dataset, so HMV can show them as plain columns the same way "
+            "OPEN/HIGH/LOW/CLOSE already work. Safe to run any time; "
+            "re-running just re-copies the current values, it never "
+            "duplicates anything."
         )
         desc.setWordWrap(True)
         desc.setFont(font_scale.font(font_scale.SMALL, False))
@@ -108,10 +115,11 @@ class InceptionAdminSyncScreen(QWidget):
         self._sync_btn = QPushButton("Sync Now")
         self._sync_btn.setFixedHeight(32)
         self._sync_btn.setToolTip(
-            "Reads every Avg Rate/PATP/.../PWTO value LMV has archived and "
-            "writes it into the matching Inception instrument/date. Only "
-            "updates dates Inception already has a bar for — never invents "
-            "a new row."
+            "Reads every Avg Rate/PATP/.../PWTO, options-OI/Max Pain, VAH/"
+            "POC/VAL, and OR.High/OR.Low value LMV has archived and writes "
+            "it into the matching Inception instrument/date. Only updates "
+            "dates Inception already has a bar for — never invents a new "
+            "row."
         )
         self._sync_btn.clicked.connect(self._start_sync)
         btn_row.addWidget(self._sync_btn)

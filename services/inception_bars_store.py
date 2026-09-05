@@ -48,6 +48,12 @@ CREATE INDEX IF NOT EXISTS ix_eod_bars_date ON eod_bars (trade_date);
 LMV_METRIC_COLUMNS = [
     "avg_rate", "patp", "pwatp", "pmatp", "cwatp", "cmatp",
     "day_to", "pdto", "cwto", "pwto",
+    # Options-OI/max-pain, Market Profile, and Opening Range — same
+    # sync-populated/blank-otherwise convention as the metrics above (see
+    # app/services/inception_admin_sync_service.py in the backend repo).
+    "call_strike_highest_oi", "call_strike_with_second_highest_oi",
+    "put_strike_with_second_highest_oi", "today_put_highest_strike",
+    "max_pain", "vah", "poc", "val", "or_high", "or_low",
 ]
 
 
