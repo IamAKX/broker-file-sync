@@ -1,5 +1,6 @@
 import sys
 import os
+import multiprocessing
 from PySide6.QtWidgets import QApplication, QStyleFactory
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QIcon
@@ -99,4 +100,17 @@ def main():
 
 
 if __name__ == "__main__":
+    # MUST be the very first call in this guard, before anything else —
+    # services.inception_parallel_compute (issue #25) parallelizes
+    # Inception's Group A/B walk across OS processes to keep it off the
+    # GUI thread's own GIL, not just off the GUI thread. Windows has no
+    # fork(): every worker process re-executes this frozen (PyInstaller)
+    # executable from the top as its bootstrap. freeze_support() is what
+    # lets multiprocessing detect "this launch is actually a worker" and
+    # return immediately, before main() itself would run — without it, a
+    # frozen build launches a full second copy of the entire app (tray
+    # icon, single-instance guard, the works) per worker, repeatedly. A
+    # no-op on macOS/Linux and when not frozen, so this is always safe to
+    # call. See services/inception_parallel_compute.py's own docstring.
+    multiprocessing.freeze_support()
     main()

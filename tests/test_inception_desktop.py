@@ -764,6 +764,97 @@ def test_snapshot_and_hmv_progress_cb_called_once_per_instrument(bars_db):
     assert ticks == [(1, 2), (2, 2)]
 
 
+# ── snapshot()/hmv() via the real process-pool path — issue #25 ─────────────
+# Group A/B is genuinely CPU-bound pure Python (~0.3-0.5s x ~213 instruments
+# cold) — a background QThread alone doesn't stop it starving the GUI
+# thread of CPU time via the GIL, so services.inception_parallel_compute
+# routes a large-enough batch through real OS processes instead. Forces
+# the threshold down so a handful of test instruments actually exercises
+# that pool path end-to-end (SQLite-backed bars included), not just
+# services.inception_parallel_compute's own unit tests against synthetic
+# in-memory bars.
+
+def test_snapshot_matches_sequential_output_via_the_real_process_pool(bars_db, monkeypatch):
+    from services import inception_compute_service, inception_parallel_compute
+    monkeypatch.setattr(inception_parallel_compute, "_MIN_ITEMS_TO_PARALLELIZE", 2)
+
+    bars_db.upsert_bars([
+        _bar(f"SYM{i}_I", date(2026, 8, 18), 90 + i, 105 + i, 85 + i, 100 + i)
+        for i in range(5)
+    ])
+    inception_compute_service.clear_cache()
+    parallel_rows = inception_compute_service.snapshot(date(2026, 8, 18))
+
+    inception_compute_service.clear_cache()
+    monkeypatch.setattr(inception_parallel_compute, "_MIN_ITEMS_TO_PARALLELIZE", 10_000)
+    sequential_rows = inception_compute_service.snapshot(date(2026, 8, 18))
+
+    by_symbol_parallel = {r["symbol"]: r["values"] for r in parallel_rows}
+    by_symbol_sequential = {r["symbol"]: r["values"] for r in sequential_rows}
+    assert by_symbol_parallel == by_symbol_sequential
+    assert len(by_symbol_parallel) == 5
+
+
+def test_hmv_matches_sequential_output_via_the_real_process_pool(bars_db, monkeypatch):
+    from services import inception_compute_service, inception_parallel_compute
+    monkeypatch.setattr(inception_parallel_compute, "_MIN_ITEMS_TO_PARALLELIZE", 2)
+
+    bars_db.upsert_bars([
+        _bar(f"SYM{i}_I", date(2026, 8, 18), 90 + i, 105 + i, 85 + i, 100 + i)
+        for i in range(5)
+    ])
+    inception_compute_service.clear_cache()
+    _, parallel_rows = inception_compute_service.hmv(date(2026, 1, 1), date(2026, 8, 18))
+
+    inception_compute_service.clear_cache()
+    monkeypatch.setattr(inception_parallel_compute, "_MIN_ITEMS_TO_PARALLELIZE", 10_000)
+    _, sequential_rows = inception_compute_service.hmv(date(2026, 1, 1), date(2026, 8, 18))
+
+    by_symbol_parallel = {r["symbol"]: r["values"] for r in parallel_rows}
+    by_symbol_sequential = {r["symbol"]: r["values"] for r in sequential_rows}
+    assert by_symbol_parallel == by_symbol_sequential
+    assert len(by_symbol_parallel) == 5
+
+
+def test_snapshot_progress_cb_reaches_full_count_via_process_pool(bars_db, monkeypatch):
+    from services import inception_compute_service, inception_parallel_compute
+    monkeypatch.setattr(inception_parallel_compute, "_MIN_ITEMS_TO_PARALLELIZE", 2)
+
+    bars_db.upsert_bars([
+        _bar(f"SYM{i}_I", date(2026, 8, 18), 90 + i, 105 + i, 85 + i, 100 + i)
+        for i in range(4)
+    ])
+    ticks = []
+    inception_compute_service.snapshot(
+        date(2026, 8, 18), progress_cb=lambda done, total: ticks.append((done, total)),
+    )
+    assert ticks[-1] == (4, 4)
+    assert [d for d, _ in ticks] == [1, 2, 3, 4]   # monotonic, no gaps/dupes
+
+
+def test_snapshot_still_caches_correctly_after_a_process_pool_computation(bars_db, monkeypatch):
+    """The row cache itself lives in the calling (main) process — a value
+    computed by a worker process must still land in _row_cache so a
+    second, identical call is the usual O(1) hit, not a re-walk (let alone
+    a repeated pool spin-up)."""
+    from services import inception_compute_service, inception_parallel_compute
+    monkeypatch.setattr(inception_parallel_compute, "_MIN_ITEMS_TO_PARALLELIZE", 2)
+
+    bars_db.upsert_bars([
+        _bar(f"SYM{i}_I", date(2026, 8, 18), 90 + i, 105 + i, 85 + i, 100 + i)
+        for i in range(4)
+    ])
+    inception_compute_service.clear_cache()
+    inception_compute_service.snapshot(date(2026, 8, 18))
+
+    def _boom(*a, **k):
+        raise AssertionError("should be served from _row_cache, not recomputed")
+    monkeypatch.setattr(inception_parallel_compute, "compute_rows_parallel", _boom)
+
+    rows_again = inception_compute_service.snapshot(date(2026, 8, 18))
+    assert len(rows_again) == 4
+
+
 # ── services.inception_compute_service.range_rows (Formula Stats) ────────────
 
 def test_range_rows_returns_one_day_entry_per_trading_day_in_range(bars_db):

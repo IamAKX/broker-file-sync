@@ -135,6 +135,9 @@ Output: `dist/BrokerFileSync/BrokerFileSync.exe`
 **App crashes on macOS after update**
 - Delete the old `.app` and replace with the fresh build — cached resources can cause conflicts
 
+**Multiple app windows/tray icons appear right after launch, or the app seems to relaunch itself repeatedly**
+- Inception's Group A/B computation (View by Date/HMV/Strategy Builder) parallelizes across OS processes (`services/inception_parallel_compute.py`) to keep a cold load from freezing the GUI thread. Windows has no `fork()`, so each worker process re-executes the frozen `.exe` from the top as its bootstrap — `main.py` calls `multiprocessing.freeze_support()` as the very first thing inside its `if __name__ == "__main__":` guard specifically so a worker launch is detected and short-circuited before the real app (tray icon, single-instance guard, etc.) starts. If this symptom shows up in a build, check that `freeze_support()` is still that very first call — nothing else should run before it.
+
 ---
 
 ← [Back to README](../README)

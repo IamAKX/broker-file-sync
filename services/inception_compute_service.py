@@ -63,14 +63,8 @@ def snapshot(as_of_date: date, progress_cb=None) -> list[dict]:
     when given, is called once per instrument processed."""
     settings = inception_settings.load()
     symbols = inception_bars_store.available_symbols()
-    rows = []
-    for i, symbol in enumerate(symbols):
-        values, _first_traded = _row_for_symbol(symbol, as_of_date, settings)
-        if values is not None:
-            rows.append({"symbol": symbol, "values": values})
-        if progress_cb:
-            progress_cb(i + 1, len(symbols))
-    return rows
+    rows = _compute_all_rows(symbols, as_of_date, settings, progress_cb)
+    return [{"symbol": symbol, "values": values} for symbol, values, _first_traded in rows]
 
 
 def hmv(date_from: date, date_to: date, progress_cb=None) -> tuple[date | None, list[dict]]:
@@ -84,38 +78,80 @@ def hmv(date_from: date, date_to: date, progress_cb=None) -> tuple[date | None, 
 
     settings = inception_settings.load()
     symbols = inception_bars_store.available_symbols()
-    rows = []
-    for i, symbol in enumerate(symbols):
-        values, first_traded = _row_for_symbol(symbol, as_of_date, settings)
-        if values is not None:
-            _apply_range_gate(values, first_traded, as_of_date, date_from, settings["week_window_days"])
-            rows.append({"symbol": symbol, "values": values})
+    rows = _compute_all_rows(symbols, as_of_date, settings, progress_cb)
+    out = []
+    for symbol, values, first_traded in rows:
+        _apply_range_gate(values, first_traded, as_of_date, date_from, settings["week_window_days"])
+        out.append({"symbol": symbol, "values": values})
+    return as_of_date, out
+
+
+def _compute_all_rows(symbols: list[str], as_of_date: date, settings: dict,
+                      progress_cb=None) -> list[tuple[str, dict, date]]:
+    """[(symbol, values, first_traded_date), ...], one entry per symbol in
+    *symbols* with a bar on as_of_date (skipped entirely otherwise) — in
+    *symbols*' own order, regardless of which symbols were cache hits vs.
+    freshly computed or what order a parallel computation resolved them
+    in. Shared by snapshot()/hmv() (see issue #25's note above for why the
+    actual Group A/B walk for a cache MISS is now split off to services.
+    inception_parallel_compute instead of computed inline here).
+
+    progress_cb(done, total), when given, is called exactly once per
+    symbol in *symbols* (total = len(symbols)) — as soon as that symbol's
+    row is available, whether that's instantly (a bar-less/cached symbol,
+    both resolved in the cheap first pass below) or whenever its
+    computation completes (which, for a parallelized batch, is generally
+    NOT in *symbols*' own order — this still ticks the same running
+    (done, total) count either way, just not necessarily in symbol order
+    for that middle stretch of ticks).
+    """
+    from services.inception_parallel_compute import compute_rows_parallel
+
+    total = len(symbols)
+    progress_state = {"done": 0}
+
+    def _tick():
+        progress_state["done"] += 1
         if progress_cb:
-            progress_cb(i + 1, len(symbols))
-    return as_of_date, rows
+            progress_cb(progress_state["done"], total)
 
+    # symbol -> (cache_key, first_traded_date, cached_values_or_None). Bars
+    # fetching + the cache check are both cheap (an indexed SQLite query,
+    # a dict lookup) — done here, sequentially, regardless of instrument
+    # count; only a genuine cache MISS's Group A/B walk is expensive
+    # enough to route through compute_rows_parallel below.
+    prepared: dict[str, tuple] = {}
+    to_compute: list[tuple] = []
+    for symbol in symbols:
+        bars = inception_bars_store.bars_for_symbol(symbol, date_to=as_of_date)
+        if not bars or bars[-1]["trade_date"] != as_of_date:
+            _tick()
+            continue
+        fingerprint = (
+            len(bars), bars[-1]["trade_date"],
+            settings["gap_threshold_pct"], settings["week_window_days"], settings["fifo_cap"],
+        )
+        cache_key = (symbol, fingerprint)
+        cached = _row_cache.get(cache_key)
+        first_traded = bars[0]["trade_date"]
+        if cached is not None:
+            prepared[symbol] = (cache_key, first_traded, dict(cached))   # copy — caller may mutate (range gate)
+            _tick()
+        else:
+            prepared[symbol] = (cache_key, first_traded, None)
+            to_compute.append((symbol, bars, settings))
 
-def _row_for_symbol(symbol: str, as_of_date: date, settings: dict) -> tuple[dict | None, date | None]:
-    """(values, first_traded_date) for *symbol* as of *as_of_date*, or
-    (None, None) if it has no bar on that date. Fetching bars is a cheap
-    indexed query either way; what's cached is the expensive part (the
-    compute_group_a/compute_group_b walk) — see module docstring."""
-    bars = inception_bars_store.bars_for_symbol(symbol, date_to=as_of_date)
-    if not bars or bars[-1]["trade_date"] != as_of_date:
-        return None, None
+    if to_compute:
+        computed = compute_rows_parallel(to_compute, progress_cb=lambda done, tot: _tick())
+        for symbol, values in computed.items():
+            cache_key, first_traded, _ = prepared[symbol]
+            _row_cache[cache_key] = values
+            prepared[symbol] = (cache_key, first_traded, dict(values))
 
-    fingerprint = (
-        len(bars), bars[-1]["trade_date"],
-        settings["gap_threshold_pct"], settings["week_window_days"], settings["fifo_cap"],
-    )
-    cache_key = (symbol, fingerprint)
-    cached = _row_cache.get(cache_key)
-    if cached is not None:
-        return dict(cached), bars[0]["trade_date"]   # copy — caller may mutate (range gate)
-
-    values = _compute_row(bars, settings)
-    _row_cache[cache_key] = values
-    return dict(values), bars[0]["trade_date"]
+    return [
+        (symbol, prepared[symbol][2], prepared[symbol][1])
+        for symbol in symbols if symbol in prepared
+    ]
 
 
 def _compute_row(bars: list[dict], settings: dict) -> dict:
