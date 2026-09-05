@@ -1780,7 +1780,8 @@ class ExpressionEditorDialog(QDialog):
         ok, msg = compile_check(tokens, test_row, test_all,
                                 self_value=self._self_value,
                                 lmv_headers=self._real_lmv_headers,
-                                symbol_col=self._row_symbol_col)
+                                symbol_col=self._row_symbol_col,
+                                variable_store=self._variable_store)
         if ok:
             self._compiled_tokens = tokens
             self._compiled_ok = True

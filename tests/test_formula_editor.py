@@ -152,6 +152,35 @@ def test_compile_and_test_succeeds_for_historic_field_when_real_lmv_headers_narr
     assert "historic" in shown.get("msg", "").lower()
 
 
+def test_compile_and_test_resolves_variable_via_variable_store(qapp, monkeypatch, tmp_path):
+    """issue #21: Compile & Test must resolve a "{Name}" variable against
+    whichever store this dialog was given (variable_store), not always
+    LMV's default — screens.inception_strategy_builder passes services.
+    inception_formula_variable_store, a completely separate store from
+    LMV's own."""
+    from screens.formula_editor import ExpressionEditorDialog
+    from services import inception_formula_variable_store as istore
+    from api import inception_api
+    from PySide6.QtWidgets import QMessageBox
+
+    monkeypatch.setattr(istore, "_STORE_FILE", str(tmp_path / "inception_vars.json"))
+    monkeypatch.setattr(inception_api, "upsert_variable", lambda *a, **k: None)
+    v = istore.new_variable("Bump")
+    v["formula"] = [{"type": "num", "value": "5"}]
+    istore.save_variable(v)
+
+    shown = {}
+    monkeypatch.setattr(QMessageBox, "information",
+                        lambda *a, **k: shown.setdefault("msg", a[-1] if a else ""))
+    dlg = ExpressionEditorDialog(
+        [], ["Close"], [], {"Close": 100.0}, variable_store=istore,
+    )
+    dlg._preview_edit.setPlainText("[Close]+{Bump}")
+    dlg._compile_and_test()
+    assert dlg._compiled_ok is True
+    assert "105" in shown.get("msg", "")
+
+
 def test_compile_and_test_still_fails_for_blank_real_lmv_column(qapp, monkeypatch):
     # A genuinely-loaded LMV column that's blank for this row must still be
     # reported as a real problem — real_lmv_headers only exempts fields

@@ -79,8 +79,8 @@ from components.frozen_table_columns import FrozenColumns
 from screens.inception_view_by_date import _display_symbol, _remap_to_display_symbols
 from services import (
     inception_bars_store, inception_change_highlight, inception_compute_service,
-    inception_day_history, inception_formula_builder_columns, inception_sector,
-    inception_strategy_store, inception_value_before_change,
+    inception_day_history, inception_formula_builder_columns, inception_formula_variable_store,
+    inception_sector, inception_strategy_store, inception_value_before_change,
 )
 from services.formula_engine import FORMULA_CODES
 from services.strategy_engine import apply_strategies, build_symbol_index, get_row_fmt_colors
@@ -582,7 +582,8 @@ class InceptionHmvScreen(QWidget):
         base_col_count = len(self._raw_headers)
         headers, data = apply_strategies(self._strategies, self._raw_headers, self._raw_data,
                                           day_history=self._day_history, include_streak_columns=False,
-                                          symbol_col="Symbol")
+                                          symbol_col="Symbol",
+                                          variable_store=inception_formula_variable_store)
         # Conditional formatting (services.strategy_engine.get_row_fmt_
         # colors) — same mechanism/shape screens.live_viewer's LMV grid
         # already uses, previously never wired up here at all (a strategy
@@ -603,7 +604,8 @@ class InceptionHmvScreen(QWidget):
         sym_index = build_symbol_index(all_dicts)
         self._fmt_colors = [
             get_row_fmt_colors(strat_col_defs, row, base_col_count, row_dict, all_dicts,
-                               agg_cache, sym_index, self._day_history)
+                               agg_cache, sym_index, self._day_history,
+                               variable_store=inception_formula_variable_store)
             for row, row_dict in zip(data, all_dicts)
         ]
         # Keep any strategy-appended column (beyond the raw/base set)

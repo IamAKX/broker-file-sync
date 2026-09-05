@@ -295,7 +295,7 @@ def _norm_for_inception(sym) -> str:
 # expression (see the two callers below) — rather than a runtime lookup, so
 # the rest of this module never needs to know "var" tokens exist.
 
-def _expand_var_tokens(tokens: list, _seen: frozenset = frozenset()) -> list:
+def _expand_var_tokens(tokens: list, variable_store=None, _seen: frozenset = frozenset()) -> list:
     """Inline every {"type": "var", "value": name} token with that variable's
     own formula tokens, wrapped in parens to preserve operator precedence —
     recursively, so a variable can itself reference other variables.
@@ -305,10 +305,22 @@ def _expand_var_tokens(tokens: list, _seen: frozenset = frozenset()) -> list:
     happens to reference it. An unknown/deleted variable name is dropped the
     same way, consistent with how a missing column silently reads as None
     elsewhere in this module.
+
+    ``variable_store`` defaults to services.formula_variable_store (LMV's
+    own) — screens.inception_strategy_builder passes services.
+    inception_formula_variable_store instead, the SAME module its own
+    "Variables" nav section/VariablesManagerDialog already read/write via
+    ExpressionEditorDialog's variable_store param. Without this, a "{Name}"
+    token referencing an Inception-only variable silently found nothing in
+    the WRONG (LMV) store and got dropped — an empty formula ("The
+    variable(s) this formula refers to are empty or missing.") or a
+    formula missing a whole clause, depending on what else was around it —
+    see issue #21.
     """
     if not any(tok.get("type") == "var" for tok in tokens):
         return tokens  # common case — skip the store import/lookup entirely
-    from services import formula_variable_store as var_store
+    if variable_store is None:
+        from services import formula_variable_store as variable_store
     out = []
     for tok in tokens:
         if tok.get("type") != "var":
@@ -317,10 +329,10 @@ def _expand_var_tokens(tokens: list, _seen: frozenset = frozenset()) -> list:
         name = tok.get("value")
         if name in _seen:
             continue
-        var = var_store.get_by_name(name)
+        var = variable_store.get_by_name(name)
         if var is None:
             continue
-        inner = _expand_var_tokens(var.get("formula", []), _seen | {name})
+        inner = _expand_var_tokens(var.get("formula", []), variable_store, _seen | {name})
         if inner:
             out.append({"type": "paren", "value": "("})
             out.extend(inner)
@@ -331,8 +343,8 @@ def _expand_var_tokens(tokens: list, _seen: frozenset = frozenset()) -> list:
 # ── token → expression string ──────────────────────────────────────────────
 
 def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
-                    self_value=None, symbol_col: str = SYMBOL_COLUMN) -> str:
-    tokens = _expand_var_tokens(tokens)
+                    self_value=None, symbol_col: str = SYMBOL_COLUMN, variable_store=None) -> str:
+    tokens = _expand_var_tokens(tokens, variable_store)
     parts = []
     sym_index = None
     for tok in tokens:
@@ -568,8 +580,8 @@ def _formula_signature(tokens: list):
                  for tok in tokens)
 
 
-def _build_compiled(tokens: list):
-    tokens = _expand_var_tokens(tokens)
+def _build_compiled(tokens: list, variable_store=None):
+    tokens = _expand_var_tokens(tokens, variable_store)
     parts = []
     col_vars: dict = {}
     col_of_vars: list = []
@@ -696,15 +708,24 @@ def _build_compiled(tokens: list):
     return _Compiled(code, col_vars, col_of_vars, uses_self, agg_specs, day_specs, extreme_specs)
 
 
-def get_compiled(tokens: list):
+def get_compiled(tokens: list, variable_store=None):
     """Public entry point to the compile cache — for a caller that wants to
     pre-compile a formula ONCE and reuse the result via evaluate_compiled()
     across many rows/days, rather than calling evaluate(tokens, ...) (which
     calls this on every single invocation) repeatedly. See
-    evaluate_compiled's own docstring for why that matters at scale."""
-    sig = _formula_signature(tokens)
+    evaluate_compiled's own docstring for why that matters at scale.
+
+    ``variable_store`` is folded into the cache key (by module __name__,
+    stable and readable — both stores are plain modules) alongside the raw
+    token signature: a "{Name}" token expands differently depending on
+    which store resolves it, and LMV/Inception variables can share a name
+    with completely different formulas — without this, whichever store
+    happened to compile a given raw-token shape FIRST would silently win
+    the cache for every later caller using the other store's variable of
+    that same name."""
+    sig = (_formula_signature(tokens), getattr(variable_store, "__name__", None))
     if sig not in _compile_cache:
-        _compile_cache[sig] = _build_compiled(tokens)
+        _compile_cache[sig] = _build_compiled(tokens, variable_store)
     return _compile_cache[sig]
 
 
@@ -742,8 +763,12 @@ def _value_at_extreme(day_history, symbol, col_name: str, driver_col_name: str,
 def evaluate(tokens: list, row_data: dict, all_data: list,
              self_value=None, agg_cache: dict | None = None,
              sym_index: dict | None = None, day_history: dict | None = None,
-             symbol_col: str = SYMBOL_COLUMN):
+             symbol_col: str = SYMBOL_COLUMN, variable_store=None):
     """Return numeric or string result, or None on error.
+
+    ``variable_store`` resolves any "{Name}" token — see
+    _expand_var_tokens's own docstring; defaults to LMV's formula_variable_
+    store.
 
     ``agg_cache``, when provided, memoizes _ALL aggregate results by
     (base_op, col_name) for the caller's own scope (e.g. one dict per
@@ -779,7 +804,7 @@ def evaluate(tokens: list, row_data: dict, all_data: list,
     """
     if not tokens:
         return None
-    compiled = get_compiled(tokens)
+    compiled = get_compiled(tokens, variable_store)
     return evaluate_compiled(compiled, row_data, all_data, self_value,
                              agg_cache, sym_index, day_history, symbol_col)
 
@@ -874,7 +899,7 @@ def evaluate_compiled(compiled, row_data: dict, all_data: list,
 
 
 def _evaluate_verbose(tokens: list, row_data: dict, all_data: list,
-                      self_value=None, symbol_col: str = SYMBOL_COLUMN):
+                      self_value=None, symbol_col: str = SYMBOL_COLUMN, variable_store=None):
     """Like evaluate() but returns (result, error). error is None on success.
 
     Unlike evaluate(), this surfaces the real exception object (rather than
@@ -883,7 +908,7 @@ def _evaluate_verbose(tokens: list, row_data: dict, all_data: list,
     """
     if not tokens:
         return None, "Formula is empty."
-    expr = _tokens_to_expr(tokens, row_data, all_data, self_value, symbol_col)
+    expr = _tokens_to_expr(tokens, row_data, all_data, self_value, symbol_col, variable_store)
     if not expr.strip():
         return None, "Formula is empty."
     try:
@@ -1202,10 +1227,11 @@ def collect_day_requests(strategies: list, notif_configs: dict | None = None) ->
 def evaluate_condition(tokens: list, row_data: dict, all_data: list,
                        self_value=None, agg_cache: dict | None = None,
                        sym_index: dict | None = None,
-                       day_history: dict | None = None) -> bool:
+                       day_history: dict | None = None,
+                       variable_store=None) -> bool:
     """Return True if condition is met."""
     result = evaluate(tokens, row_data, all_data, self_value, agg_cache,
-                      sym_index, day_history)
+                      sym_index, day_history, variable_store=variable_store)
     if result is None:
         return False
     return bool(result)
@@ -1215,11 +1241,17 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
                      day_history: dict | None = None,
                      include_streak_columns: bool = True,
                      symbol_col: str = SYMBOL_COLUMN,
-                     inception_values: dict | None = None) -> tuple[list, list[list]]:
+                     inception_values: dict | None = None,
+                     variable_store=None) -> tuple[list, list[list]]:
     """
     Append strategy columns to headers and data rows.
     Returns (new_headers, new_data).
     Only active strategies are applied.
+
+    ``variable_store`` resolves any "{Name}" formula-variable token in a
+    column formula, row filter, or fmt_rule condition — defaults to LMV's
+    formula_variable_store; screens.inception_hmv/inception_view_by_date
+    pass services.inception_formula_variable_store (see issue #21).
 
     ``day_history``, forwarded to every evaluate()/evaluate_condition() call,
     resolves _DAYS historic aggregate functions — see evaluate()'s docstring.
@@ -1306,8 +1338,8 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
     # — one entry per strategy, in the same order.
     compiled_per_strat = [
         (
-            [(col["name"], get_compiled(col["formula"])) for col in strat.get("columns", [])],
-            get_compiled(strat["row_filter"]) if strat.get("row_filter") else None,
+            [(col["name"], get_compiled(col["formula"], variable_store)) for col in strat.get("columns", [])],
+            get_compiled(strat["row_filter"], variable_store) if strat.get("row_filter") else None,
         )
         for strat in active
     ]
@@ -1390,7 +1422,8 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
 def _match_fmt_rule(col_def: dict, value, row_dict: dict,
                     all_dicts: list, agg_cache: dict | None = None,
                     sym_index: dict | None = None,
-                    day_history: dict | None = None) -> dict | None:
+                    day_history: dict | None = None,
+                    variable_store=None) -> dict | None:
     """Return the first fmt rule whose condition matches (THIS = value,
     this column's own computed value), else None. First match wins."""
     for rule in col_def.get("fmt_rules", []):
@@ -1398,7 +1431,8 @@ def _match_fmt_rule(col_def: dict, value, row_dict: dict,
             continue
         if evaluate_condition(rule["condition"], row_dict, all_dicts,
                               self_value=value, agg_cache=agg_cache,
-                              sym_index=sym_index, day_history=day_history):
+                              sym_index=sym_index, day_history=day_history,
+                              variable_store=variable_store):
             return rule
     return None
 
@@ -1406,10 +1440,11 @@ def _match_fmt_rule(col_def: dict, value, row_dict: dict,
 def get_cell_color(col_def: dict, value, row_dict: dict,
                    all_dicts: list, agg_cache: dict | None = None,
                    sym_index: dict | None = None,
-                   day_history: dict | None = None) -> str | None:
+                   day_history: dict | None = None,
+                   variable_store=None) -> str | None:
     """Return hex color if any fmt rule matches, else None."""
     rule = _match_fmt_rule(col_def, value, row_dict, all_dicts, agg_cache,
-                           sym_index, day_history)
+                           sym_index, day_history, variable_store)
     return rule.get("color") if rule else None
 
 
@@ -1417,9 +1452,15 @@ def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
                        row_dict: dict, all_dicts: list,
                        agg_cache: dict | None = None,
                        sym_index: dict | None = None,
-                       day_history: dict | None = None) -> dict:
+                       day_history: dict | None = None,
+                       variable_store=None) -> dict:
     """One row's resolved {target_column_name: color} map, combining every
     active strategy column's conditional formatting.
+
+    ``variable_store`` resolves any "{Name}" token in a fmt rule's own
+    condition — defaults to LMV's formula_variable_store; screens.
+    inception_hmv/inception_view_by_date pass services.
+    inception_formula_variable_store (see issue #21).
 
     A fmt rule's condition is always evaluated against its OWNING strategy
     column's own computed value (THIS) — only WHERE the resulting color
@@ -1436,7 +1477,7 @@ def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
         if idx >= len(row):
             continue
         rule = _match_fmt_rule(col_def, row[idx], row_dict, all_dicts,
-                               agg_cache, sym_index, day_history)
+                               agg_cache, sym_index, day_history, variable_store)
         if rule is None:
             continue
         target = rule.get("target_column") or col_def.get("name")
@@ -1446,7 +1487,7 @@ def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
 
 def compile_check(tokens: list, row_data: dict, all_data: list,
                   self_value=None, lmv_headers: list | None = None,
-                  symbol_col: str = SYMBOL_COLUMN) -> tuple:
+                  symbol_col: str = SYMBOL_COLUMN, variable_store=None) -> tuple:
     """
     Validate tokens against the actual loaded LMV sheet (never dummy data).
     Returns (True, result_str) on success, (False, error_message) on failure.
@@ -1475,6 +1516,14 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     (see evaluate_compiled's own symbol_col docstring) — defaults to
     SYMBOL_COLUMN ("Scrip Name", LMV's), screens.inception_strategy_builder
     passes "Symbol" instead.
+
+    ``variable_store`` resolves any "{Name}" token — see
+    _expand_var_tokens's own docstring; defaults to LMV's formula_variable_
+    store. screens.inception_strategy_builder passes services.
+    inception_formula_variable_store — without this, an Inception variable
+    never resolved here (wrong store), reported as "The variable(s) this
+    formula refers to are empty or missing." regardless of how correct the
+    variable's own formula was (see issue #21).
     """
     if not tokens:
         return False, "Formula is empty."
@@ -1482,7 +1531,7 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     # Expand {"type": "var"} references up front so every check below (the
     # unknown-column scan included) sees the referenced variable's own
     # tokens, not an opaque placeholder.
-    tokens = _expand_var_tokens(tokens)
+    tokens = _expand_var_tokens(tokens, variable_store)
     if not tokens:
         return False, "The variable(s) this formula refers to are empty or missing."
 
@@ -1493,7 +1542,7 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     # Editor already checks brackets/parentheses against the raw text before
     # reaching here, so this is mainly a safety net for tokens built some
     # other way, e.g. a JSON import.)
-    expr = _tokens_to_expr(tokens, row_data, all_data, self_value, symbol_col)
+    expr = _tokens_to_expr(tokens, row_data, all_data, self_value, symbol_col, variable_store)
     try:
         compile(expr, "<formula>", "eval")  # noqa: S307
     except SyntaxError:
@@ -1546,7 +1595,7 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
         row_data = substituted
 
     # 5. Evaluate against the real first row, surfacing the actual error.
-    result, err = _evaluate_verbose(tokens, row_data, all_data, self_value, symbol_col)
+    result, err = _evaluate_verbose(tokens, row_data, all_data, self_value, symbol_col, variable_store)
     if err:
         return False, (_friendly_exception(err) if isinstance(err, Exception) else err)
 

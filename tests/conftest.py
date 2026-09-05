@@ -97,6 +97,29 @@ def _isolate_disk_stores(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(formula_variables_api, "delete_variable", lambda variable_id: None)
 
+    # services/inception_strategy_store.py and services/inception_formula_
+    # variable_store.py have the identical "_STORE_FILE local cache,
+    # rewritten by load_all() itself on every successful server read" shape
+    # as strategy_store.py/formula_variable_store.py above — found missing
+    # here (issue #21's own test writing straight to the real, in-use
+    # inception_formula_variables.json at the repo root the moment
+    # inception_api.list_variables got mocked to return an empty list, the
+    # exact same class of bug this fixture's own docstring already warns
+    # about for the LMV-side stores). Only list_variables/list_strategies
+    # are stubbed here (not upsert_*/delete_*, unlike the LMV block above)
+    # — those two are the ones load_all() calls incidentally just from
+    # constructing a screen, and this repo already has a direct unit test
+    # of inception_api.upsert_strategy itself
+    # (test_upsert_strategy_hits_expected_path_and_body) that a blanket
+    # stub here would silently short-circuit.
+    from services import inception_formula_variable_store, inception_strategy_store
+    from api import inception_api
+    monkeypatch.setattr(inception_formula_variable_store, "_STORE_FILE",
+                        str(tmp_path / "inception_formula_variables.json"))
+    monkeypatch.setattr(inception_strategy_store, "_STORE_FILE", str(tmp_path / "inception_strategies.json"))
+    monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
+
     monkeypatch.setattr(auth_api, "get_theme", lambda: {"theme": "light"})
     monkeypatch.setattr(auth_api, "update_theme", lambda theme: {"theme": theme})
 

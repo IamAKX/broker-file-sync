@@ -67,6 +67,7 @@ def save_variable(variable: dict):
     else:
         all_v.append(variable)
     _save_raw(all_v)
+    _invalidate_formula_cache()
 
 
 def delete_variable(var_id: str):
@@ -76,7 +77,21 @@ def delete_variable(var_id: str):
 
     all_v = [v for v in _load_raw() if v["id"] != var_id]
     _save_raw(all_v)
+    _invalidate_formula_cache()
 
 
 def new_variable(name: str) -> dict:
     return {"id": str(uuid.uuid4()), "name": name, "formula": []}
+
+
+def _invalidate_formula_cache():
+    # Same reasoning/fix as services.formula_variable_store's identical
+    # helper (which this module never shared, being a separate store —
+    # this was simply never added here): a formula referencing this
+    # variable by name is cached (compiled) under a signature that doesn't
+    # change when only the variable's own formula does, so every save/
+    # delete has to drop the whole cache to avoid a formula silently
+    # keeping the pre-edit expansion. See services.strategy_engine.
+    # get_compiled's own variable_store-aware cache key.
+    from services import strategy_engine
+    strategy_engine.clear_compile_cache()

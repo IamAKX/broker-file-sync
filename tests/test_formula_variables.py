@@ -202,3 +202,137 @@ def test_digit_tiered_threshold_variable_used_in_comparison(var_store):
         tok_op(">="), tok_var("ClosenessThreshold"),
     ]
     assert evaluate_condition(tokens, row, [row]) is True
+
+
+# ── Inception's own variable store (issue #21) ───────────────────────────────
+# services.strategy_engine used to hardcode services.formula_variable_store
+# (LMV's own) everywhere a "{Name}" token got expanded — screens.
+# inception_strategy_builder's Variables tab reads/writes a SEPARATE store
+# (services.inception_formula_variable_store), so any variable used in an
+# Inception formula silently resolved against the wrong (LMV) store: found
+# nothing, got dropped, and either evaluated as if it were never there or
+# (for a formula that was JUST the variable) failed compile_check outright
+# with "The variable(s) this formula refers to are empty or missing."
+
+@pytest.fixture
+def inception_var_store(tmp_path, monkeypatch):
+    from services import inception_formula_variable_store as store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "inception_vars.json"))
+    from api import inception_api
+    monkeypatch.setattr(inception_api, "upsert_variable", lambda *a, **k: None)
+    monkeypatch.setattr(inception_api, "delete_variable", lambda *a, **k: None)
+    return store
+
+
+def test_inception_variable_resolves_via_explicit_variable_store(inception_var_store):
+    """Direct repro of issue #21: a variable saved in Inception's OWN store
+    must resolve when that store is passed explicitly — and must NOT
+    resolve (dropped, same as any unknown/deleted variable) against LMV's
+    default store, confirming the fix is store-driven, not accidentally
+    always-on."""
+    from services.strategy_engine import evaluate, compile_check
+
+    v = inception_var_store.new_variable("MyVar")
+    v["formula"] = [tok_num(42)]
+    inception_var_store.save_variable(v)
+
+    tokens = [tok_var("MyVar")]
+    assert evaluate(tokens, {}, [], variable_store=inception_var_store) == 42
+    assert evaluate(tokens, {}, []) is None   # LMV's default store — not found
+
+    ok, msg = compile_check(tokens, {}, [{}], variable_store=inception_var_store)
+    assert ok is True
+    assert msg == "42"
+    ok2, msg2 = compile_check(tokens, {}, [{}])
+    assert ok2 is False
+    assert "empty or missing" in msg2
+
+
+def test_lmv_and_inception_variables_of_the_same_name_do_not_collide(var_store, inception_var_store):
+    """LMV and Inception variables are independent user data — a user could
+    name one "Threshold" in each store with completely different formulas.
+    get_compiled's cache key must include which store resolved a "var"
+    token, or whichever store compiled a given raw-token shape FIRST would
+    silently win the cache for the other store's later caller."""
+    from services.strategy_engine import evaluate
+
+    lmv_v = var_store.new_variable("Threshold")
+    lmv_v["formula"] = [tok_num(1)]
+    var_store.save_variable(lmv_v)
+
+    inc_v = inception_var_store.new_variable("Threshold")
+    inc_v["formula"] = [tok_num(2)]
+    inception_var_store.save_variable(inc_v)
+
+    tokens = [tok_var("Threshold")]
+    assert evaluate(tokens, {}, []) == 1                                  # LMV default
+    assert evaluate(tokens, {}, [], variable_store=inception_var_store) == 2
+    # Re-check LMV's own resolution AFTER the Inception one ran — proves the
+    # cache didn't get clobbered by the other store's compile.
+    assert evaluate(tokens, {}, []) == 1
+
+
+def test_editing_inception_variable_invalidates_compile_cache(inception_var_store):
+    """Mirrors test_editing_variable_invalidates_compile_cache above —
+    inception_formula_variable_store never had this fix at all (a separate
+    module from formula_variable_store, so it never inherited it)."""
+    from services.strategy_engine import evaluate
+
+    v = inception_var_store.new_variable("Threshold")
+    v["formula"] = [tok_num(1)]
+    inception_var_store.save_variable(v)
+
+    tokens = [tok_var("Threshold")]
+    assert evaluate(tokens, {}, [], variable_store=inception_var_store) == 1
+
+    v["formula"] = [tok_num(2)]
+    inception_var_store.save_variable(v)
+    assert evaluate(tokens, {}, [], variable_store=inception_var_store) == 2
+
+
+def test_apply_strategies_resolves_variable_via_variable_store(inception_var_store):
+    """End-to-end through apply_strategies (the real HMV/View by Date render
+    path, not just a bare evaluate() call) — screens.inception_hmv/
+    inception_view_by_date pass variable_store=inception_formula_variable_
+    store to exactly this function."""
+    from services.strategy_engine import apply_strategies
+
+    v = inception_var_store.new_variable("Bump")
+    v["formula"] = [tok_num(10)]
+    inception_var_store.save_variable(v)
+
+    strat = {
+        "id": "s1", "active": True, "row_filter": [],
+        "columns": [{"name": "Bumped", "formula": [tok_col("Close"), tok_op("+"), tok_var("Bump")]}],
+    }
+    headers = ["Scrip Name", "Close"]
+    data = [["INFY", 100.0]]
+    new_headers, new_data = apply_strategies(
+        [strat], headers, data, variable_store=inception_var_store,
+    )
+    assert new_headers == ["Scrip Name", "Close", "Bumped"]
+    assert new_data[0][2] == 110.0
+
+
+def test_get_row_fmt_colors_resolves_variable_via_variable_store(inception_var_store):
+    """Conditional Formatting's own condition can reference a variable too
+    — get_row_fmt_colors/get_cell_color/_match_fmt_rule all needed the same
+    variable_store threading as the column-formula/row-filter path."""
+    from services.strategy_engine import get_row_fmt_colors
+
+    v = inception_var_store.new_variable("MinGood")
+    v["formula"] = [tok_num(50)]
+    inception_var_store.save_variable(v)
+
+    col_def = {
+        "name": "Score",
+        "fmt_rules": [
+            {"condition": [{"type": "self"}, tok_op(">="), tok_var("MinGood")],
+             "color": "#00ff00", "target_column": None},
+        ],
+    }
+    row = ["INFY", 75]
+    row_dict = {"Scrip Name": "INFY", "Score": 75}
+    colors = get_row_fmt_colors([col_def], row, 1, row_dict, [row_dict],
+                                variable_store=inception_var_store)
+    assert colors == {"Score": "#00ff00"}
