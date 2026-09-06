@@ -125,6 +125,27 @@ class FrozenColumns(QObject):
         # belt-and-suspenders live_viewer's own _configure_frozen_column uses.
         QTimer.singleShot(0, self._update_geometry)
 
+    def sync_row_hidden(self) -> None:
+        """Mirrors self._table's per-row hidden state onto the overlay —
+        the two views share a model but NOT view state (row visibility,
+        selection, scroll position, ...; the scroll position is already
+        kept in lock-step in __init__, but row-hidden isn't). Hiding rows
+        on the real table alone (e.g. screens.historic_viewer's Symbol
+        search, screens.lmv_snapshot_viewer's sector filter) leaves the
+        frozen Sector/Symbol columns showing their OLD, unfiltered
+        positions — so the single remaining match's data ends up sitting
+        next to whatever symbol was first in the still-unfiltered frozen
+        pane instead of its own Sector/Symbol (see screens.live_viewer's
+        _apply_sector_filter, which mirrors this by hand onto its own
+        hand-rolled frozen table for the exact same reason — this is that
+        same fix, generalized here since this component didn't have it).
+        Call immediately after any setRowHidden() call on the real table.
+        """
+        if not shiboken6.isValid(self._table) or not shiboken6.isValid(self._overlay):
+            return
+        for r in range(self._table.model().rowCount()):
+            self._overlay.setRowHidden(r, self._table.isRowHidden(r))
+
     def _pin_order(self):
         hdr = self._table.horizontalHeader()
         self._guarding = True

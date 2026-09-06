@@ -228,6 +228,41 @@ def test_historic_viewer_symbol_search_filters_rows(qapp):
     assert viewer._table.isRowHidden(1) is False
 
 
+def test_historic_viewer_symbol_search_keeps_frozen_overlay_rows_in_sync(qapp):
+    """Regression: screens.inception_view_by_date's HistoricDataViewer popup
+    freezes Sector/Symbol via components.frozen_table_columns.FrozenColumns
+    — a SEPARATE QTableView overlay sharing the same model but NOT the real
+    table's row-hidden view state. _on_search used to hide non-matching rows
+    on self._table only, leaving the overlay showing every row at its
+    original, unfiltered position — so after searching e.g. "bajfinance",
+    the one real match's data (compacted to the top of the now-filtered
+    real table) visually lined up with whatever symbol the overlay's own
+    unfiltered row 0 happened to be (alphabetically first — "360ONE" in the
+    reported bug), not its own Sector/Symbol. Every row's hidden state must
+    now match between the two views after a search."""
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Sector", "Symbol", "Close"],
+        [["FINANCE", "360ONE", "100"], ["FINANCE", "BAJFINANCE", "200"], ["CG", "ABB", "300"]],
+        "05-Jul-2026",
+        frozen_headers=["Sector", "Symbol"],
+    )
+    overlay = viewer._freeze._overlay
+
+    viewer._search_box.setText("bajfinance")
+
+    for r in range(viewer._table.rowCount()):
+        assert overlay.isRowHidden(r) == viewer._table.isRowHidden(r), f"row {r} out of sync"
+    assert viewer._table.isRowHidden(1) is False   # BAJFINANCE — the match
+    assert overlay.isRowHidden(1) is False
+    assert viewer._table.isRowHidden(0) is True    # 360ONE — filtered out
+    assert overlay.isRowHidden(0) is True
+
+    viewer._search_box.setText("")
+    for r in range(viewer._table.rowCount()):
+        assert overlay.isRowHidden(r) == viewer._table.isRowHidden(r), f"row {r} out of sync"
+
+
 def test_historic_viewer_column_filter_hides_column(qapp):
     from screens.historic_viewer import HistoricDataViewer
     viewer = HistoricDataViewer(
@@ -260,3 +295,147 @@ def test_historic_viewer_header_sections_movable(qapp):
         "05-Jul-2026",
     )
     assert viewer._table.horizontalHeader().sectionsMovable() is True
+
+
+# ── HistoricDataViewer: Sector filter (feature request alongside the search
+# fix — mirrors screens.lmv_snapshot_viewer's own sector combo) ────────────
+
+def test_historic_viewer_sector_combo_hidden_without_sector_column(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(["Symbol", "Close"], [["ABB", "100"]], "05-Jul-2026")
+    assert viewer._sector_combo is None
+
+
+def test_historic_viewer_sector_combo_lists_distinct_values(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Sector", "Symbol", "Close"],
+        [["FINANCE", "360ONE", "100"], ["FINANCE", "BAJFINANCE", "200"], ["CG", "ABB", "300"]],
+        "05-Jul-2026",
+    )
+    items = [viewer._sector_combo.itemText(i) for i in range(viewer._sector_combo.count())]
+    assert items == ["All", "CG", "FINANCE"]
+
+
+def test_historic_viewer_sector_filter_hides_non_matching_rows(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Sector", "Symbol", "Close"],
+        [["FINANCE", "360ONE", "100"], ["FINANCE", "BAJFINANCE", "200"], ["CG", "ABB", "300"]],
+        "05-Jul-2026",
+        frozen_headers=["Sector", "Symbol"],
+    )
+    overlay = viewer._freeze._overlay
+
+    viewer._sector_combo.setCurrentText("CG")
+
+    assert viewer._table.isRowHidden(0) is True
+    assert viewer._table.isRowHidden(1) is True
+    assert viewer._table.isRowHidden(2) is False
+    # Overlay must stay in sync here too, same rationale as the search fix.
+    for r in range(3):
+        assert overlay.isRowHidden(r) == viewer._table.isRowHidden(r), f"row {r} out of sync"
+
+
+def test_historic_viewer_sector_and_search_filters_combine(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Sector", "Symbol", "Close"],
+        [["FINANCE", "360ONE", "100"], ["FINANCE", "BAJFINANCE", "200"], ["CG", "ABB", "300"]],
+        "05-Jul-2026",
+    )
+    viewer._sector_combo.setCurrentText("FINANCE")
+    viewer._search_box.setText("bajfinance")
+
+    assert viewer._table.isRowHidden(0) is True    # right sector, wrong symbol
+    assert viewer._table.isRowHidden(1) is False    # matches both
+    assert viewer._table.isRowHidden(2) is True    # wrong sector entirely
+
+
+# ── HistoricDataViewer: Category filter (All/Daily/Weekly/Monthly/Common —
+# hides/shows already-applied strategy columns, never re-evaluates them) ───
+
+def test_historic_viewer_category_combo_hidden_without_column_categories(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(["Symbol", "Close"], [["ABB", "100"]], "05-Jul-2026")
+    assert viewer._category_combo is None
+
+
+def test_historic_viewer_category_filter_hides_non_matching_strategy_columns(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Symbol", "Close", "MyDaily", "MyWeekly"],
+        [["ABB", "100", "X", "Y"]],
+        "05-Jul-2026",
+        column_categories={"MyDaily": "Daily", "MyWeekly": "Weekly"},
+    )
+    viewer._category_combo.setCurrentText("Daily")
+
+    assert viewer._table.isColumnHidden(0) is False   # base column — never gated
+    assert viewer._table.isColumnHidden(1) is False   # base column — never gated
+    assert viewer._table.isColumnHidden(2) is False   # Daily — matches
+    assert viewer._table.isColumnHidden(3) is True    # Weekly — filtered out
+
+    viewer._category_combo.setCurrentText("All")
+    assert viewer._table.isColumnHidden(3) is False
+
+
+def test_historic_viewer_category_and_column_visibility_filters_combine(qapp):
+    """A column hidden via the Columns popup must stay hidden regardless of
+    the Category filter, and vice versa — the two combine (AND), neither
+    one overrides the other."""
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Symbol", "MyDaily", "MyWeekly"],
+        [["ABB", "X", "Y"]],
+        "05-Jul-2026",
+        column_categories={"MyDaily": "Daily", "MyWeekly": "Weekly"},
+    )
+    viewer._apply_col_filter({0, 1})   # user unchecked MyWeekly in Columns
+    viewer._category_combo.setCurrentText("Daily")
+
+    assert viewer._table.isColumnHidden(1) is False   # Daily, visible -> shown
+    assert viewer._table.isColumnHidden(2) is True    # Weekly AND unchecked -> hidden
+
+    viewer._category_combo.setCurrentText("All")
+    assert viewer._table.isColumnHidden(2) is True    # still unchecked via Columns
+
+
+# ── HistoricDataViewer: Reset ("↺ Reset" button) ─────────────────────────
+
+def test_reset_restores_column_visibility_and_clears_filters_and_search(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Sector", "Symbol", "MyDaily"],
+        [["FINANCE", "360ONE", "X"], ["CG", "ABB", "Y"]],
+        "05-Jul-2026",
+        column_categories={"MyDaily": "Daily"},
+    )
+    viewer._apply_col_filter({0, 1})            # MyDaily hidden via Columns
+    viewer._category_combo.setCurrentText("Weekly")
+    viewer._sector_combo.setCurrentText("CG")
+    viewer._search_box.setText("abb")
+
+    viewer._reset_columns()
+
+    assert viewer._table.isColumnHidden(2) is False
+    assert viewer._category_combo.currentText() == "All"
+    assert viewer._sector_combo.currentText() == "All"
+    assert viewer._search_box.text() == ""
+    assert viewer._table.isRowHidden(0) is False
+    assert viewer._table.isRowHidden(1) is False
+
+
+def test_reset_restores_natural_column_order_after_drag(qapp):
+    from screens.historic_viewer import HistoricDataViewer
+    viewer = HistoricDataViewer(
+        ["Symbol", "Close", "Volume"],
+        [["ABB", "100", "5000"]],
+        "05-Jul-2026",
+    )
+    hdr = viewer._table.horizontalHeader()
+    hdr.moveSection(0, 2)   # drag "Symbol" to the end
+
+    viewer._reset_columns()
+
+    assert [hdr.visualIndex(i) for i in range(3)] == [0, 1, 2]

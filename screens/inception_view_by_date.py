@@ -554,6 +554,18 @@ class InceptionViewByDateScreen(QWidget):
         # order right after apply_strategies appended them, not after
         # they've potentially been shuffled elsewhere in the row.
         strat_col_defs = [col for s in strategies for col in s.get("columns", [])]
+        # Feeds HistoricDataViewer's Category filter (All/Daily/Weekly/
+        # Monthly/Common) — column NAME -> its owning strategy's category,
+        # one entry per strategy-added column. A base/raw column is never
+        # in here, so it's unaffected by that filter, same convention as
+        # screens.live_viewer's own category combo only ever gating
+        # strategy columns. Built from *strategies* (pre-reorder) rather
+        # than the post-reorder headers below — keyed by name, so column
+        # order doesn't matter.
+        column_categories = {
+            col["name"]: s.get("category", "Daily")
+            for s in strategies for col in s.get("columns", [])
+        }
         all_dicts = [dict(zip(headers, row)) for row in table_rows]
         agg_cache: dict = {}
         sym_index = build_symbol_index(all_dicts)
@@ -598,6 +610,7 @@ class InceptionViewByDateScreen(QWidget):
             headers, table_rows, self._selected_date.strftime("%d-%b-%Y"), theme=t,
             title=f"Inception — {self._selected_date.strftime('%d-%b-%Y')}",
             frozen_headers=_FROZEN_HEADERS, cell_highlights=cell_highlights,
+            column_categories=column_categories,
         )
         viewer.show()
         self._viewers.append(viewer)
