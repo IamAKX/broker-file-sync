@@ -976,6 +976,44 @@ def test_frozen_columns_unfreeze_hides_overlay(qapp):
     assert freeze._overlay.isHidden()
 
 
+def test_frozen_columns_overlay_height_rounds_down_to_a_whole_number_of_rows(qapp):
+    """Issue #29: "the last stock in Historical EMV gets split into two
+    rows when I select specific columns using the column filter". Root
+    cause: the overlay used to be sized to the real table's exact PIXEL
+    viewport height, which has no reason to land on a row boundary (it's
+    driven by the popup's window size, and by whether the real table's
+    horizontal scrollbar is showing — which a column filter can flip by
+    changing whether the remaining visible columns fit the window width).
+    Any leftover partial-row strip got filled with a stale/duplicate
+    repaint of the last real row instead of staying blank. The overlay's
+    rows-area height (total height minus its own header) must now always
+    be an exact multiple of the row height, for any viewport size."""
+    from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+    from components.frozen_table_columns import FrozenColumns
+
+    headers = ["Sector", "Symbol", "CLOSE"]
+    table = QTableWidget(20, 3)
+    table.setHorizontalHeaderLabels(headers)
+    for r in range(20):
+        for c, h in enumerate(headers):
+            table.setItem(r, c, QTableWidgetItem(f"{h}{r}"))
+    table.verticalHeader().setDefaultSectionSize(30)
+
+    freeze = FrozenColumns(table)
+    freeze.configure(headers, ["Sector", "Symbol"])
+
+    # A handful of window sizes, deliberately not chosen as multiples of
+    # the 30px row height — the whole point being this must hold
+    # regardless of what pixel height the real table's viewport happens
+    # to end up at.
+    for h in (241, 287, 312, 350):
+        table.resize(400, h)
+        freeze._update_geometry()
+        row_h = table.rowHeight(0)
+        rows_area_height = freeze._overlay.height() - table.horizontalHeader().height()
+        assert rows_area_height % row_h == 0, f"leftover partial row at window height {h}"
+
+
 # ── services.inception_formula_builder_columns ───────────────────────────
 
 def _daily_bars(symbol, start, n, close_fn=lambda i: 100 + i, skip=frozenset()):

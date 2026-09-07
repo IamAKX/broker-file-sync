@@ -184,8 +184,37 @@ class FrozenColumns(QObject):
             w = self._table.columnWidth(c)
             self._overlay.setColumnWidth(c, w)
             width += w
-        height = self._table.viewport().height() + hdr.height()
+        # Rounded DOWN to a whole number of rows — issue #29: the real
+        # table's raw viewport().height() is a pixel measurement with no
+        # reason to land on a row boundary (it's driven by the window/
+        # popup size), so sizing the overlay to that exact pixel height
+        # routinely leaves a partial-row-tall leftover strip at the
+        # bottom. Qt doesn't render "half a row" meaningfully there — it
+        # was filling that strip with a stale/duplicate repaint of the
+        # last real row, reading as "the last stock split into two rows".
+        # Reported specifically as column-filter-triggered because hiding
+        # columns can make the remaining ones fit the window width without
+        # a horizontal scrollbar, changing viewport height by however many
+        # pixels the scrollbar used to occupy — which is what pushed the
+        # leftover strip from "exists but zero-height, invisible" to
+        # "exists and visible". Rounding down here removes the leftover
+        # strip outright, independent of what causes the pixel height to
+        # not land on a row boundary (the real table's own vertical
+        # scrollbar, not the overlay's — ScrollBarAlwaysOff on this one,
+        # see __init__ — already covers however much of the last row this
+        # rounding leaves un-drawn).
+        viewport_h = self._table.viewport().height()
+        row_h = self._table.rowHeight(0) if self._table.model().rowCount() else vh.defaultSectionSize()
+        if row_h > 0:
+            viewport_h = (viewport_h // row_h) * row_h
+        height = viewport_h + hdr.height()
         self._overlay.setGeometry(x, y, width, height)
         self._overlay.verticalScrollBar().setValue(self._table.verticalScrollBar().value())
         self._overlay.show()
         self._overlay.raise_()
+        # Belt-and-suspenders alongside the rounding above: force a full
+        # repaint rather than trust Qt's default partial-invalidation on
+        # resize, in case anything about the overlay's own paint caching
+        # would otherwise leave stale pixels behind at the old geometry's
+        # boundary.
+        self._overlay.viewport().update()
