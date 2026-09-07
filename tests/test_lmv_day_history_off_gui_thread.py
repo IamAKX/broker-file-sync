@@ -312,3 +312,27 @@ def test_worker_refresh_day_history_fetches_notif_configs_itself(qapp, tmp_path,
     worker.refresh_day_history([_row_filter_strategy()], "All", False)
 
     assert called == [1]
+
+
+def test_worker_refresh_day_history_warms_alert_window_cache(qapp, tmp_path, monkeypatch):
+    """Issue #31: _run_strategy_alert_checks' should_run_now() only ever
+    PEEKS alert_schedule's window cache (never a network call — it runs on
+    every live tick), so a saved custom Alert Window has to be loaded from
+    somewhere off that hot path or every tick would silently keep gating
+    against the hardcoded default all session. refresh_day_history (this
+    worker method) is that somewhere, same as it already is for
+    notif_configs above."""
+    from services import strategy_store as store, config_store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config.json"))
+    from screens.live_viewer import _LiveDataWorker
+    from services.strategy_alerts import alert_schedule
+
+    called = []
+    real = alert_schedule.load_alert_window
+    monkeypatch.setattr(alert_schedule, "load_alert_window", lambda: called.append(1) or real())
+
+    worker = _LiveDataWorker(reader=None, sector_map={}, name_to_symbol={})
+    worker.refresh_day_history([_row_filter_strategy()], "All", False)
+
+    assert called == [1]

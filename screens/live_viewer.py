@@ -304,7 +304,7 @@ class _LiveDataWorker(QObject):
         inactive.
         """
         from services import strategy_store
-        from services.strategy_alerts import config_store as alerts_config_store
+        from services.strategy_alerts import alert_schedule, config_store as alerts_config_store
         from services.strategy_engine import collect_day_requests
         from services.formula_stats_engine import compute_day_history
         from api import lmv_snapshot_api
@@ -330,6 +330,17 @@ class _LiveDataWorker(QObject):
             ]
             active = [s for s in in_view if s.get("active")]
             notif_configs = alerts_config_store.load_configs()
+            # Warms alert_schedule's own window cache off the GUI thread —
+            # same rationale as notif_configs above: _run_strategy_alert_
+            # checks' should_run_now() only ever PEEKS this (never a
+            # network call, since that runs every live tick), so a saved
+            # custom Alert Window has to be loaded into the cache from
+            # somewhere off that hot path, or every tick would silently
+            # keep gating against the hardcoded 09:15-15:30 default all
+            # session — this call, on the same cadence (initial load/
+            # "↻ N-Day Data"/toggle) notif_configs already piggybacks on,
+            # is that "somewhere".
+            alert_schedule.load_alert_window()
             requests = collect_day_requests(active, notif_configs)
             if not requests:
                 self.day_history_result.emit({}, merged)

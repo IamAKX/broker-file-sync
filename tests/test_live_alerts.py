@@ -595,6 +595,91 @@ def test_detail_dialog_shows_score_and_risk_reward_when_present(screen, monkeypa
     assert "0.54" in joined
 
 
+# ── Alert Window popup (issue #31) ───────────────────────────────────────
+
+def test_alert_window_button_present(screen):
+    assert screen._alert_window_btn.text() == "⏱ Alert Window"
+
+
+def test_alert_window_button_opens_dialog(screen, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    calls = []
+    monkeypatch.setattr(QDialog, "exec", lambda self: calls.append(1))
+    screen._alert_window_btn.click()
+    assert calls == [1]
+
+
+def test_alert_window_dialog_prefills_saved_window(screen, monkeypatch):
+    from datetime import time as dtime
+    from PySide6.QtWidgets import QDialog, QTimeEdit
+    from services.strategy_alerts import alert_schedule
+
+    monkeypatch.setattr(alert_schedule, "load_alert_window", lambda: (dtime(10, 15), dtime(14, 45)))
+
+    captured = {}
+
+    def fake_exec(dlg):
+        edits = dlg.findChildren(QTimeEdit)
+        captured["start"] = edits[0].time()
+        captured["end"] = edits[1].time()
+
+    monkeypatch.setattr(QDialog, "exec", fake_exec)
+    screen._open_alert_window_dialog()
+
+    assert (captured["start"].hour(), captured["start"].minute()) == (10, 15)
+    assert (captured["end"].hour(), captured["end"].minute()) == (14, 45)
+
+
+def test_alert_window_save_persists_new_window_and_closes(screen, monkeypatch):
+    from datetime import time as dtime
+    from PySide6.QtCore import QTime
+    from PySide6.QtWidgets import QDialog, QPushButton, QTimeEdit
+    from services.strategy_alerts import alert_schedule
+
+    monkeypatch.setattr(alert_schedule, "load_alert_window", lambda: (dtime(9, 15), dtime(15, 30)))
+    saved = {}
+    monkeypatch.setattr(
+        alert_schedule, "save_alert_window",
+        lambda start, end: saved.update(start=start, end=end),
+    )
+
+    def fake_exec(dlg):
+        edits = dlg.findChildren(QTimeEdit)
+        edits[0].setTime(QTime(10, 0))
+        edits[1].setTime(QTime(16, 0))
+        save_btn = next(b for b in dlg.findChildren(QPushButton) if b.text() == "Save")
+        save_btn.click()
+
+    monkeypatch.setattr(QDialog, "exec", fake_exec)
+    screen._open_alert_window_dialog()
+
+    assert saved == {"start": dtime(10, 0), "end": dtime(16, 0)}
+
+
+def test_alert_window_save_rejects_start_after_end(screen, monkeypatch):
+    from datetime import time as dtime
+    from PySide6.QtCore import QTime
+    from PySide6.QtWidgets import QDialog, QPushButton, QTimeEdit
+    from services.strategy_alerts import alert_schedule
+
+    monkeypatch.setattr(alert_schedule, "load_alert_window", lambda: (dtime(9, 15), dtime(15, 30)))
+    called = []
+    monkeypatch.setattr(alert_schedule, "save_alert_window", lambda *a: called.append(a))
+
+    def fake_exec(dlg):
+        edits = dlg.findChildren(QTimeEdit)
+        edits[0].setTime(QTime(16, 0))   # start after end — invalid
+        edits[1].setTime(QTime(10, 0))
+        save_btn = next(b for b in dlg.findChildren(QPushButton) if b.text() == "Save")
+        save_btn.click()
+
+    monkeypatch.setattr(QDialog, "exec", fake_exec)
+    screen._open_alert_window_dialog()
+
+    assert called == []   # never persisted an invalid range
+
+
 def test_row_click_out_of_range_does_not_raise(screen):
     screen._rows = []
     screen._on_row_clicked(5, 0)  # must not raise

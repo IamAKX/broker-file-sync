@@ -30,10 +30,12 @@ Two independent gates, both must pass for an alert to fire:
    by ensure_trading_day_known_async(), using the same "one-time
    background load, GUI thread only ever peeks the cached result" idiom
    services.lmv_inception_fields.ensure_loaded_async uses — see that
-   module's docstring for the full rationale. Until that background load
-   resolves for *today* specifically (or if it fails), should_run_now()
-   fails OPEN — treats today as a trading day. One tick's worth of alert
-   coverage on an actual holiday before the real answer arrives is a far
+   module's docstring for the full rationale. A weekend never needs that
+   background load at all (it's a pure, local, always-known fact); until
+   the load resolves for *today* specifically on a weekDAY (or if it
+   fails), should_run_now() fails OPEN there — treats today as a trading
+   day. One tick's worth of alert coverage on an actual holiday before the
+   real answer arrives is a far
    smaller problem than silently suppressing every real alert on an
    actual trading day because of a slow/offline holiday fetch.
 """
@@ -145,6 +147,14 @@ def ensure_trading_day_known_async(on_ready=None) -> None:
 
 
 def _is_trading_day_peek(today: date) -> bool:
+    # A weekend never needs the background holiday fetch to have resolved —
+    # it's a pure, local, always-available fact, unlike "is this weekday a
+    # configured holiday". Checking it first means the fail-open default
+    # below only ever has to cover the genuinely uncertain case (a weekday
+    # whose holiday status isn't known yet), not "the app just started and
+    # today happens to be a Saturday".
+    if today.weekday() >= 5:
+        return False
     with _lock:
         return _is_trading_day if _checked_date == today else True   # fail open — see module docstring
 

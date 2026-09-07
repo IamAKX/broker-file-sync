@@ -21,13 +21,14 @@ render loop.
 """
 
 from datetime import datetime
+from datetime import time as dtime
 
 import font_scale
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QSizePolicy, QComboBox, QTableWidget,
     QTableWidgetItem, QHeaderView, QAbstractItemView, QMessageBox, QDialog,
-    QCheckBox, QDateTimeEdit,
+    QCheckBox, QDateTimeEdit, QTimeEdit,
 )
 from PySide6.QtCore import Qt, QDateTime, QTime
 from PySide6.QtGui import QColor
@@ -466,6 +467,18 @@ class LiveAlertsScreen(QWidget):
 
         row.addStretch()
 
+        self._alert_window_btn = QPushButton("⏱ Alert Window")
+        self._alert_window_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._alert_window_btn.setFixedHeight(32)
+        self._alert_window_btn.setToolTip(
+            "Configure the time-of-day window Live Alerts are allowed to fire in "
+            "(issue #31) — alerts never fire outside it, or on a non-trading day."
+        )
+        self._alert_window_btn.setStyleSheet(
+            f"background: transparent; color: {t.get('text_secondary')};"
+            f"border: 1px solid {t.get('divider')}; border-radius: 4px; padding: 0 14px;"
+        )
+        self._alert_window_btn.clicked.connect(self._open_alert_window_dialog)
         refresh_btn = QPushButton("Refresh")
         refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         refresh_btn.setFixedHeight(32)
@@ -478,10 +491,107 @@ class LiveAlertsScreen(QWidget):
             f"border: 1px solid {t.get('destructive')}; border-radius: 4px; padding: 0 14px;"
         )
         clear_btn.clicked.connect(self._on_clear_history)
+        row.addWidget(self._alert_window_btn)
         row.addWidget(refresh_btn)
         row.addWidget(clear_btn)
 
         return row
+
+    # ── Alert Window (issue #31) ─────────────────────────────────────────────
+
+    def _open_alert_window_dialog(self):
+        """Popup beside Refresh to configure services.strategy_alerts.
+        alert_schedule's time-of-day gate — "in the future if the market
+        timings get extended we should be able to configure it" (issue
+        #31). Built fresh on every open (unlike self._filter_dialog, kept
+        alive across opens) — a two-field form this simple doesn't need
+        the persistent-dialog treatment, and building fresh means it
+        always starts from whatever's currently saved, including a change
+        made from a different device/session since this screen opened.
+        load_alert_window() (not peek) is fine here — a discrete button
+        click, not a per-tick hot path (see that function's own docstring
+        for why should_run_now() itself must never do this)."""
+        from services.strategy_alerts import alert_schedule
+
+        t = self._controller.theme
+        start, end = alert_schedule.load_alert_window()
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Alert Window")
+        from screens.strategy_builder import _apply_dialog_bg
+        _apply_dialog_bg(dlg, t)
+        dlg.setMinimumWidth(360)
+
+        layout = QVBoxLayout(dlg)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(12)
+
+        desc = QLabel(
+            "Live Alerts only fire inside this window, and never on a "
+            "non-trading day (weekends/holidays are never configurable)."
+        )
+        desc.setFont(font_scale.font(font_scale.SMALL, False))
+        desc.setStyleSheet(f"color: {t.get('text_secondary')};")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        range_row = QHBoxLayout()
+        range_row.setSpacing(10)
+        from_lbl = QLabel("From")
+        from_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        to_lbl = QLabel("To")
+        to_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        start_edit = QTimeEdit(QTime(start.hour, start.minute))
+        start_edit.setDisplayFormat("hh:mm AP")
+        start_edit.setFixedHeight(34)
+        end_edit = QTimeEdit(QTime(end.hour, end.minute))
+        end_edit.setDisplayFormat("hh:mm AP")
+        end_edit.setFixedHeight(34)
+        range_row.addWidget(from_lbl)
+        range_row.addWidget(start_edit)
+        range_row.addWidget(to_lbl)
+        range_row.addWidget(end_edit)
+        layout.addLayout(range_row)
+
+        error_lbl = QLabel("")
+        error_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        error_lbl.setStyleSheet(f"color: {t.get('destructive')};")
+        error_lbl.setWordWrap(True)
+        error_lbl.setVisible(False)
+        layout.addWidget(error_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.setFixedHeight(34)
+        cancel_btn.clicked.connect(dlg.reject)
+        save_btn = QPushButton("Save")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.setFixedHeight(34)
+        save_btn.setStyleSheet(
+            f"background: {t.get('accent')}; color: {t.get('background')};"
+            f"border: none; border-radius: 4px; padding: 0 16px; font-weight: 600;"
+        )
+
+        def on_save():
+            start_qt = start_edit.time()
+            end_qt = end_edit.time()
+            new_start = dtime(start_qt.hour(), start_qt.minute())
+            new_end = dtime(end_qt.hour(), end_qt.minute())
+            if new_start >= new_end:
+                error_lbl.setText("Start time must be before end time.")
+                error_lbl.setVisible(True)
+                return
+            alert_schedule.save_alert_window(new_start, new_end)
+            dlg.accept()
+
+        save_btn.clicked.connect(on_save)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+        dlg.exec()
 
     # ── Filter option population ─────────────────────────────────────────
 
