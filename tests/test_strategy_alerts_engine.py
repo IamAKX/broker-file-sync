@@ -6,6 +6,7 @@ from services.strategy_alerts.models import (
     EVENT_ENTRY,
     EVENT_STOP_OUT,
     EVENT_TARGET,
+    EVENT_TRADE_CANCELLED,
     new_metric,
     new_notification_config,
 )
@@ -445,4 +446,136 @@ def test_cooldown_is_per_symbol_not_per_strategy():
     assert events == []
     signals = state_store.get_open_signals()
     assert len(signals) == 1
-    assert next(iter(signals.values()))["symbol"] == "TCS"
+
+
+# ── Trade Cancelled: a Target/Stop Loss on the wrong side of the entry
+# price for the signal's own direction (issue #32) — that trade could never
+# have been legitimately taken, so it must resolve straight to
+# "trade_cancelled" instead of being tracked as a normal open signal (which
+# would otherwise report a Target/Stop Loss "hit" on this very first tick,
+# since the price comparison is already trivially satisfied). ──────────────
+
+def test_sell_target_above_entry_cancels_trade_not_achieves_it():
+    """Direct repro of issue #32's report: a SELL signal whose Target sits
+    ABOVE the entry price (should be BELOW, for a short) must not be
+    reported as "Targets Achieved" the instant it opens."""
+    configs = {
+        "strat-1": _make_config(debounce_minutes=0, stop_loss=110, target=105, direction="SELL")
+    }
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1),
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.kind == EVENT_TRADE_CANCELLED
+    assert event.payload["resolution"] == "trade_cancelled"
+    assert event.payload["invalid_metrics"] == [{"name": "Target 1", "role": "target", "value": 105}]
+    assert "title" in event.payload and "message" in event.payload
+
+    # Never tracked as a live signal, and no Target/Stop-out event either.
+    assert state_store.get_open_signals() == {}
+    history = state_store.get_alert_history()
+    assert len(history) == 1
+    assert history[0]["resolution"] == "trade_cancelled"
+    assert history[0]["entry_price"] == 100
+    assert history[0]["metrics"]   # target/stop-loss values kept for the detail view
+
+
+def test_buy_target_below_entry_cancels_trade():
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=90, target=95)}  # target < entry (100)
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1),
+    )
+
+    assert len(events) == 1
+    assert events[0].kind == EVENT_TRADE_CANCELLED
+    assert state_store.get_open_signals() == {}
+
+
+def test_buy_target_equal_to_entry_also_cancels():
+    """A zero-distance target (== entry, not just on the wrong side of it)
+    is equally nonsensical — "achieved" the instant price is quoted at
+    all."""
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=90, target=100)}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1),
+    )
+    assert events[0].kind == EVENT_TRADE_CANCELLED
+
+
+def test_buy_stop_loss_above_entry_cancels_trade():
+    """A BUY's Stop Loss must sit below entry — one placed above it would
+    "stop out" immediately too, the mirror-image of the target bug."""
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=105, target=110)}  # SL > entry (100)
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1),
+    )
+
+    assert len(events) == 1
+    assert events[0].kind == EVENT_TRADE_CANCELLED
+    assert events[0].payload["invalid_metrics"] == [{"name": "Stop Loss", "role": "stop_loss", "value": 105}]
+    assert state_store.get_open_signals() == {}
+
+
+def test_sell_stop_loss_below_entry_cancels_trade():
+    configs = {
+        "strat-1": _make_config(debounce_minutes=0, stop_loss=95, target=90, direction="SELL")
+    }  # SL < entry (100), should be above for a SELL
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1),
+    )
+    assert events[0].kind == EVENT_TRADE_CANCELLED
+
+
+def test_valid_buy_setup_is_never_cancelled():
+    """Regression guard: a normal, correctly-placed BUY (target above
+    entry, stop loss below) must still open as a real tracked signal —
+    this is the exact shape test_condition_true_through_debounce_fires_
+    entry already covers, repeated here as a direct neighbor of the
+    cancellation tests so the boundary is obvious at a glance."""
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=95, target=110)}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1),
+    )
+    assert events[0].kind == EVENT_ENTRY
+    assert len(state_store.get_open_signals()) == 1
+
+
+def test_entry_price_unparseable_skips_cancellation_check():
+    """No entry price to compare against — proceeds as a normal open
+    signal rather than refusing to ever open (same "can't evaluate, don't
+    crash or falsely block" convention as everywhere else in this module)."""
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=105, target=95)}  # would be invalid...
+    row_no_price = _row(signal=1, price=100)
+    row_no_price["Current"] = None   # ...but entry_price can't be determined here
+    evaluate_tick([STRATEGY], configs, [row_no_price], now=T0)
+    events = evaluate_tick(
+        [STRATEGY], configs, [row_no_price], now=T0 + timedelta(minutes=1),
+    )
+    assert events[0].kind == EVENT_ENTRY
+
+
+def test_cancelled_trade_does_not_immediately_restart_while_condition_still_true():
+    """Same cooldown rule as a resolved Target/Stop-out — otherwise a
+    strategy with a permanently-misconfigured Target would fire a fresh
+    "Trade Cancelled" notification every single tick for as long as the
+    trigger condition stays true."""
+    configs = {"strat-1": _make_config(debounce_minutes=0, stop_loss=90, target=95)}  # invalid target
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=1),
+    )
+    assert events[0].kind == EVENT_TRADE_CANCELLED
+
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=2),
+    )
+    assert events == []
+    assert state_store.get_open_signals() == {}

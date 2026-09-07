@@ -29,6 +29,8 @@ from services.strategy_alerts.models import (
     EVENT_ENTRY,
     EVENT_STOP_OUT,
     EVENT_TARGET,
+    EVENT_TRADE_CANCELLED,
+    RESOLUTION_TRADE_CANCELLED,
     ROLE_STOP_LOSS,
     ROLE_TARGET,
     ROLE_TRAILING_EXIT,
@@ -233,6 +235,45 @@ def _fire_entry(
         "running_high": high,
         "running_low": low,
     }
+
+    # Issue #32: a Target/Stop Loss on the wrong side of the entry price for
+    # this direction can never be legitimately traded — resolve straight to
+    # "cancelled" instead of tracking this as a normal open signal (which
+    # would otherwise report it "Achieved"/stopped-out on this very tick,
+    # since the hit test is already trivially satisfied). See
+    # _invalid_metrics' own docstring.
+    invalid = _invalid_metrics(direction, entry_price, metrics_state)
+    if invalid:
+        signal["resolved_at"] = now.isoformat()
+        signal["resolution"] = RESOLUTION_TRADE_CANCELLED
+        state_store.append_alert_history(signal)
+        # The caller (_evaluate_strategy) got here via the *pending* branch
+        # of open_signals[key] — that placeholder ("state": "pending", no
+        # resolution) is still sitting there and must be cleared, exactly
+        # like _update_open_signal's own resolve path does for an "open"
+        # signal, or every following tick would keep finding a non-None
+        # (stale, still-"pending") entry for this key and never reach the
+        # `signal is None` branch that both re-evaluates the trigger fresh
+        # and checks the cooldown set below — silently reproducing this
+        # exact same "Trade Cancelled" event on every single tick instead
+        # of firing once and then going quiet.
+        state_store.clear_open_signal(key)
+        # Same rationale as _update_open_signal's own resolve path — don't
+        # let this symbol/strategy immediately re-fire into a brand new
+        # signal while the trigger condition (very likely still true right
+        # now) hasn't gone false even once yet.
+        state_store.set_cooldown(key)
+
+        event = AlertEvent(
+            kind=EVENT_TRADE_CANCELLED, strategy_id=strategy["id"], strategy_name=strategy.get("name", ""),
+            symbol=symbol, timestamp=now, payload=dict(signal),
+        )
+        event.payload["invalid_metrics"] = invalid
+        event.payload["title"] = messages.render_title(event)
+        event.payload["message"] = messages.render_message(event)
+        event.payload["_signal"] = copy.deepcopy(signal)
+        return event
+
     state_store.set_open_signal(key, signal, force_flush=True)
 
     event = AlertEvent(
@@ -249,6 +290,43 @@ def _fire_entry(
     # one consistent shape regardless of which kind fired).
     event.payload["_signal"] = copy.deepcopy(signal)
     return event
+
+
+def _invalid_metrics(direction: str, entry_price: float | None, metrics: dict) -> list[dict]:
+    """Targets/Stop Losses frozen at entry (see _fire_entry) that sit on the
+    wrong side of the entry price for this signal's own direction — issue
+    #32. A BUY target must be above entry (and its stop loss below); a SELL
+    target must be below entry (and its stop loss above). Otherwise
+    _update_open_signal's own "hit" test (price >= target for BUY, <= for
+    SELL, and the mirror for stop loss) is already satisfied on the very
+    first tick after entry, silently reporting a trade that could never
+    have been legitimately entered and exited as if it played out
+    successfully (the reported repro: a SELL with both targets ABOVE the
+    173.78 entry price, both marked "Achieved" at the same timestamp as the
+    signal itself).
+
+    trailing_exit is deliberately excluded — it's re-evaluated fresh every
+    tick (see _update_open_signal), not frozen at entry, so "wrong side at
+    entry" doesn't mean the same thing for it. entry_price being
+    unparseable (None) skips the check entirely — nothing to compare
+    against, same "blank rather than crash" convention as everywhere else
+    in this module.
+    """
+    if entry_price is None:
+        return []
+    invalid = []
+    for m in metrics.values():
+        role = m.get("role")
+        value = m.get("value")
+        if role not in (ROLE_TARGET, ROLE_STOP_LOSS) or value is None:
+            continue
+        if role == ROLE_TARGET:
+            bad = value <= entry_price if direction == DIRECTION_BUY else value >= entry_price
+        else:  # ROLE_STOP_LOSS
+            bad = value >= entry_price if direction == DIRECTION_BUY else value <= entry_price
+        if bad:
+            invalid.append({"name": m.get("name", ""), "role": role, "value": value})
+    return invalid
 
 
 def _pct_move(entry_price, extreme) -> float | None:

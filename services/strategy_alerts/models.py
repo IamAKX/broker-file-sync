@@ -61,6 +61,18 @@ DIRECTION_SELL = "SELL"
 EVENT_ENTRY = "entry"
 EVENT_TARGET = "target"
 EVENT_STOP_OUT = "stop_out"
+EVENT_TRADE_CANCELLED = "trade_cancelled"
+
+# Resolution string stored on a resolved signal (state_store.py's
+# "resolution" field, synced to the backend as StrategySignal.status — see
+# services.strategy_alerts.backend_sync._status_for and the backend's
+# app.schemas.strategy_signals.StrategySignalUpsertRequest, which must
+# accept this same string). Issue #32: a Target (or Stop Loss) computed on
+# the wrong side of the entry price for the signal's own direction (a BUY
+# target at/below entry, or a SELL target at/above entry — same for stop
+# loss, inverted) can never be legitimately traded; see engine.py's
+# _fire_entry for the check.
+RESOLUTION_TRADE_CANCELLED = "trade_cancelled"
 
 
 def new_metric(name: str, role: str = ROLE_INFORMATIONAL, formula: list | None = None) -> dict:

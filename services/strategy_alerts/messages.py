@@ -17,7 +17,13 @@ delivery is even batched).
 from datetime import datetime
 
 from services.notifications.levels import NotificationLevel
-from services.strategy_alerts.models import EVENT_ENTRY, EVENT_STOP_OUT, EVENT_TARGET, AlertEvent
+from services.strategy_alerts.models import (
+    EVENT_ENTRY,
+    EVENT_STOP_OUT,
+    EVENT_TARGET,
+    EVENT_TRADE_CANCELLED,
+    AlertEvent,
+)
 
 
 def _fmt_price(value) -> str:
@@ -57,6 +63,8 @@ def render_title(event: AlertEvent) -> str:
         return f"{event.strategy_name} — {event.symbol}: Target Achieved"
     if event.kind == EVENT_STOP_OUT:
         return f"{event.strategy_name} — {event.symbol}: Stopped Out"
+    if event.kind == EVENT_TRADE_CANCELLED:
+        return f"{event.strategy_name} — {event.symbol}: Trade Cancelled"
     return f"{event.strategy_name} — {event.symbol}"
 
 
@@ -95,13 +103,28 @@ def render_message(event: AlertEvent) -> str:
             lines.append(f"% move from entry: {p['pct_move']:.2f}%")
         return "\n".join(lines)
 
+    if event.kind == EVENT_TRADE_CANCELLED:
+        lines = [
+            f"Sector: {p.get('sector') or '—'}",
+            f"Direction: {p.get('direction', '')}",
+            f"Entry Price: {_fmt_price(p.get('entry_price'))} @ {_fmt_time(p.get('entry_time'))}",
+            "Cancelled — on the wrong side of the entry price for this direction, so this "
+            "trade could never have been legitimately taken:",
+        ]
+        for m in p.get("invalid_metrics", []):
+            lines.append(f"  {m.get('name', '?')} ({m.get('role')}): {_fmt_price(m.get('value'))}")
+        return "\n".join(lines)
+
     return ""
 
 
 # ── Batch rendering (several AlertEvents from one tick, one notification) ───
 
-_KIND_ORDER = (EVENT_ENTRY, EVENT_TARGET, EVENT_STOP_OUT)
-_KIND_SUMMARY_LABEL = {EVENT_ENTRY: "Entries", EVENT_TARGET: "Targets", EVENT_STOP_OUT: "Stop-Outs"}
+_KIND_ORDER = (EVENT_ENTRY, EVENT_TARGET, EVENT_STOP_OUT, EVENT_TRADE_CANCELLED)
+_KIND_SUMMARY_LABEL = {
+    EVENT_ENTRY: "Entries", EVENT_TARGET: "Targets", EVENT_STOP_OUT: "Stop-Outs",
+    EVENT_TRADE_CANCELLED: "Cancelled",
+}
 # A tray notification has real, OS-enforced space limits — cap how many
 # stocks are spelled out per kind-group line and say "+N more" past that,
 # rather than let the line grow unbounded and get silently truncated by the
@@ -126,6 +149,8 @@ def _kind_count_label(kind: str, count: int) -> str:
         return "Target Achieved" if count == 1 else "Targets Achieved"
     if kind == EVENT_STOP_OUT:
         return "Stopped Out"
+    if kind == EVENT_TRADE_CANCELLED:
+        return "Trade Cancelled" if count == 1 else "Trades Cancelled"
     return kind
 
 
@@ -143,11 +168,14 @@ def render_batch_title(events: list[AlertEvent]) -> str:
 
 
 def render_batch_level(events: list[AlertEvent]) -> NotificationLevel:
-    """A batch containing even one Stop Out is FAILURE (the most attention-
-    worthy outcome wins); else SUCCESS if it has a Target Achieved; else INFO
-    (entries only). Per-event notifications never varied level (always
-    INFO) — worth doing properly now that several land in one message."""
-    if any(e.kind == EVENT_STOP_OUT for e in events):
+    """A batch containing even one Stop Out or Trade Cancelled is FAILURE
+    (the most attention-worthy outcome wins — a cancelled trade means a
+    strategy's Target/Stop Loss formula needs fixing, worth surfacing just
+    as loudly as a real stop-out); else SUCCESS if it has a Target
+    Achieved; else INFO (entries only). Per-event notifications never
+    varied level (always INFO) — worth doing properly now that several
+    land in one message."""
+    if any(e.kind in (EVENT_STOP_OUT, EVENT_TRADE_CANCELLED) for e in events):
         return NotificationLevel.FAILURE
     if any(e.kind == EVENT_TARGET for e in events):
         return NotificationLevel.SUCCESS
@@ -167,6 +195,8 @@ def render_summary_line(event: AlertEvent) -> str:
         return f"{event.symbol} @{_fmt_price(p.get('entry_price'))}"
     if event.kind in (EVENT_TARGET, EVENT_STOP_OUT):
         return f"{event.symbol} @{_fmt_price(p.get('price'))}"
+    if event.kind == EVENT_TRADE_CANCELLED:
+        return f"{event.symbol} @{_fmt_price(p.get('entry_price'))}"
     return event.symbol
 
 

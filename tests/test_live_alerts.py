@@ -108,6 +108,20 @@ def test_targets_achieved_status(screen, monkeypatch):
     assert screen._table.item(row, 5).text() == "Targets Achieved"
 
 
+def test_trade_cancelled_status(screen, monkeypatch):
+    """Issue #32: a Target/Stop Loss on the wrong side of the entry price
+    resolves as "trade_cancelled" — must render as "Trade Cancelled", not
+    fall through to some generic/blank status."""
+    fake = _FakeListApi(items=[_api_item(
+        symbol="WIPRO", status="trade_cancelled", resolved_at=datetime.now().isoformat(),
+    )])
+    monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
+    screen._refresh_table()
+
+    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, 3).text() == "WIPRO")
+    assert screen._table.item(row, 5).text() == "Trade Cancelled"
+
+
 def test_metrics_summary_shows_target_achieved_marker(screen, monkeypatch):
     item = _api_item(symbol="HDFC")
     item["metrics"]["m2"]["achieved"] = True
@@ -491,6 +505,25 @@ def test_status_column_is_color_coded_by_outcome(screen, monkeypatch):
     open_color = screen._table.item(open_row, status_col).foreground().color()
     stopped_color = screen._table.item(stopped_row, status_col).foreground().color()
     assert open_color != stopped_color
+
+
+def test_trade_cancelled_status_has_its_own_distinct_color(screen, monkeypatch):
+    fake = _FakeListApi(items=[
+        _api_item(symbol="STOPPED", status="stopped_out"),
+        _api_item(symbol="CANCELLED", status="trade_cancelled"),
+    ])
+    monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
+    screen._refresh_table()
+
+    status_col = screen._COLUMNS.index("Status")
+    stock_col = screen._COLUMNS.index("Stock")
+
+    stopped_row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, stock_col).text() == "STOPPED")
+    cancelled_row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, stock_col).text() == "CANCELLED")
+
+    stopped_color = screen._table.item(stopped_row, status_col).foreground().color()
+    cancelled_color = screen._table.item(cancelled_row, status_col).foreground().color()
+    assert stopped_color != cancelled_color
 
 
 # ── Row click -> detail popup ────────────────────────────────────────────────
