@@ -1415,6 +1415,17 @@ class LiveViewerWindow(QWidget):
         except Exception:
             pass
 
+        # Warms _run_strategy_alert_checks' "is today a real trading day"
+        # gate (see services.strategy_alerts.alert_schedule) off the GUI
+        # thread — no GUI-thread callback needed here, unlike the Inception
+        # fields load above: should_run_now() just peeks whatever this
+        # resolves to on the very next tick, nothing needs re-rendering.
+        try:
+            from services.strategy_alerts import alert_schedule
+            alert_schedule.ensure_trading_day_known_async()
+        except Exception:
+            pass
+
         # Opening Range High/Low only changes once a day (the capture job
         # fires once, ~15min after market open) — a coarse 60s poll here,
         # decoupled from the fast COM/disk tick rate above, is enough to
@@ -1873,9 +1884,19 @@ class LiveViewerWindow(QWidget):
         and marks "+N more" rather than let the OS truncate silently), Email
         gets the full per-stock detail for every event, unabridged.
         """
+        from services.strategy_alerts import alert_schedule
         from services.strategy_alerts import config_store as alerts_config_store
         from services.strategy_alerts import state_store as alerts_state_store
         from services.strategy_alerts.engine import evaluate_tick
+
+        # Never evaluate outside the configured alert window, or on a
+        # non-trading day — issue #31: a live feed that keeps ticking with
+        # stale/leftover data well after market close (or on a weekend/
+        # holiday) has no way to know that itself; evaluate_tick just sees
+        # row data and fires whatever it matches. See alert_schedule's own
+        # docstring — this check is pure/cheap, never a network call.
+        if not alert_schedule.should_run_now():
+            return
 
         # peek_configs(), not load_configs() — this runs on the GUI thread,
         # on EVERY render pass (every live tick), so it must never risk a
