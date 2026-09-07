@@ -65,10 +65,27 @@ class FrozenColumns(QObject):
         table.horizontalHeader().sectionResized.connect(self._on_section_resized)
         table.horizontalHeader().sectionMoved.connect(self._on_section_moved)
         table.installEventFilter(self)
+        # The real table's viewport height changes — with no Resize event on
+        # the table widget itself — whenever its horizontal scrollbar appears
+        # or disappears. A column filter that hides enough columns for the
+        # rest to fit without a horizontal scrollbar does exactly this (issue
+        # #29): the overlay must then be resized to match, or it ends up a
+        # scrollbar's-worth of pixels taller/shorter than the real viewport,
+        # desyncing the two views' scrollbar ranges and drifting the frozen
+        # cells off their data rows by the bottom of a full scroll. The
+        # viewport gets its own Resize event for this even when the table
+        # widget doesn't — so watch it directly.
+        table.viewport().installEventFilter(self)
 
     # ── Qt event filter (resize/show of the real table) ─────────────────────
 
     def eventFilter(self, obj, event):
+        if not shiboken6.isValid(self._table) or not shiboken6.isValid(self._overlay):
+            return False
+        if obj is self._table.viewport() and event.type() == QEvent.Type.Resize:
+            self._update_geometry()
+            QTimer.singleShot(0, self._update_geometry)
+            return False
         if obj is self._table and event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
             # QObject event filters run BEFORE the target's own event()
             # handling, so at this point QAbstractScrollArea hasn't resized
@@ -184,37 +201,21 @@ class FrozenColumns(QObject):
             w = self._table.columnWidth(c)
             self._overlay.setColumnWidth(c, w)
             width += w
-        # Rounded DOWN to a whole number of rows — issue #29: the real
-        # table's raw viewport().height() is a pixel measurement with no
-        # reason to land on a row boundary (it's driven by the window/
-        # popup size), so sizing the overlay to that exact pixel height
-        # routinely leaves a partial-row-tall leftover strip at the
-        # bottom. Qt doesn't render "half a row" meaningfully there — it
-        # was filling that strip with a stale/duplicate repaint of the
-        # last real row, reading as "the last stock split into two rows".
-        # Reported specifically as column-filter-triggered because hiding
-        # columns can make the remaining ones fit the window width without
-        # a horizontal scrollbar, changing viewport height by however many
-        # pixels the scrollbar used to occupy — which is what pushed the
-        # leftover strip from "exists but zero-height, invisible" to
-        # "exists and visible". Rounding down here removes the leftover
-        # strip outright, independent of what causes the pixel height to
-        # not land on a row boundary (the real table's own vertical
-        # scrollbar, not the overlay's — ScrollBarAlwaysOff on this one,
-        # see __init__ — already covers however much of the last row this
-        # rounding leaves un-drawn).
-        viewport_h = self._table.viewport().height()
-        row_h = self._table.rowHeight(0) if self._table.model().rowCount() else vh.defaultSectionSize()
-        if row_h > 0:
-            viewport_h = (viewport_h // row_h) * row_h
-        height = viewport_h + hdr.height()
+        # Match the real table's viewport height EXACTLY (issue #29). The
+        # overlay keeps vertical scroll in lock-step with the real table by
+        # copying its scrollbar value (below) — which only lines the rows up
+        # if both views compute the same scrollbar range, i.e. have the same
+        # viewport height. An earlier attempt rounded this down to a whole
+        # number of rows to kill a partial-row strip at the bottom; that made
+        # the overlay a few pixels shorter than the real viewport, gave the
+        # two scrollbars different maximums, and left the frozen Sector/Symbol
+        # cells drifting a row off their data (the last stock repainted twice)
+        # once the real table was scrolled all the way down. The real table's
+        # own vertical scrollbar already handles any partial last row for the
+        # data columns; the overlay tracking the exact same height stays in
+        # step with it.
+        height = self._table.viewport().height() + hdr.height()
         self._overlay.setGeometry(x, y, width, height)
         self._overlay.verticalScrollBar().setValue(self._table.verticalScrollBar().value())
         self._overlay.show()
         self._overlay.raise_()
-        # Belt-and-suspenders alongside the rounding above: force a full
-        # repaint rather than trust Qt's default partial-invalidation on
-        # resize, in case anything about the overlay's own paint caching
-        # would otherwise leave stale pixels behind at the old geometry's
-        # boundary.
-        self._overlay.viewport().update()

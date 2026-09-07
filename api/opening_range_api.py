@@ -27,9 +27,9 @@ def get_availability(date_from: date, date_to: date) -> dict:
     )
 
 
-def get_snapshot(trade_date: date | None) -> dict:
+def get_snapshot(trade_date: date | None, timeout: int | None = None) -> dict:
     params = {"date": trade_date.isoformat()} if trade_date is not None else None
-    return api_client.get(OPENING_RANGE_SNAPSHOT, params=params)
+    return api_client.get(OPENING_RANGE_SNAPSHOT, params=params, timeout=timeout)
 
 
 def delete_day(trade_date: date) -> dict:

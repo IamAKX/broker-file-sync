@@ -199,7 +199,14 @@ class _LiveDataWorker(QObject):
         self._sector_map     = sector_map
         self._name_to_symbol = name_to_symbol
         self._opening_range_map: dict = {}
+        self._or_skip_ticks  = 0     # back-off countdown after a failed OR fetch
+        self._or_fail_streak = 0
         self._started        = False
+
+    # Best-effort daily data — don't let a slow/unreachable server hold the
+    # worker thread (and thus do_read) for the client's full default HTTP
+    # timeout on every _or_timer tick.
+    _OR_TIMEOUT_S = 4
 
     def refresh_opening_range(self) -> None:
         """Pull today's Opening Range High/Low snapshot from the server.
@@ -210,14 +217,29 @@ class _LiveDataWorker(QObject):
         self._opening_range_map never races this write — Qt's event loop
         serializes queued slot calls landing on one thread. Best-effort: a
         network hiccup just keeps the last-known map rather than blanking
-        the columns."""
+        the columns.
+
+        When the server is down, a plain per-minute retry would block this
+        worker for _OR_TIMEOUT_S out of every 60s, stalling live updates in
+        visible bursts (issue: LMV goes "not responding" on
+        GET /opening-range/snapshot read timeout). So: a short timeout, and
+        an exponential back-off (skip N ticks, capped) after each failure."""
         from datetime import date
         from api import opening_range_api
         from api.exceptions import ApiError, NetworkError
-        try:
-            snapshot = opening_range_api.get_snapshot(date.today())
-        except (ApiError, NetworkError):
+        if self._or_skip_ticks > 0:
+            self._or_skip_ticks -= 1
             return
+        try:
+            snapshot = opening_range_api.get_snapshot(
+                date.today(), timeout=self._OR_TIMEOUT_S
+            )
+        except (ApiError, NetworkError):
+            self._or_fail_streak += 1
+            self._or_skip_ticks = min(2 ** self._or_fail_streak, 30)
+            return
+        self._or_fail_streak = 0
+        self._or_skip_ticks = 0
         self._opening_range_map = {
             s["symbol"]: (s.get("high"), s.get("low"))
             for s in snapshot.get("stocks", [])

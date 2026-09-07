@@ -976,18 +976,16 @@ def test_frozen_columns_unfreeze_hides_overlay(qapp):
     assert freeze._overlay.isHidden()
 
 
-def test_frozen_columns_overlay_height_rounds_down_to_a_whole_number_of_rows(qapp):
-    """Issue #29: "the last stock in Historical EMV gets split into two
-    rows when I select specific columns using the column filter". Root
-    cause: the overlay used to be sized to the real table's exact PIXEL
-    viewport height, which has no reason to land on a row boundary (it's
-    driven by the popup's window size, and by whether the real table's
-    horizontal scrollbar is showing — which a column filter can flip by
-    changing whether the remaining visible columns fit the window width).
-    Any leftover partial-row strip got filled with a stale/duplicate
-    repaint of the last real row instead of staying blank. The overlay's
-    rows-area height (total height minus its own header) must now always
-    be an exact multiple of the row height, for any viewport size."""
+def test_frozen_columns_overlay_matches_real_viewport_height(qapp):
+    """Issue #29: the last stock in Historical EMV / Inception HMV renders
+    twice in the frozen Sector/Symbol pane once the real table is scrolled
+    to the bottom. The overlay tracks the real table's vertical scroll by
+    copying its scrollbar value, so the rows only line up if both views
+    derive the same scrollbar range — i.e. the overlay's rows area is the
+    SAME height as the real table's viewport, not rounded to a whole number
+    of rows (an earlier fix did that, making the overlay a scrollbar's-worth
+    of pixels shorter and drifting the frozen cells a row off their data by
+    the bottom of a full scroll)."""
     from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
     from components.frozen_table_columns import FrozenColumns
 
@@ -1002,16 +1000,41 @@ def test_frozen_columns_overlay_height_rounds_down_to_a_whole_number_of_rows(qap
     freeze = FrozenColumns(table)
     freeze.configure(headers, ["Sector", "Symbol"])
 
-    # A handful of window sizes, deliberately not chosen as multiples of
-    # the 30px row height — the whole point being this must hold
-    # regardless of what pixel height the real table's viewport happens
-    # to end up at.
     for h in (241, 287, 312, 350):
         table.resize(400, h)
         freeze._update_geometry()
-        row_h = table.rowHeight(0)
         rows_area_height = freeze._overlay.height() - table.horizontalHeader().height()
-        assert rows_area_height % row_h == 0, f"leftover partial row at window height {h}"
+        assert rows_area_height == table.viewport().height(), (
+            f"overlay rows area {rows_area_height} != real viewport "
+            f"{table.viewport().height()} at window height {h}"
+        )
+
+
+def test_frozen_columns_overlay_resizes_when_horizontal_scrollbar_toggles(qapp):
+    """Issue #29 original trigger: hiding columns via the Columns filter can
+    let the rest fit without a horizontal scrollbar, which changes the real
+    table's viewport height with no Resize event on the table widget itself.
+    The overlay must follow that height change (here driven directly by the
+    scrollbar policy) or it desyncs from the real viewport."""
+    from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+    from PySide6.QtCore import Qt
+    from components.frozen_table_columns import FrozenColumns
+
+    headers = ["Sector", "Symbol", "CLOSE"]
+    table = QTableWidget(20, 3)
+    table.setHorizontalHeaderLabels(headers)
+    for r in range(20):
+        for c, h in enumerate(headers):
+            table.setItem(r, c, QTableWidgetItem(f"{h}{r}"))
+    table.resize(400, 300)
+
+    freeze = FrozenColumns(table)
+    freeze.configure(headers, ["Sector", "Symbol"])
+    table.horizontalScrollBar().setRange(0, 500)  # force the scrollbar on
+
+    table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    rows_area_height = freeze._overlay.height() - table.horizontalHeader().height()
+    assert rows_area_height == table.viewport().height()
 
 
 # ── services.inception_formula_builder_columns ───────────────────────────
