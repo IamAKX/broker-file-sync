@@ -210,12 +210,16 @@ def test_open_editor_starts_background_fetch_only_for_days_columns(screen, monke
     assert len(started) == 1
 
 
-def test_day_history_fetch_worker_resolves_and_reports_via_signal(monkeypatch):
-    # The fix (part 2): the worker that thread actually runs. Tested
-    # directly (not through QThread) per this repo's convention for QThread
-    # workers — see test_update_dialog.py's module docstring.
+def test_day_history_fetch_thread_resolves_and_reports_via_signal(monkeypatch):
+    # The fix (part 2): the thread that actually does the work. Tested
+    # directly (not through a real QThread.start()) per this repo's
+    # convention for QThread-based workers — see test_update_dialog.py's
+    # module docstring. This is a QThread SUBCLASS (run() overridden
+    # directly), not a QObject moved onto a throwaway QThread — see
+    # _DayHistoryFetchThread's own docstring for why (that idiom was found
+    # to silently never invoke the worker on this environment).
     from api import lmv_snapshot_api
-    from screens.strategy_builder import _DayHistoryFetchWorker
+    from screens.strategy_builder import _DayHistoryFetchThread
 
     def _fake_get_range(days):
         assert days == 10
@@ -225,30 +229,31 @@ def test_day_history_fetch_worker_resolves_and_reports_via_signal(monkeypatch):
     monkeypatch.setattr(lmv_snapshot_api, "get_range", _fake_get_range)
 
     requests = [("High", 10, [{"type": "col", "value": "High"}])]
-    worker = _DayHistoryFetchWorker(requests)
+    thread = _DayHistoryFetchThread(requests)
     results = []
-    worker.finished.connect(results.append)
-    worker.run()
+    thread.day_history_ready.connect(results.append)
+    thread.run()
 
     assert len(results) == 1
     assert results[0][("High", 10)]["INFY"]["Max"] == 91.73
 
 
-def test_day_history_fetch_worker_reports_empty_dict_on_network_error(monkeypatch):
+def test_day_history_fetch_thread_reports_empty_dict_on_network_error(monkeypatch):
     # A convenience pre-fetch failing (offline/timeout) must degrade to "no
-    # new data" rather than raise on the worker thread or crash the editor.
+    # new data" rather than raise on the background thread or crash the
+    # editor.
     from api import lmv_snapshot_api
     from api.exceptions import NetworkError
-    from screens.strategy_builder import _DayHistoryFetchWorker
+    from screens.strategy_builder import _DayHistoryFetchThread
 
     def _unreachable(days):
         raise NetworkError("offline")
     monkeypatch.setattr(lmv_snapshot_api, "get_range", _unreachable)
 
-    worker = _DayHistoryFetchWorker([("High", 10, [{"type": "col", "value": "High"}])])
+    thread = _DayHistoryFetchThread([("High", 10, [{"type": "col", "value": "High"}])])
     results = []
-    worker.finished.connect(results.append)
-    worker.run()
+    thread.day_history_ready.connect(results.append)
+    thread.run()
 
     assert results == [{}]
 
@@ -328,20 +333,17 @@ def test_ensure_day_history_then_dispatches_fetch_and_calls_ready_once_it_resolv
     # value to test against" error even for a correct formula).
     import screens.strategy_builder as sb
     from api import lmv_snapshot_api
-    from PySide6.QtCore import QObject
 
     # QThread.start stubbed to run synchronously in this thread (repo
-    # convention, see test_day_history_fetch_worker_resolves_and_reports_
-    # via_signal) so the whole dispatch -> worker.run() -> finished signal
-    # -> _on_own_day_history_fetched -> on_ready() chain is exercised
-    # end-to-end without a real thread boundary. moveToThread is also
-    # stubbed to a no-op: left for real, the worker's thread affinity would
-    # point at a QThread whose event loop never actually runs (start() is
-    # stubbed too), which makes Qt QUEUE thread.started->worker.run instead
-    # of calling it directly -- and a queued call is never delivered
-    # without a running event loop to dequeue it.
-    monkeypatch.setattr(QObject, "moveToThread", lambda self, thread: None)
-    monkeypatch.setattr(sb.QThread, "start", lambda self: self.started.emit())
+    # convention, see test_day_history_fetch_thread_resolves_and_reports_
+    # via_signal) so the whole dispatch -> thread.run() -> day_history_
+    # ready signal -> _on_own_day_history_fetched -> on_ready() chain is
+    # exercised end-to-end without a real thread boundary. Safe to stub
+    # this way because _DayHistoryFetchThread is a QThread SUBCLASS with
+    # run() overridden directly (see its own docstring) -- there's no
+    # separate started->run() signal hookup to bypass/misrepresent here,
+    # unlike the QObject-moved-onto-a-QThread idiom this replaced.
+    monkeypatch.setattr(sb.QThread, "start", lambda self: self.run())
 
     def _fake_get_range(days):
         assert days == 10
@@ -368,10 +370,8 @@ def test_ensure_day_history_then_still_calls_ready_on_fetch_failure(qapp, monkey
     import screens.strategy_builder as sb
     from api import lmv_snapshot_api
     from api.exceptions import NetworkError
-    from PySide6.QtCore import QObject
 
-    monkeypatch.setattr(QObject, "moveToThread", lambda self, thread: None)
-    monkeypatch.setattr(sb.QThread, "start", lambda self: self.started.emit())
+    monkeypatch.setattr(sb.QThread, "start", lambda self: self.run())
 
     def _unreachable(days):
         raise NetworkError("offline")

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QColorDialog, QMessageBox, QApplication, QComboBox,
     QToolButton, QMenu, QSpinBox, QCheckBox
 )
-from PySide6.QtCore import Qt, Signal, QByteArray, QSize, QPointF, QObject, QThread
+from PySide6.QtCore import Qt, Signal, QByteArray, QSize, QPointF, QThread
 from PySide6.QtGui import QFont, QColor, QIcon, QPixmap, QPainter, QFontMetrics, QAction
 from PySide6.QtSvg import QSvgRenderer
 
@@ -1036,16 +1036,13 @@ class ColumnEditorDialog(QDialog):
 
         # Unparented, same reason as StrategyEditor._fetch_own_day_history:
         # if this dialog is closed (Cancel/OK) while the fetch is still in
-        # flight, Qt auto-disconnects the finished→_on_own_day_history_
-        # fetched connection once self is destroyed, so the callback simply
-        # never fires rather than touching a dead dialog.
-        thread = QThread()
-        worker = _DayHistoryFetchWorker(requests)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(lambda fetched: self._on_own_day_history_fetched(fetched, on_ready))
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
+        # flight, Qt auto-disconnects the day_history_ready→_on_own_day_
+        # history_fetched connection once self is destroyed, so the
+        # callback simply never fires rather than touching a dead dialog.
+        # See _DayHistoryFetchThread's own docstring for why this is a
+        # QThread SUBCLASS rather than a QObject worker moved onto one.
+        thread = _DayHistoryFetchThread(requests)
+        thread.day_history_ready.connect(lambda fetched: self._on_own_day_history_fetched(fetched, on_ready))
         thread.finished.connect(thread.deleteLater)
         self._day_history_threads.append(thread)
         thread.finished.connect(lambda th=thread: self._day_history_threads.remove(th)
@@ -1942,12 +1939,38 @@ class NotificationSection(QWidget):
             self._set_metric_preview_text(preview_label, metric, self._theme)
 
 
-class _DayHistoryFetchWorker(QObject):
+class _DayHistoryFetchThread(QThread):
     """Runs one collect_day_requests() → compute_day_history() round trip
     (a network call, api.client._TIMEOUT_SECONDS ceiling) on a background
-    QThread — see StrategyEditor._fetch_own_day_history, the only caller.
-    A fresh instance per fetch; not reused."""
-    finished = Signal(object)  # {(col_name, window): {...}}, or {} on failure
+    thread — see StrategyEditor._fetch_own_day_history and ColumnEditor
+    Dialog._ensure_day_history_then, its two callers. A fresh instance per
+    fetch; not reused.
+
+    A QThread SUBCLASS with run() overridden directly — NOT a plain
+    QObject moved to a throwaway QThread via moveToThread() + thread.
+    started.connect(worker.run), this repo's more common worker-thread
+    idiom (see _LiveDataWorker). That idiom turned out to silently not
+    deliver thread.started to the worker's run() slot for a short-lived,
+    create-start-discard QThread on this environment: reproduced directly
+    — the QThread reports isRunning() == True indefinitely but its
+    connected run() slot is simply never invoked, so finished never
+    emits and _ensure_day_history_then's "Edit Condition…" button (or
+    _fetch_own_day_history's proactive prefetch) hangs forever waiting
+    on it. _LiveDataWorker never hit this because its worker thread is
+    long-lived and reused every ~200ms tick via a QUEUED signal onto an
+    ALREADY-RUNNING event loop, rather than relying on the very first
+    started signal of a brand-new thread to hand off control. Subclassing
+    QThread and overriding run() sidesteps that handoff entirely — Qt
+    calls run() directly to begin executing on the new thread, so there
+    is no separate signal dispatch that can silently go missing.
+    Confirmed reliable across 20 repeated start/complete cycles in this
+    environment; the moveToThread+started pattern was not.
+
+    day_history_ready (not QThread's own built-in finished, which stays
+    the default no-argument "the thread's run() has returned" signal —
+    used by callers for cleanup/deleteLater) carries the actual result.
+    """
+    day_history_ready = Signal(object)  # {(col_name, window): {...}}, or {} on failure
 
     def __init__(self, requests: list):
         super().__init__()
@@ -1961,7 +1984,7 @@ class _DayHistoryFetchWorker(QObject):
             result = compute_day_history(self._requests, lmv_snapshot_api.get_range)
         except (ApiError, NetworkError):
             result = {}
-        self.finished.emit(result)
+        self.day_history_ready.emit(result)
 
 
 class StrategyEditor(QWidget):
@@ -2212,11 +2235,14 @@ class StrategyEditor(QWidget):
         sweep; skipped entirely (no network call at all, no thread spun up)
         when this strategy has no such function anywhere.
 
-        Runs on a throwaway background QThread (see _DayHistoryFetchWorker)
-        rather than the GUI thread — a slow/unreachable server would
-        otherwise freeze the editor for up to api.client._TIMEOUT_SECONDS
-        every time it's opened. _on_day_history_fetched applies the result
-        back on the GUI thread once the worker's queued signal arrives.
+        Runs on a throwaway background QThread (see _DayHistoryFetchThread's
+        own docstring — a QThread subclass, not a QObject worker moved onto
+        one; that idiom was found to silently never actually invoke the
+        worker on this environment) rather than the GUI thread — a slow/
+        unreachable server would otherwise freeze the editor for up to
+        api.client._TIMEOUT_SECONDS every time it's opened.
+        _on_day_history_fetched applies the result back on the GUI thread
+        once the thread's queued signal arrives.
         """
         from services.strategy_engine import collect_day_requests
 
@@ -2231,19 +2257,13 @@ class StrategyEditor(QWidget):
         # forcibly tear down a still-running child QThread along with it —
         # "QThread: Destroyed while thread is still running". Left
         # unparented, it just finishes on its own a moment later; Qt already
-        # auto-disconnects worker.finished from self._on_day_history_fetched
-        # if self has been destroyed by then, so that callback simply
-        # becomes a no-op rather than touching a dead widget.
-        thread = QThread()
-        worker = _DayHistoryFetchWorker(requests)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(self._on_day_history_fetched)
-        # Self-cleaning: the thread quits itself once the fetch (success or
-        # failure) is done, and both QObjects delete themselves once that's
-        # processed.
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
+        # auto-disconnects day_history_ready from self._on_day_history_
+        # fetched if self has been destroyed by then, so that callback
+        # simply becomes a no-op rather than touching a dead widget.
+        thread = _DayHistoryFetchThread(requests)
+        thread.day_history_ready.connect(self._on_day_history_fetched)
+        # Self-cleaning: the thread deletes itself once its run() returns
+        # (QThread's own built-in finished signal — not day_history_ready).
         thread.finished.connect(thread.deleteLater)
         # Keep a strong Python reference so a concurrent second fetch (open,
         # then immediately add another column) doesn't get its thread
