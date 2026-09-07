@@ -7,6 +7,8 @@ import copy
 import os
 import re
 import sys
+
+import shiboken6
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from PySide6.QtWidgets import (
@@ -677,6 +679,11 @@ class ColumnEditorDialog(QDialog):
         self._all_lmv_data  = all_lmv_data or []
         self._extra_row_values = dict(extra_row_values or {})
         self._day_history   = day_history or {}
+        # Live QThread objects started by _ensure_day_history_then — kept
+        # referenced so a fetch in flight isn't garbage-collected out from
+        # under itself (same convention as StrategyEditor._day_history_
+        # threads; see that attribute's own comment).
+        self._day_history_threads: list = []
         self.setWindowTitle("Edit Column")
         self.resize(720, 640)
         _apply_dialog_bg(self, theme)
@@ -951,7 +958,8 @@ class ColumnEditorDialog(QDialog):
 
             edit_cond_btn = _btn("Edit Condition…", outlined=True, theme=t, small=True)
             edit_cond_btn.clicked.connect(
-                lambda _, i=idx, lbl=cond_preview: self._open_condition_editor(i, lbl)
+                lambda _, i=idx, lbl=cond_preview, btn=edit_cond_btn:
+                    self._open_condition_editor(i, lbl, btn)
             )
             cond_row.addWidget(cond_lbl)
             cond_row.addWidget(cond_preview, 1)
@@ -959,7 +967,97 @@ class ColumnEditorDialog(QDialog):
             rlay.addLayout(cond_row)
             self._fmt_layout.insertWidget(self._fmt_layout.count() - 1, rule_frame)
 
-    def _open_condition_editor(self, idx: int, preview_label: QLabel):
+    def _open_condition_editor(self, idx: int, preview_label: QLabel,
+                                trigger_btn: QPushButton = None):
+        """Entry point wired to "Edit Condition…" — waits for this column's
+        own day_history needs (if any) before actually opening the dialog.
+        See _ensure_day_history_then for why."""
+        if trigger_btn is not None:
+            trigger_btn.setEnabled(False)
+            original_text = trigger_btn.text()
+            trigger_btn.setText("Loading…")
+
+        def _on_ready():
+            if trigger_btn is not None and shiboken6.isValid(trigger_btn):
+                trigger_btn.setEnabled(True)
+                trigger_btn.setText(original_text)
+            self._open_condition_editor_now(idx, preview_label)
+
+        self._ensure_day_history_then(_on_ready)
+
+    def _ensure_day_history_then(self, on_ready):
+        """Make sure self._day_history covers every (col_name, window) this
+        column's OWN value formula needs before calling on_ready().
+
+        self._day_history is a point-in-time copy handed in by the parent
+        StrategyEditor's constructor arg (see __init__'s docstring) — NOT a
+        live reference to that editor's own self._day_history, which keeps
+        updating in the background via _fetch_own_day_history. If this
+        dialog was opened (or "Edit Condition…" clicked) before that fetch
+        finished — or, for a brand-new column, before it even started (see
+        StrategyEditor._add_column: the dialog is shown BEFORE the fetch is
+        kicked off) — any _DAYS/VALUE_DAYS_AGO/etc function in this
+        column's formula always evaluated to None here regardless of
+        whether the data actually exists on the server, surfacing as
+        compile_check's "THIS has no value to test against" even for a
+        perfectly correct formula. Fixed by fetching (or re-fetching)
+        exactly what's missing, on a background thread, and deferring
+        on_ready() until it lands — same pattern as StrategyEditor.
+        _fetch_own_day_history/_on_day_history_fetched, just scoped to
+        this one column's own formula and with its own dedicated
+        request/response leg, since ColumnEditorDialog doesn't have the
+        full-strategy context (row filter, notif config) collect_day_
+        requests needs.
+
+        Only scans THIS column's own formula tokens, not siblings' — this
+        dialog only has siblings' precomputed extra_row_values, not their
+        formula tokens, so a sibling reference inside a _DAYS function
+        (e.g. AVG_DAYS([SomeOtherComputedCol], 20)) can't be expanded here
+        the way collect_day_requests does for the full strategy; treated
+        as a bare column reference instead. That matches the reported bug
+        exactly (a _DAYS/VALUE_DAYS_AGO function directly on an LMV/
+        historic column) without overreaching into StrategyEditor's own
+        broader responsibility.
+
+        A failed/empty fetch still calls on_ready() — this only removes
+        the race, it doesn't paper over genuinely missing server data (the
+        "THIS has no value" message is correct and expected in that case).
+        """
+        from services.strategy_engine import scan_day_funcs
+
+        needed = scan_day_funcs(self._col.get("formula", []))
+        missing = [key for key in needed if key not in self._day_history]
+        if not missing:
+            on_ready()
+            return
+
+        requests = [(col_name, window, [{"type": "col", "value": col_name}])
+                   for col_name, window in missing]
+
+        # Unparented, same reason as StrategyEditor._fetch_own_day_history:
+        # if this dialog is closed (Cancel/OK) while the fetch is still in
+        # flight, Qt auto-disconnects the finished→_on_own_day_history_
+        # fetched connection once self is destroyed, so the callback simply
+        # never fires rather than touching a dead dialog.
+        thread = QThread()
+        worker = _DayHistoryFetchWorker(requests)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(lambda fetched: self._on_own_day_history_fetched(fetched, on_ready))
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._day_history_threads.append(thread)
+        thread.finished.connect(lambda th=thread: self._day_history_threads.remove(th)
+                                if th in self._day_history_threads else None)
+        thread.start()
+
+    def _on_own_day_history_fetched(self, fetched: dict, on_ready):
+        if fetched:
+            self._day_history = {**self._day_history, **fetched}
+        on_ready()
+
+    def _open_condition_editor_now(self, idx: int, preview_label: QLabel):
         from screens.formula_editor import ExpressionEditorDialog
         from services.strategy_engine import evaluate
         from PySide6.QtWidgets import QDialog as _QD

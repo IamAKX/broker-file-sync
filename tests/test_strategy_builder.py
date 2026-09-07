@@ -274,6 +274,169 @@ def test_on_day_history_fetched_merges_without_dropping_existing_keys(screen):
     assert ("High", 10) in editor._day_history
 
 
+def _col_with_days_formula(name="10 day Highest", base_col="High", days_arg=10):
+    from services.strategy_store import new_fmt_rule
+    return {
+        "name": name, "fmt_rules": [new_fmt_rule()],
+        "formula": [{"type": "func", "value": "MAX_DAYS(", "col_arg": base_col, "days_arg": days_arg}],
+    }
+
+
+def test_ensure_day_history_then_runs_immediately_without_days_function(qapp, monkeypatch):
+    # No _DAYS/VALUE_DAYS_AGO/etc function anywhere in the column's own
+    # formula -> nothing to wait for, no thread, no network call.
+    import screens.strategy_builder as sb
+
+    started = []
+    monkeypatch.setattr(sb.QThread, "start", lambda self: started.append(self))
+
+    col = {"name": "Plain", "fmt_rules": [], "formula": [{"type": "col", "value": "High"}]}
+    dlg = sb.ColumnEditorDialog(col, ["High"], theme=None)
+
+    calls = []
+    dlg._ensure_day_history_then(lambda: calls.append(1))
+    assert calls == [1]
+    assert started == []
+
+
+def test_ensure_day_history_then_runs_immediately_when_already_cached(qapp, monkeypatch):
+    # The needed (col, window) key is already in the day_history snapshot
+    # passed in at construction -> proceed immediately, no fetch needed.
+    import screens.strategy_builder as sb
+
+    started = []
+    monkeypatch.setattr(sb.QThread, "start", lambda self: started.append(self))
+
+    col = _col_with_days_formula()
+    day_history = {("High", 10): {"INFY": {"Max": 91.73}}}
+    dlg = sb.ColumnEditorDialog(col, ["High"], theme=None, day_history=day_history)
+
+    calls = []
+    dlg._ensure_day_history_then(lambda: calls.append(1))
+    assert calls == [1]
+    assert started == []
+
+
+def test_ensure_day_history_then_dispatches_fetch_and_calls_ready_once_it_resolves(qapp, monkeypatch):
+    # The actual bug this fixes: ColumnEditorDialog._day_history is a
+    # point-in-time copy (see __init__'s docstring) -- if it was opened
+    # before the parent StrategyEditor's own background fetch landed (or
+    # before it even started, for a brand-new column), the needed key is
+    # simply missing here. This dispatches its own dedicated fetch and only
+    # calls on_ready() once it actually resolves, rather than proceeding on
+    # incomplete data (which is what produced the misleading "THIS has no
+    # value to test against" error even for a correct formula).
+    import screens.strategy_builder as sb
+    from api import lmv_snapshot_api
+    from PySide6.QtCore import QObject
+
+    # QThread.start stubbed to run synchronously in this thread (repo
+    # convention, see test_day_history_fetch_worker_resolves_and_reports_
+    # via_signal) so the whole dispatch -> worker.run() -> finished signal
+    # -> _on_own_day_history_fetched -> on_ready() chain is exercised
+    # end-to-end without a real thread boundary. moveToThread is also
+    # stubbed to a no-op: left for real, the worker's thread affinity would
+    # point at a QThread whose event loop never actually runs (start() is
+    # stubbed too), which makes Qt QUEUE thread.started->worker.run instead
+    # of calling it directly -- and a queued call is never delivered
+    # without a running event loop to dequeue it.
+    monkeypatch.setattr(QObject, "moveToThread", lambda self, thread: None)
+    monkeypatch.setattr(sb.QThread, "start", lambda self: self.started.emit())
+
+    def _fake_get_range(days):
+        assert days == 10
+        return {"days": [{"trade_date": "2026-08-06", "stocks": [
+            {"symbol": "INFY", "display_name": "INFY", "metrics": {"High": 91.73}},
+        ]}]}
+    monkeypatch.setattr(lmv_snapshot_api, "get_range", _fake_get_range)
+
+    col = _col_with_days_formula()
+    dlg = sb.ColumnEditorDialog(col, ["High"], theme=None)  # no day_history passed in
+
+    calls = []
+    dlg._ensure_day_history_then(lambda: calls.append(1))
+
+    assert calls == [1]
+    assert dlg._day_history[("High", 10)]["INFY"]["Max"] == 91.73
+
+
+def test_ensure_day_history_then_still_calls_ready_on_fetch_failure(qapp, monkeypatch):
+    # A failed fetch (offline/timeout) must not hang "Edit Condition…"
+    # forever -- it should still proceed. The dialog then correctly
+    # reports genuinely missing data via compile_check, same as before this
+    # fix, rather than the button staying stuck disabled indefinitely.
+    import screens.strategy_builder as sb
+    from api import lmv_snapshot_api
+    from api.exceptions import NetworkError
+    from PySide6.QtCore import QObject
+
+    monkeypatch.setattr(QObject, "moveToThread", lambda self, thread: None)
+    monkeypatch.setattr(sb.QThread, "start", lambda self: self.started.emit())
+
+    def _unreachable(days):
+        raise NetworkError("offline")
+    monkeypatch.setattr(lmv_snapshot_api, "get_range", _unreachable)
+
+    col = _col_with_days_formula()
+    dlg = sb.ColumnEditorDialog(col, ["High"], theme=None)
+
+    calls = []
+    dlg._ensure_day_history_then(lambda: calls.append(1))
+
+    assert calls == [1]
+    assert dlg._day_history == {}
+
+
+def test_open_condition_editor_waits_for_fetch_before_opening(qapp, monkeypatch):
+    # End-to-end through the actual "Edit Condition…" entry point: while the
+    # fetch is in flight the button is disabled/relabeled and the dialog
+    # must not open yet.
+    import screens.strategy_builder as sb
+    from PySide6.QtWidgets import QLabel, QPushButton
+
+    started = []
+    monkeypatch.setattr(sb.QThread, "start", lambda self: started.append(self))  # never resolves
+
+    col = _col_with_days_formula()
+    dlg = sb.ColumnEditorDialog(col, ["High"], theme=None)
+
+    opened = []
+    monkeypatch.setattr(dlg, "_open_condition_editor_now", lambda idx, lbl: opened.append(idx))
+
+    btn = QPushButton("Edit Condition…")
+    lbl = QLabel("—")
+    dlg._open_condition_editor(0, lbl, btn)
+
+    assert opened == []
+    assert not btn.isEnabled()
+    assert btn.text() == "Loading…"
+    assert len(started) == 1
+
+
+def test_open_condition_editor_opens_immediately_when_already_cached(qapp, monkeypatch):
+    import screens.strategy_builder as sb
+    from PySide6.QtWidgets import QLabel, QPushButton
+
+    started = []
+    monkeypatch.setattr(sb.QThread, "start", lambda self: started.append(self))
+
+    col = _col_with_days_formula()
+    day_history = {("High", 10): {"INFY": {"Max": 91.73}}}
+    dlg = sb.ColumnEditorDialog(col, ["High"], theme=None, day_history=day_history)
+
+    opened = []
+    monkeypatch.setattr(dlg, "_open_condition_editor_now", lambda idx, lbl: opened.append(idx))
+
+    btn = QPushButton("Edit Condition…")
+    lbl = QLabel("—")
+    dlg._open_condition_editor(0, lbl, btn)
+
+    assert opened == [0]
+    assert btn.isEnabled()
+    assert btn.text() == "Edit Condition…"
+    assert started == []
+
+
 def test_new_strategy_has_category():
     from services.strategy_store import new_strategy
     s = new_strategy("Test")
