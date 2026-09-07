@@ -10,6 +10,7 @@ CHANGE_PASSWORD = "/auth/change-password"
 DAILY_UPLOAD = "/historic/daily-upload"
 AVAILABILITY = "/historic/availability"
 SNAPSHOT = "/historic/snapshot"
+RANGE = "/historic/range"
 HISTORIC = "/historic"
 
 LMV_SNAPSHOT_DAILY_UPLOAD = "/lmv-snapshot/daily-upload"

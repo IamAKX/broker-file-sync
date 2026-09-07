@@ -76,19 +76,27 @@ def _stub_historic_backend(monkeypatch):
     )
     monkeypatch.setattr(holidays_api, "list_holidays", lambda year: [])
 
-    def fake_snapshot(trade_date):
-        i = dates.index(trade_date)
+    def fake_range(days):
+        # Issue #30: read_external_import_db's cold-cache path fetches
+        # every available date in one call, not one get_snapshot() per
+        # date — sized to cover the full available-dates list.
+        assert days == len(dates)
         return {
-            "trade_date": trade_date.isoformat(),
-            "stocks": [{
-                "symbol": "INFY", "display_name": "Infosys",
-                "metrics": {
-                    "Open": 100 + i, "High": 110 + i, "Low": 90 + i, "Close": 105 + i,
-                    "AvgRate": 104 + i, "Quantity": 1000, "DiffPcnt": 1.0,
-                },
-            }],
+            "days": [
+                {
+                    "trade_date": d.isoformat(),
+                    "stocks": [{
+                        "symbol": "INFY", "display_name": "Infosys",
+                        "metrics": {
+                            "Open": 100 + i, "High": 110 + i, "Low": 90 + i, "Close": 105 + i,
+                            "AvgRate": 104 + i, "Quantity": 1000, "DiffPcnt": 1.0,
+                        },
+                    }],
+                }
+                for i, d in enumerate(dates)
+            ]
         }
-    monkeypatch.setattr(historic_api, "get_snapshot", fake_snapshot)
+    monkeypatch.setattr(historic_api, "get_range", fake_range)
     return dates
 
 
@@ -143,6 +151,132 @@ def test_non_computable_custom_formula_produces_no_extra_column(monkeypatch):
     headers, rows = read_external_import_db(target=dates[-1])
     assert "MYFORMULA" not in headers
     assert headers == ["Symbol", "Display Name"] + formula_engine.FORMULA_CODES
+
+
+# ── external_import_source._fetch: bulk get_range instead of one
+# get_snapshot() per date (issue #30) ────────────────────────────────────
+
+def _stub_range(monkeypatch, dates, calls):
+    """Records every get_range(days) call in *calls* and returns pivots for
+    exactly the `days` most recent of *dates* — the real endpoint's own "N
+    most recent trade dates with data" contract."""
+    from api import historic_api
+
+    def fake_range(days):
+        calls.append(days)
+        chosen = dates[-days:] if days else []
+        return {
+            "days": [
+                {
+                    "trade_date": d.isoformat(),
+                    "stocks": [{
+                        "symbol": "INFY", "display_name": "Infosys",
+                        "metrics": {
+                            "Open": 100 + i, "High": 110 + i, "Low": 90 + i, "Close": 105 + i,
+                            "AvgRate": 104 + i, "Quantity": 1000, "DiffPcnt": 1.0,
+                        },
+                    }],
+                }
+                for i, d in enumerate(chosen)
+            ]
+        }
+    monkeypatch.setattr(historic_api, "get_range", fake_range)
+
+
+def _stub_availability_and_holidays(monkeypatch, dates):
+    from api import historic_api, holidays_api
+    monkeypatch.setattr(
+        historic_api, "get_availability",
+        lambda date_from, date_to: {
+            "dates": [{"trade_date": d.isoformat(), "has_data": True} for d in dates]
+        },
+    )
+    monkeypatch.setattr(holidays_api, "list_holidays", lambda year: [])
+
+
+def test_cold_cache_requests_the_full_window_in_one_call(monkeypatch):
+    from datetime import date, timedelta
+    from services.external_import_source import read_external_import_db
+
+    dates = [date(2026, 6, 1) + timedelta(days=i) for i in range(5)]
+    _stub_availability_and_holidays(monkeypatch, dates)
+    calls = []
+    _stub_range(monkeypatch, dates, calls)
+
+    headers, rows = read_external_import_db(target=dates[-1], snapshot_cache={})
+
+    assert calls == [5]   # ONE call covering every date, not 5 individual ones
+    assert rows[0][0] == "INFY"
+
+
+def test_warm_cache_requests_only_the_latest_date(monkeypatch):
+    """The steady-state case (a live LiveDataReader ticking every ~1s) must
+    stay cheap — re-fetching the whole lookback window on every tick would
+    be a regression traded for fixing the cold-start burst, not a fix."""
+    from datetime import date, timedelta
+    from services.external_import_source import read_external_import_db
+
+    dates = [date(2026, 6, 1) + timedelta(days=i) for i in range(5)]
+    _stub_availability_and_holidays(monkeypatch, dates)
+    calls = []
+    _stub_range(monkeypatch, dates, calls)
+
+    cache: dict = {}
+    read_external_import_db(target=dates[-1], snapshot_cache=cache)
+    assert calls == [5]
+    assert set(cache.keys()) == set(dates[:-1])   # every date except latest got cached
+
+    read_external_import_db(target=dates[-1], snapshot_cache=cache)
+    assert calls == [5, 1]   # second call: only the still-uncached latest date
+
+
+def test_a_newly_available_date_only_adds_a_small_call_not_a_full_refetch(monkeypatch):
+    """A new trading day appearing (the lookback window sliding forward by
+    one) must still only cost a small request, not a full re-fetch. Two
+    dates, not one: the previous latest_available is deliberately never
+    cached ("the latest date is always re-fetched fresh, in case it's
+    still being amended" — _fetch's own comment), so once a new date makes
+    it no longer the latest, it's a genuinely new fetch too, alongside the
+    actual new date — both still a trailing slice of available_dates, so
+    this stays a single small get_range(2) call, not the full window."""
+    from datetime import date, timedelta
+    from services.external_import_source import read_external_import_db
+
+    dates = [date(2026, 6, 1) + timedelta(days=i) for i in range(5)]
+    _stub_availability_and_holidays(monkeypatch, dates)
+    calls = []
+    _stub_range(monkeypatch, dates, calls)
+    cache: dict = {}
+    read_external_import_db(target=dates[-1], snapshot_cache=cache)
+    assert calls == [5]
+
+    dates.append(dates[-1] + timedelta(days=3))   # a new latest trading day
+    _stub_availability_and_holidays(monkeypatch, dates)
+    _stub_range(monkeypatch, dates, calls)
+    read_external_import_db(target=dates[-1], snapshot_cache=cache)
+
+    assert calls == [5, 2]   # the old latest + the new latest, not the whole window again
+
+
+def test_non_trailing_gap_falls_back_to_the_full_window(monkeypatch):
+    """A cache missing something other than just the latest date (should
+    not happen in practice — see _fetch's own comment — but must not
+    silently drop real data if it ever does) requests the full window
+    rather than guessing wrong with a too-small get_range(N)."""
+    from datetime import date, timedelta
+    from services.external_import_source import read_external_import_db
+
+    dates = [date(2026, 6, 1) + timedelta(days=i) for i in range(5)]
+    _stub_availability_and_holidays(monkeypatch, dates)
+    calls = []
+    _stub_range(monkeypatch, dates, calls)
+
+    # A cache with a hole in the middle (dates[2] missing) — not a trailing
+    # slice of *available_dates*.
+    cache = {dates[0]: {"stocks": []}, dates[1]: {"stocks": []}, dates[3]: {"stocks": []}}
+    read_external_import_db(target=dates[-1], snapshot_cache=cache)
+
+    assert calls == [5]   # fell back to the full window, not len(to_fetch)=2
 
 
 # ── live_merge ────────────────────────────────────────────────────────────────
@@ -607,24 +741,28 @@ def test_database_mode_calculates_and_shows_table(qapp, monkeypatch):
     )
     monkeypatch.setattr(holidays_api, "list_holidays", lambda year: [])
 
-    def fake_snapshot(trade_date):
-        day = trade_date.isoformat()
-        base = 10 if day == d1 else 11
+    def fake_range(days):
+        assert days == 2   # d1, d2 — both available dates, cold cache
         return {
-            "trade_date": day,
-            "stocks": [
+            "days": [
                 {
-                    "symbol": "INFY",
-                    "display_name": "Infosys",
-                    "metrics": {
-                        "Open": base, "High": base + 2, "Low": base - 1, "Close": base + 1,
-                        "AvgRate": base + 0.5, "Quantity": 1000, "DiffPcnt": 1.0,
-                    },
+                    "trade_date": day,
+                    "stocks": [
+                        {
+                            "symbol": "INFY",
+                            "display_name": "Infosys",
+                            "metrics": {
+                                "Open": base, "High": base + 2, "Low": base - 1, "Close": base + 1,
+                                "AvgRate": base + 0.5, "Quantity": 1000, "DiffPcnt": 1.0,
+                            },
+                        }
+                    ],
                 }
-            ],
+                for day, base in ((d1, 10), (d2, 11))
+            ]
         }
 
-    monkeypatch.setattr(historic_api, "get_snapshot", fake_snapshot)
+    monkeypatch.setattr(historic_api, "get_range", fake_range)
 
     screen = DataImportScreen(AppController(qapp))
     card = screen._cards["ExternalImport"]

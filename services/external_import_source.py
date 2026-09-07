@@ -9,17 +9,12 @@ ExternalImport View popup, the Live Master View merge) treat "file" and
 "database" interchangeably without knowing which one is active.
 """
 
-import concurrent.futures
 from datetime import date, timedelta
 
 from api import historic_api, holidays_api
 from services import config_store, formula_engine, formula_tokens
 
 FORMULA_LOOKBACK_DAYS = 100
-# Historic snapshot fetches are independent, read-only GETs — fire them
-# concurrently instead of one-by-one, especially significant on a cold
-# snapshot_cache (e.g. the first fetch of an LMV session).
-_MAX_PARALLEL_SNAPSHOT_FETCHES = 8
 
 
 def _load_custom_defs() -> dict:
@@ -90,22 +85,46 @@ def _fetch(target: date = None, snapshot_cache: dict | None = None) -> tuple[lis
     # change tick to tick — reuse it from the caller-owned cache (e.g. one
     # per live LiveDataReader session) instead of re-fetching over HTTP on
     # every ~1s slow-source refresh. The latest date is always re-fetched
-    # fresh, same as before, in case it's still being amended. Whatever isn't
-    # already cached gets fetched in parallel — these are independent,
-    # read-only GETs, so there's no reason to wait for one before starting
-    # the next (this is what makes a cold cache, e.g. the first fetch of an
-    # LMV session, slow otherwise).
+    # fresh, same as before, in case it's still being amended.
     to_fetch = [
         d for d in available_dates
         if d == latest_available or snapshot_cache is None or d not in snapshot_cache
     ]
     fetched = {}
     if to_fetch:
-        workers = min(_MAX_PARALLEL_SNAPSHOT_FETCHES, len(to_fetch))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            future_to_date = {pool.submit(historic_api.get_snapshot, d): d for d in to_fetch}
-            for future in concurrent.futures.as_completed(future_to_date):
-                fetched[future_to_date[future]] = future.result()
+        # ONE bulk request instead of one GET per missing date — issue #30:
+        # on a cold cache (e.g. the first fetch of an LMV session), the old
+        # per-date fan-out (up to 8 in flight at once, cycling through
+        # every missing date in FORMULA_LOOKBACK_DAYS) meant up to ~70
+        # individual HTTP round trips, which saturated the backend's small
+        # gunicorn worker pool and starved whatever else was in flight at
+        # that same moment (the live read itself, an N-Day strategy's own
+        # day-history fetch) into a "Read timed out".
+        #
+        # get_range(N) returns the N MOST RECENT trade dates with data —
+        # sized down to just len(to_fetch) whenever *to_fetch* is exactly
+        # that trailing slice of *available_dates* (the overwhelming
+        # common case: once the cache is warm, only the latest date is
+        # ever missing, so this is a small, cheap request every tick, not
+        # the full lookback window re-sent on every single one). Only a
+        # genuinely cold cache — to_fetch equals available_dates in full —
+        # falls back to requesting the whole window, which is exactly the
+        # ~70-days-in-one-call trade this fix makes instead of ~70 separate
+        # requests. If *to_fetch* were ever NOT a trailing slice (a mid-
+        # window gap — not expected given the cache is only ever missing
+        # dates that fell out of a previous, narrower lookback window or
+        # were never fetched at all, but not guaranteed by construction),
+        # the full-window request still covers it correctly.
+        if to_fetch == available_dates[-len(to_fetch):]:
+            range_days = len(to_fetch)
+        else:
+            range_days = len(available_dates)
+        range_response = historic_api.get_range(range_days)
+        to_fetch_set = set(to_fetch)
+        for day_entry in range_response.get("days", []):
+            d = date.fromisoformat(day_entry["trade_date"])
+            if d in to_fetch_set:
+                fetched[d] = day_entry
 
     raw_by_date = {}
     display_names = {}
@@ -114,6 +133,15 @@ def _fetch(target: date = None, snapshot_cache: dict | None = None) -> tuple[lis
             snapshot = fetched[d]
             if snapshot_cache is not None and d != latest_available:
                 snapshot_cache[d] = snapshot
+        elif d in to_fetch:
+            # Requested from get_range but not present in its response —
+            # shouldn't happen (get_availability and get_range read the
+            # same underlying table), but a date that was never cached AND
+            # never came back is a snapshot_cache[d] KeyError below
+            # otherwise. Same "blank rather than crash" convention as
+            # everywhere else here — an empty day is what get_snapshot(d)
+            # would have returned for a genuinely dataless date anyway.
+            snapshot = {"stocks": []}
         else:
             snapshot = snapshot_cache[d]
         stocks = snapshot.get("stocks", [])
