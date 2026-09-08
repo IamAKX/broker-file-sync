@@ -80,13 +80,21 @@ class FrozenColumns(QObject):
     # ── Qt event filter (resize/show of the real table) ─────────────────────
 
     def eventFilter(self, obj, event):
-        if not shiboken6.isValid(self._table) or not shiboken6.isValid(self._overlay):
+        # Qt can still deliver a filtered event to a viewport/table whose
+        # FrozenColumns wrapper is mid-teardown (interpreter shutdown clears
+        # instance __dict__ before Qt drops the installed filter) — so reach
+        # for _table/_overlay defensively, not just guard their C++ validity.
+        table = getattr(self, "_table", None)
+        overlay = getattr(self, "_overlay", None)
+        if table is None or overlay is None:
             return False
-        if obj is self._table.viewport() and event.type() == QEvent.Type.Resize:
+        if not shiboken6.isValid(table) or not shiboken6.isValid(overlay):
+            return False
+        if obj is table.viewport() and event.type() == QEvent.Type.Resize:
             self._update_geometry()
             QTimer.singleShot(0, self._update_geometry)
             return False
-        if obj is self._table and event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
+        if obj is table and event.type() in (QEvent.Type.Resize, QEvent.Type.Show):
             # QObject event filters run BEFORE the target's own event()
             # handling, so at this point QAbstractScrollArea hasn't resized
             # self._table's viewport yet — computing geometry synchronously
