@@ -368,6 +368,29 @@ def _update_open_signal(
                     sym_index=sym_index, day_history=day_history)
         )
 
+    # Backfill Stop Loss / Target metrics that couldn't be resolved at entry
+    # (issue #34): a metric whose formula references a strategy column that
+    # depends on day-history — e.g. [Target 1] = [Close] + [ATR] * 0.618,
+    # where [ATR] resolves through AVG_DAYS/VALUE_DAYS_AGO — evaluates to
+    # None on any tick where that history isn't loaded yet (app just
+    # started, market just opened). The entry then froze a permanent blank
+    # while the Live Master View grid filled in seconds later. Retry each
+    # tick until it yields a real number, then leave it frozen like every
+    # other entry-time value. A metric that already has a value is never
+    # recomputed — Stop Loss / Target stay fixed once set.
+    for metric_id, m in signal["metrics"].items():
+        if m.get("role") not in (ROLE_STOP_LOSS, ROLE_TARGET) or m.get("value") is not None:
+            continue
+        cfg_metric = _find_metric_config(config, metric_id)
+        if cfg_metric is None:
+            continue
+        backfilled = _to_float(
+            evaluate(cfg_metric.get("formula", []), row, all_dicts, agg_cache=agg_cache,
+                    sym_index=sym_index, day_history=day_history)
+        )
+        if backfilled is not None:
+            m["value"] = backfilled
+
     if price is not None:
         for metric_id, m in signal["metrics"].items():
             if m.get("role") != ROLE_TARGET or m.get("achieved") or m.get("value") is None:

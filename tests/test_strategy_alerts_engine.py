@@ -189,6 +189,54 @@ def test_running_high_low_tracked_while_open():
     assert signal["running_low"] == 95
 
 
+def test_target_value_none_at_entry_is_backfilled_on_a_later_tick():
+    # Issue #34: a Target/Stop Loss metric whose formula references a
+    # strategy column that isn't populated yet (e.g. [Target 1] depending
+    # on ATR, which needs day-history still loading at market open) freezes
+    # a permanent blank at entry. It must retry each tick and lock in the
+    # value once the referenced column resolves.
+    cfg = new_notification_config()
+    cfg["enabled"] = True
+    cfg["direction"] = "BUY"
+    cfg["debounce_minutes"] = 0
+    cfg["trigger_condition"] = _gt_condition("Signal", 0)
+    cfg["metrics"] = [
+        new_metric("Stop Loss", "stop_loss", [_num(90)]),
+        new_metric("Target 1", "target", [_col("ATR Target")]),
+    ]
+    configs = {"strat-1": cfg}
+
+    def row(price, atr_target=None):
+        r = _row(signal=1, price=price)
+        if atr_target is not None:
+            r["ATR Target"] = atr_target
+        return r
+
+    # Entry fires while the "ATR Target" column is still blank.
+    evaluate_tick([STRATEGY], configs, [row(100)], now=T0)
+    events = evaluate_tick([STRATEGY], configs, [row(100)], now=T0 + timedelta(minutes=1))
+    assert events[0].kind == EVENT_ENTRY
+    target = next(m for m in events[0].payload["metrics"].values() if m["role"] == "target")
+    assert target["value"] is None
+
+    signal = next(iter(state_store.get_open_signals().values()))
+    assert signal["metrics"][target_id_of(signal)]["value"] is None
+
+    # Next tick: the column now has a value -> the frozen target backfills.
+    evaluate_tick([STRATEGY], configs, [row(101, atr_target=115)], now=T0 + timedelta(minutes=2))
+    signal = next(iter(state_store.get_open_signals().values()))
+    assert signal["metrics"][target_id_of(signal)]["value"] == 115
+
+    # And it stays frozen even if the column drifts afterwards.
+    evaluate_tick([STRATEGY], configs, [row(102, atr_target=118)], now=T0 + timedelta(minutes=3))
+    signal = next(iter(state_store.get_open_signals().values()))
+    assert signal["metrics"][target_id_of(signal)]["value"] == 115
+
+
+def target_id_of(signal):
+    return next(mid for mid, m in signal["metrics"].items() if m["role"] == "target")
+
+
 def test_multiple_targets_fire_subsequent_notifications_one_per_hit():
     # Matches the spreadsheet's "Target 1 / Target 2 / Target 3" fields:
     # each is its own metric, each gets its own follow-up notification when
