@@ -21,6 +21,19 @@ def qapp():
     return QApplication.instance() or QApplication(sys.argv)
 
 
+@pytest.fixture(autouse=True)
+def _alert_window_open(monkeypatch):
+    """_run_strategy_alert_checks gates on alert_schedule.should_run_now(),
+    which compares the wall clock to NSE hours (09:15-15:30) in the
+    runner's local timezone. Without this, every test here that expects an
+    alert silently gets zero events whenever CI happens to run outside that
+    window (e.g. a UTC runner before 09:15 UTC). The schedule gate itself
+    is covered by tests/test_alert_schedule.py."""
+    monkeypatch.setattr(
+        "services.strategy_alerts.alert_schedule.should_run_now", lambda *a, **k: True
+    )
+
+
 @pytest.fixture
 def lmv(qapp):
     from screens.live_viewer import LiveViewerWindow
