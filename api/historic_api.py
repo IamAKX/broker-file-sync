@@ -11,10 +11,11 @@ def upload_daily(trade_date: date, rows: list[dict]) -> dict:
     )
 
 
-def get_availability(date_from: date, date_to: date) -> dict:
+def get_availability(date_from: date, date_to: date, timeout: int | None = None) -> dict:
     return api_client.get(
         AVAILABILITY,
         params={"from": date_from.isoformat(), "to": date_to.isoformat()},
+        timeout=timeout,
     )
 
 

@@ -4,9 +4,9 @@ from api.client import api_client
 from api.endpoints import HOLIDAYS
 
 
-def list_holidays(year: int | None) -> list[dict]:
+def list_holidays(year: int | None, timeout: int | None = None) -> list[dict]:
     params = {"year": year} if year is not None else None
-    return api_client.get(HOLIDAYS, params=params)
+    return api_client.get(HOLIDAYS, params=params, timeout=timeout)
 
 
 def create_holiday(holiday_date: date, name: str) -> dict:

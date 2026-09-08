@@ -176,3 +176,10 @@ def _isolate_disk_stores(tmp_path, monkeypatch):
     from services import lmv_inception_fields
     monkeypatch.setattr(lmv_inception_fields, "ensure_loaded_async",
                         lambda on_ready=None: None)
+
+    # services/external_import_source.py holds process-wide caches
+    # (availability, holidays, last-good result) for the LMV "database"
+    # source — clear them so a stubbed response or last-good result from
+    # one test can't be served to the next.
+    from services import external_import_source
+    external_import_source._reset_caches()

@@ -70,11 +70,11 @@ def _stub_historic_backend(monkeypatch):
     dates = [date(2026, 6, 1) + timedelta(days=i) for i in range(5)]
     monkeypatch.setattr(
         historic_api, "get_availability",
-        lambda date_from, date_to: {
+        lambda date_from, date_to, timeout=None: {
             "dates": [{"trade_date": d.isoformat(), "has_data": True} for d in dates]
         },
     )
-    monkeypatch.setattr(holidays_api, "list_holidays", lambda year: [])
+    monkeypatch.setattr(holidays_api, "list_holidays", lambda year, timeout=None: [])
 
     def fake_range(days):
         # Issue #30: read_external_import_db's cold-cache path fetches
@@ -187,11 +187,11 @@ def _stub_availability_and_holidays(monkeypatch, dates):
     from api import historic_api, holidays_api
     monkeypatch.setattr(
         historic_api, "get_availability",
-        lambda date_from, date_to: {
+        lambda date_from, date_to, timeout=None: {
             "dates": [{"trade_date": d.isoformat(), "has_data": True} for d in dates]
         },
     )
-    monkeypatch.setattr(holidays_api, "list_holidays", lambda year: [])
+    monkeypatch.setattr(holidays_api, "list_holidays", lambda year, timeout=None: [])
 
 
 def test_cold_cache_requests_the_full_window_in_one_call(monkeypatch):
@@ -256,6 +256,69 @@ def test_a_newly_available_date_only_adds_a_small_call_not_a_full_refetch(monkey
     read_external_import_db(target=dates[-1], snapshot_cache=cache)
 
     assert calls == [5, 2]   # the old latest + the new latest, not the whole window again
+
+
+def test_availability_and_holidays_are_not_refetched_every_call(monkeypatch):
+    """The LMV database source calls _fetch on every ~1s slow-source
+    refresh; get_availability / list_holidays barely change, so a slow
+    backend response for either used to surface as a "Read error" on an
+    otherwise-fine tick. They're cached now."""
+    from datetime import date, timedelta
+    from api import historic_api, holidays_api
+    from services.external_import_source import read_external_import_db
+
+    dates = [date(2026, 6, 1) + timedelta(days=i) for i in range(5)]
+    avail_calls, holiday_calls = [], []
+    monkeypatch.setattr(historic_api, "get_availability", lambda date_from, date_to, timeout=None: (
+        avail_calls.append(1) or {"dates": [{"trade_date": d.isoformat(), "has_data": True} for d in dates]}))
+    monkeypatch.setattr(holidays_api, "list_holidays",
+                        lambda year, timeout=None: holiday_calls.append(year) or [])
+    _stub_range(monkeypatch, dates, [])
+
+    cache: dict = {}
+    for _ in range(4):
+        read_external_import_db(target=dates[-1], snapshot_cache=cache)
+
+    assert len(avail_calls) == 1
+    assert holiday_calls == [2026]   # one call for the one year in range, once
+
+
+def test_db_live_baseline_serves_last_good_result_on_network_error(monkeypatch):
+    from datetime import date, timedelta
+    from api import historic_api, holidays_api
+    from api.exceptions import NetworkError
+    from services.external_import_source import read_external_import_db_with_live_baseline
+
+    dates = [date(2026, 6, 1) + timedelta(days=i) for i in range(5)]
+    _stub_availability_and_holidays(monkeypatch, dates)
+    _stub_range(monkeypatch, dates, [])
+
+    good = read_external_import_db_with_live_baseline(target=dates[-1], snapshot_cache={})
+    assert good[1]   # rows
+
+    # Backend goes away — same target date still returns the last good data.
+    def boom(*a, **k):
+        raise NetworkError("Could not reach server: Read timed out")
+    monkeypatch.setattr(historic_api, "get_availability", boom)
+    monkeypatch.setattr(historic_api, "get_range", boom)
+
+    from services import external_import_source
+    external_import_source._availability_cache.clear()  # force the failing call
+    assert read_external_import_db_with_live_baseline(target=dates[-1], snapshot_cache={}) == good
+
+
+def test_db_live_baseline_reraises_when_nothing_ever_succeeded(monkeypatch):
+    from datetime import date
+    from api import historic_api
+    from api.exceptions import NetworkError
+    from services.external_import_source import read_external_import_db_with_live_baseline
+
+    def boom(*a, **k):
+        raise NetworkError("Could not reach server: Read timed out")
+    monkeypatch.setattr(historic_api, "get_availability", boom)
+
+    with pytest.raises(NetworkError):
+        read_external_import_db_with_live_baseline(target=date(2026, 6, 5), snapshot_cache={})
 
 
 def test_non_trailing_gap_falls_back_to_the_full_window(monkeypatch):
@@ -732,14 +795,14 @@ def test_database_mode_calculates_and_shows_table(qapp, monkeypatch):
     d1, d2 = (today - timedelta(days=1)).isoformat(), today.isoformat()
     monkeypatch.setattr(
         historic_api, "get_availability",
-        lambda date_from, date_to: {
+        lambda date_from, date_to, timeout=None: {
             "dates": [
                 {"trade_date": d1, "has_data": True},
                 {"trade_date": d2, "has_data": True},
             ]
         },
     )
-    monkeypatch.setattr(holidays_api, "list_holidays", lambda year: [])
+    monkeypatch.setattr(holidays_api, "list_holidays", lambda year, timeout=None: [])
 
     def fake_range(days):
         assert days == 2   # d1, d2 — both available dates, cold cache
@@ -791,8 +854,8 @@ def test_database_mode_no_data_shows_message(qapp, monkeypatch):
     from api import historic_api, holidays_api
     from PySide6.QtWidgets import QMessageBox
 
-    monkeypatch.setattr(historic_api, "get_availability", lambda date_from, date_to: {"dates": []})
-    monkeypatch.setattr(holidays_api, "list_holidays", lambda year: [])
+    monkeypatch.setattr(historic_api, "get_availability", lambda date_from, date_to, timeout=None: {"dates": []})
+    monkeypatch.setattr(holidays_api, "list_holidays", lambda year, timeout=None: [])
     shown = []
     monkeypatch.setattr(QMessageBox, "information", staticmethod(lambda *a, **k: shown.append(a)))
 
