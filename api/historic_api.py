@@ -27,7 +27,7 @@ def get_snapshot(trade_date: date | None) -> dict:
 _RANGE_TIMEOUT_SECONDS = 60  # see this function's own docstring
 
 
-def get_range(days: int) -> dict:
+def get_range(days: int, timeout: int | None = None) -> dict:
     """The `days` most recent trade dates with saved historic-upload data,
     each pivoted the same way as get_snapshot — backs ExternalImport's
     "database" source (services.external_import_source), replacing what
@@ -44,7 +44,10 @@ def get_range(days: int) -> dict:
     *days*, not the generic 15s default's assumption of a quick CRUD round
     trip.
     """
-    return api_client.get(RANGE, params={"days": days}, timeout=_RANGE_TIMEOUT_SECONDS)
+    return api_client.get(
+        RANGE, params={"days": days},
+        timeout=timeout if timeout is not None else _RANGE_TIMEOUT_SECONDS,
+    )
 
 
 def delete_day(trade_date: date) -> dict:

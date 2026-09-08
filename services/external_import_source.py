@@ -38,6 +38,8 @@ _cache_lock = threading.Lock()
 _availability_cache: dict = {}   # (date_from_iso, target_iso) -> (response, monotonic_ts)
 _holidays_cache: dict = {}       # year -> (set[date], monotonic_ts)
 _last_good: dict = {}            # target_iso -> (headers, rows, live_baselines)
+_backoff: dict = {"fails": 0, "skip_until": 0.0}   # after repeated failures, stop calling out
+_BACKOFF_CAP_S = 120
 
 
 def _reset_caches() -> None:
@@ -48,6 +50,8 @@ def _reset_caches() -> None:
         _availability_cache.clear()
         _holidays_cache.clear()
         _last_good.clear()
+        _backoff["fails"] = 0
+        _backoff["skip_until"] = 0.0
 
 
 def _cached_availability(date_from: date, target: date) -> dict:
@@ -129,11 +133,26 @@ def read_external_import_db_with_live_baseline(
     nothing has ever succeeded for that date.
     """
     target = target or date.today()
+    key = target.isoformat()
+
+    # While the backend is failing, don't call it again on every ~1s tick
+    # (each attempt blocks the LMV worker thread — and thus the Windows COM
+    # poll — for the request timeout before falling through to last-good).
+    # Skip straight to last-good until the backoff window elapses.
+    now = time.monotonic()
+    with _cache_lock:
+        skipping = _backoff["skip_until"] > now and key in _last_good
+        stale = _last_good.get(key)
+    if skipping:
+        return stale
+
     try:
         result = _fetch(target, snapshot_cache)
     except (ApiError, NetworkError) as exc:
         with _cache_lock:
-            stale = _last_good.get(target.isoformat())
+            _backoff["fails"] += 1
+            _backoff["skip_until"] = now + min(5 * 2 ** (_backoff["fails"] - 1), _BACKOFF_CAP_S)
+            stale = _last_good.get(key)
         if stale is None:
             raise
         error_logger.warning(
@@ -142,8 +161,10 @@ def read_external_import_db_with_live_baseline(
         )
         return stale
     with _cache_lock:
+        _backoff["fails"] = 0
+        _backoff["skip_until"] = 0.0
         _last_good.clear()
-        _last_good[target.isoformat()] = result
+        _last_good[key] = result
     return result
 
 
@@ -201,7 +222,13 @@ def _fetch(target: date = None, snapshot_cache: dict | None = None) -> tuple[lis
             range_days = len(to_fetch)
         else:
             range_days = len(available_dates)
-        range_response = historic_api.get_range(range_days)
+        # The warm-cache request (just the latest day or two, every ~1s
+        # tick on the LMV worker thread) must fail fast if the backend is
+        # slow — a 60s hang there is what freezes live updates. The long
+        # timeout is only for the one-off genuinely-cold full-window fetch,
+        # whose payload really is large.
+        range_timeout = None if range_days > 5 else _HOT_PATH_TIMEOUT_S + 4
+        range_response = historic_api.get_range(range_days, timeout=range_timeout)
         to_fetch_set = set(to_fetch)
         for day_entry in range_response.get("days", []):
             d = date.fromisoformat(day_entry["trade_date"])

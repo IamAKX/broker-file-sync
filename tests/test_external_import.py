@@ -76,7 +76,7 @@ def _stub_historic_backend(monkeypatch):
     )
     monkeypatch.setattr(holidays_api, "list_holidays", lambda year, timeout=None: [])
 
-    def fake_range(days):
+    def fake_range(days, timeout=None):
         # Issue #30: read_external_import_db's cold-cache path fetches
         # every available date in one call, not one get_snapshot() per
         # date — sized to cover the full available-dates list.
@@ -162,7 +162,7 @@ def _stub_range(monkeypatch, dates, calls):
     most recent trade dates with data" contract."""
     from api import historic_api
 
-    def fake_range(days):
+    def fake_range(days, timeout=None):
         calls.append(days)
         chosen = dates[-days:] if days else []
         return {
@@ -305,6 +305,40 @@ def test_db_live_baseline_serves_last_good_result_on_network_error(monkeypatch):
     from services import external_import_source
     external_import_source._availability_cache.clear()  # force the failing call
     assert read_external_import_db_with_live_baseline(target=dates[-1], snapshot_cache={}) == good
+
+
+def test_db_live_baseline_backs_off_and_stops_hammering_a_failing_backend(monkeypatch):
+    """Each failed attempt blocks the LMV worker thread for the request
+    timeout — so after a failure, subsequent ticks must serve last-good
+    without calling out again until the backoff window elapses."""
+    from datetime import date, timedelta
+    from api import historic_api
+    from api.exceptions import NetworkError
+    from services import external_import_source
+    from services.external_import_source import read_external_import_db_with_live_baseline
+
+    dates = [date(2026, 6, 1) + timedelta(days=i) for i in range(5)]
+    _stub_availability_and_holidays(monkeypatch, dates)
+    _stub_range(monkeypatch, dates, [])
+    read_external_import_db_with_live_baseline(target=dates[-1], snapshot_cache={})  # one good result
+
+    attempts = []
+
+    def boom(*a, **k):
+        attempts.append(1)
+        raise NetworkError("Read timed out")
+    monkeypatch.setattr(historic_api, "get_availability", boom)
+    external_import_source._availability_cache.clear()
+
+    for _ in range(6):
+        read_external_import_db_with_live_baseline(target=dates[-1], snapshot_cache={})
+    assert len(attempts) == 1   # one real attempt, then backoff -> all served from last-good
+
+    # Backoff elapses -> it tries once more.
+    with external_import_source._cache_lock:
+        external_import_source._backoff["skip_until"] = 0.0
+    read_external_import_db_with_live_baseline(target=dates[-1], snapshot_cache={})
+    assert len(attempts) == 2
 
 
 def test_db_live_baseline_reraises_when_nothing_ever_succeeded(monkeypatch):
@@ -804,7 +838,7 @@ def test_database_mode_calculates_and_shows_table(qapp, monkeypatch):
     )
     monkeypatch.setattr(holidays_api, "list_holidays", lambda year, timeout=None: [])
 
-    def fake_range(days):
+    def fake_range(days, timeout=None):
         assert days == 2   # d1, d2 — both available dates, cold cache
         return {
             "days": [
