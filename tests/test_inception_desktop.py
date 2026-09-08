@@ -1037,6 +1037,36 @@ def test_frozen_columns_overlay_resizes_when_horizontal_scrollbar_toggles(qapp):
     assert rows_area_height == table.viewport().height()
 
 
+def test_frozen_columns_overlay_mirrors_real_table_row_heights(qapp):
+    """Issue #36 (Windows): the overlay is a separate view and doesn't
+    necessarily pick the same default row height as the real table. Any
+    per-row difference accumulates and, by the last visible row, shifts the
+    frozen Sector/Symbol a whole row off its data — the last stock renders
+    split, or loses its frozen cell. The overlay's per-row heights must
+    track the real table's, both for rows sized before configure() and for
+    rows resized afterwards."""
+    from PySide6.QtWidgets import QTableWidget, QTableWidgetItem
+    from components.frozen_table_columns import FrozenColumns
+
+    headers = ["Sector", "Symbol", "CLOSE"]
+    table = QTableWidget(10, 3)
+    table.setHorizontalHeaderLabels(headers)
+    for r in range(10):
+        for c, h in enumerate(headers):
+            table.setItem(r, c, QTableWidgetItem(f"{h}{r}"))
+    table.setRowHeight(3, 55)  # odd one out, set before configure()
+
+    freeze = FrozenColumns(table)
+    freeze.configure(headers, ["Sector", "Symbol"])
+
+    for r in range(10):
+        assert freeze._overlay.rowHeight(r) == table.rowHeight(r), f"row {r} height mismatch"
+
+    # A later resize on the real table propagates too.
+    table.setRowHeight(7, 48)
+    assert freeze._overlay.rowHeight(7) == 48
+
+
 # ── services.inception_formula_builder_columns ───────────────────────────
 
 def _daily_bars(symbol, start, n, close_fn=lambda i: 100 + i, skip=frozenset()):

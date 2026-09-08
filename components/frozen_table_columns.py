@@ -44,6 +44,11 @@ class FrozenColumns(QObject):
         ov.setModel(table.model())
         ov.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         ov.setFont(table.font())
+        # Same scroll granularity as the real table — a per-item vs per-pixel
+        # mismatch makes the copied scrollbar value (see below) mean different
+        # things in each view, drifting the frozen cells off their rows.
+        ov.setVerticalScrollMode(table.verticalScrollMode())
+        ov.setHorizontalScrollMode(table.horizontalScrollMode())
         ov.verticalHeader().setVisible(False)
         ov.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         ov.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
@@ -64,6 +69,15 @@ class FrozenColumns(QObject):
         ov.verticalScrollBar().valueChanged.connect(table.verticalScrollBar().setValue)
         table.horizontalHeader().sectionResized.connect(self._on_section_resized)
         table.horizontalHeader().sectionMoved.connect(self._on_section_moved)
+        # Keep row heights identical. The overlay is a separate view: for the
+        # same model, font and style it *usually* picks the same default row
+        # height as the real table — but not always (platform/DPI/style
+        # differences, or the real table having its rows explicitly sized).
+        # Any per-row difference accumulates down the table and, by the last
+        # visible row, shifts the frozen Sector/Symbol a whole row off its
+        # data — the last stock renders split/duplicated, or loses its
+        # frozen cell entirely (issues #29, #36, seen on Windows).
+        table.verticalHeader().sectionResized.connect(self._on_row_resized)
         table.installEventFilter(self)
         # The real table's viewport height changes — with no Resize event on
         # the table widget itself — whenever its horizontal scrollbar appears
@@ -113,6 +127,10 @@ class FrozenColumns(QObject):
     def _on_section_resized(self, logical: int, old_size: int, new_size: int):
         if logical in self._frozen_cols:
             self._update_geometry()
+
+    def _on_row_resized(self, row: int, old_size: int, new_size: int):
+        if shiboken6.isValid(self._overlay) and self._overlay.rowHeight(row) != new_size:
+            self._overlay.setRowHeight(row, new_size)
 
     def _on_section_moved(self, logical: int, old_visual: int, new_visual: int):
         """Undo any drag (of a frozen column, or of another column across
@@ -171,6 +189,18 @@ class FrozenColumns(QObject):
         for r in range(self._table.model().rowCount()):
             self._overlay.setRowHidden(r, self._table.isRowHidden(r))
 
+    def _sync_row_heights(self) -> None:
+        """Copy every row's height from the real table onto the overlay, so
+        the two views stay row-for-row aligned no matter what set the real
+        table's heights (default metrics, an explicit setRowHeight, a
+        resizeRowsToContents). Cheap C++ getters/setters; only writes the
+        rows that actually differ. See __init__'s _on_row_resized hookup."""
+        table, overlay = self._table, self._overlay
+        for r in range(table.model().rowCount()):
+            h = table.rowHeight(r)
+            if h > 0 and overlay.rowHeight(r) != h:
+                overlay.setRowHeight(r, h)
+
     def _pin_order(self):
         hdr = self._table.horizontalHeader()
         self._guarding = True
@@ -199,6 +229,7 @@ class FrozenColumns(QObject):
         if not self._frozen_cols or any(self._table.isColumnHidden(c) for c in self._frozen_cols):
             self._overlay.hide()
             return
+        self._sync_row_heights()
         hdr = self._table.horizontalHeader()
         vh = self._table.verticalHeader()
         vh_width = vh.width() if vh.isVisible() else 0
