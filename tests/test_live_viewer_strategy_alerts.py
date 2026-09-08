@@ -37,7 +37,15 @@ def _alert_window_open(monkeypatch):
 @pytest.fixture
 def lmv(qapp):
     from screens.live_viewer import LiveViewerWindow
-    return LiveViewerWindow("", "", "", [])
+    w = LiveViewerWindow("", "", "", [])
+    yield w
+    # LiveViewerWindow.__init__ -> _setup_watcher starts a real reader
+    # QThread. Left running, it's destroyed at interpreter shutdown while
+    # still alive — "QThread: Destroyed while thread is still running",
+    # which aborts the process (SIGABRT) on Linux/CI even though every test
+    # passed. Stop it here.
+    w._shutdown_worker()
+    w.deleteLater()
 
 
 STRATEGY = {"id": "strat-1", "name": "PWHBUY", "active": True, "columns": []}

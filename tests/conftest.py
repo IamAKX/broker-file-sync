@@ -38,6 +38,33 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
+def _stop_leaked_qthreads():
+    """Several screens (LiveViewerWindow, the Inception HMV/View-by-Date
+    workers) start a background QThread in __init__ and keep it as a child.
+    Most tests that build such a screen never tear it down, so when the
+    screen is freed (refcount, at end of test or interpreter shutdown) its
+    QThread is destroyed while still running — "QThread: Destroyed while
+    thread is still running", which on Linux aborts the process (SIGABRT,
+    exit 134) even though every test passed. Reference counting frees the
+    screens deterministically on the main thread, so stopping any
+    still-running QThread after each test keeps that from ever reaching a
+    destructor. Cheap: quit() on a thread sitting in exec() returns at
+    once. gc.get_objects() still enumerates tracked objects with the
+    collector disabled (see pytest_configure)."""
+    yield
+    from PySide6.QtCore import QThread
+    for obj in gc.get_objects():
+        if not isinstance(obj, QThread):
+            continue
+        try:
+            if obj.isRunning():
+                obj.quit()
+                obj.wait(2000)
+        except (RuntimeError, ReferenceError):
+            pass  # C++ side already gone
+
+
+@pytest.fixture(autouse=True)
 def _isolate_disk_stores(tmp_path, monkeypatch):
     """Redirect every JSON-backed store to a per-test tmp path, and stub out
     the backend calls those stores now make (see services/config_store.py,
