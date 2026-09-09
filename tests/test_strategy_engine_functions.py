@@ -261,6 +261,26 @@ def test_compile_check_this_without_value_reports_clearly():
     assert "THIS" in msg
 
 
+def test_compile_check_this_optional_compiles_with_placeholder():
+    # issue #37: a fmt-rule condition must not be blocked just because THIS
+    # can't be computed in the editor (historic/window value, empty sample
+    # cell). self_value_optional=True -> compile with a placeholder + note.
+    from services.strategy_engine import compile_check
+    tokens = [tok_self(), tok_op("=="), {"type": "num", "value": "True"}]
+    ok, msg = compile_check(tokens, {"LTP": "5"}, [{"LTP": "5"}],
+                            self_value_optional=True)
+    assert ok, msg
+    assert "placeholder" in msg.lower()
+
+
+def test_compile_check_this_optional_still_uses_real_value_when_given():
+    from services.strategy_engine import compile_check
+    tokens = [tok_self(), tok_op("<="), {"type": "num", "value": "10000"}]
+    ok, msg = compile_check(tokens, {"LTP": "5"}, [{"LTP": "5"}],
+                            self_value=5000, self_value_optional=True)
+    assert ok and msg == "True"
+
+
 # ── apply_strategies row filtering (filtered rows are dropped) ──────────────────
 
 def _eq(col, val):

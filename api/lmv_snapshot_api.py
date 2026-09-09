@@ -36,21 +36,28 @@ def delete_day(trade_date: date) -> dict:
 _RANGE_TIMEOUT_SECONDS = 60  # see this function's own docstring
 
 
-def get_range(days: int) -> dict:
+def get_range(days: int, timeout: int | None = None) -> dict:
     """The `days` most recent trade dates with saved snapshot data, each
     pivoted the same way as get_snapshot — backs the Formula Stats feature's
     per-day recomputation (see services/formula_stats_engine.py), and
     Live Master View's "N-Day Data" refresh (services.formula_stats_engine.
     compute_day_history, via screens/live_viewer.py).
 
-    A longer-than-default timeout: unlike most calls this app makes, this
-    one's payload scales with the full stock universe times *days* (a
-    single-day pivot across ~78 metrics/stock, times up to 90 days —
-    services.formula_stats_engine's own _MAX_SNAPSHOT_RANGE_DAYS) — the
-    generic 15s default was a frequent, spurious "Read timed out" on this
-    specific endpoint even when the server was perfectly reachable, just
-    still generating the response (issue #22: "the columns for this
+    A longer-than-default timeout by default: unlike most calls this app
+    makes, this one's payload scales with the full stock universe times
+    *days* (a single-day pivot across ~78 metrics/stock, times up to 90
+    days — services.formula_stats_engine's own _MAX_SNAPSHOT_RANGE_DAYS) —
+    the generic 15s default was a frequent, spurious "Read timed out" on
+    this specific endpoint even when the server was perfectly reachable,
+    just still generating the response (issue #22: "the columns for this
     strategy ends up empty" — components.formula_stats_panel.compute()
     aborts and shows nothing on ANY exception here, timeout or not).
+
+    *timeout* overrides that default — LMV's N-Day refresh passes a short
+    one once it's had a warm response so a mid-session backend slowdown
+    doesn't stall the live worker thread for a full minute (issue #40).
     """
-    return api_client.get(LMV_SNAPSHOT_RANGE, params={"days": days}, timeout=_RANGE_TIMEOUT_SECONDS)
+    return api_client.get(
+        LMV_SNAPSHOT_RANGE, params={"days": days},
+        timeout=timeout if timeout is not None else _RANGE_TIMEOUT_SECONDS,
+    )

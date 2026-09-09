@@ -314,6 +314,116 @@ def test_worker_refresh_day_history_fetches_notif_configs_itself(qapp, tmp_path,
     assert called == [1]
 
 
+# ── issue #40: a slow/unreachable backend must not stall the worker (and
+# thus live updates) once per strategy on a multi-strategy N-Day apply ──────
+
+def _patch_stores(tmp_path, monkeypatch):
+    from services import strategy_store as store, config_store
+    monkeypatch.setattr(store, "_STORE_FILE", str(tmp_path / "s.json"))
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config.json"))
+
+
+def _fake_range_source(monkeypatch, state):
+    """Patches api.lmv_snapshot_api.get_range; records (days, timeout) calls,
+    raises NetworkError while state['fail'] is set."""
+    from api import lmv_snapshot_api
+    from api.exceptions import NetworkError
+
+    calls = []
+
+    def fake_get_range(days, timeout=None):
+        calls.append((days, timeout))
+        if state.get("fail"):
+            raise NetworkError("Could not reach server: Read timed out")
+        return {"days": [{
+            "trade_date": "2026-01-05",
+            "stocks": [{"symbol": "INFY", "display_name": "INFY",
+                        "metrics": {"Current": 10.0}}],
+        }]}
+
+    monkeypatch.setattr(lmv_snapshot_api, "get_range", fake_get_range)
+    return calls
+
+
+def test_worker_day_history_uses_cold_timeout_first_then_warm(qapp, tmp_path, monkeypatch):
+    _patch_stores(tmp_path, monkeypatch)
+    from screens.live_viewer import _LiveDataWorker
+
+    calls = _fake_range_source(monkeypatch, {"fail": False})
+    worker = _LiveDataWorker(reader=None, sector_map={}, name_to_symbol={})
+
+    worker.refresh_day_history([_row_filter_strategy()], "All", False)
+    worker.refresh_day_history([_row_filter_strategy()], "All", False)
+
+    assert calls[0][1] == _LiveDataWorker._DH_COLD_TIMEOUT_S
+    assert calls[1][1] == _LiveDataWorker._DH_WARM_TIMEOUT_S   # warm after one success
+
+
+def test_worker_day_history_backoff_serves_last_good_without_refetch(qapp, tmp_path, monkeypatch):
+    _patch_stores(tmp_path, monkeypatch)
+    from screens.live_viewer import _LiveDataWorker
+
+    state = {"fail": False}
+    calls = _fake_range_source(monkeypatch, state)
+    worker = _LiveDataWorker(reader=None, sector_map={}, name_to_symbol={})
+    results, failures = [], []
+    worker.day_history_result.connect(lambda dh, s: results.append(dh))
+    worker.day_history_failed.connect(lambda m, s: failures.append(m))
+
+    strat = _row_filter_strategy()
+
+    # 1) one good fetch -> last-good cached
+    worker.refresh_day_history([strat], "All", False)
+    assert len(results) == 1 and results[0]
+
+    # 2) backend down -> it tries once, then serves last-good (a result, not
+    #    a failure) and arms the backoff
+    state["fail"] = True
+    worker.refresh_day_history([strat], "All", False)
+    assert len(calls) == 2
+    assert results[-1] == results[0]
+    assert failures == []
+
+    # 3) another toggle while the backoff window is open -> NO network call
+    worker.refresh_day_history([strat], "All", False)
+    assert len(calls) == 2                     # unchanged — skipped the network
+    assert results[-1] == results[0]
+
+
+def test_worker_day_history_explicit_refresh_bypasses_backoff(qapp, tmp_path, monkeypatch):
+    _patch_stores(tmp_path, monkeypatch)
+    from services import strategy_store as store
+    from screens.live_viewer import _LiveDataWorker
+
+    state = {"fail": True}
+    calls = _fake_range_source(monkeypatch, state)
+    monkeypatch.setattr(store, "load_all", lambda: [_row_filter_strategy()])
+    worker = _LiveDataWorker(reader=None, sector_map={}, name_to_symbol={})
+
+    strat = _row_filter_strategy()
+    worker.refresh_day_history([strat], "All", False)   # fails, arms backoff
+    assert len(calls) == 1
+    worker.refresh_day_history([strat], "All", False)   # in backoff -> skipped
+    assert len(calls) == 1
+    worker.refresh_day_history([strat], "All", True)    # "↻ N-Day Data" -> tries anyway
+    assert len(calls) == 2
+
+
+def test_worker_day_history_first_failure_with_no_last_good_reports_failure(qapp, tmp_path, monkeypatch):
+    _patch_stores(tmp_path, monkeypatch)
+    from screens.live_viewer import _LiveDataWorker
+
+    _fake_range_source(monkeypatch, {"fail": True})
+    worker = _LiveDataWorker(reader=None, sector_map={}, name_to_symbol={})
+    failures = []
+    worker.day_history_failed.connect(lambda m, s: failures.append(m))
+
+    worker.refresh_day_history([_row_filter_strategy()], "All", False)
+
+    assert len(failures) == 1
+    assert "N-day column refresh failed" in failures[0]
+
+
 def test_worker_refresh_day_history_warms_alert_window_cache(qapp, tmp_path, monkeypatch):
     """Issue #31: _run_strategy_alert_checks' should_run_now() only ever
     PEEKS alert_schedule's window cache (never a network call — it runs on

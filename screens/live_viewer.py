@@ -202,11 +202,23 @@ class _LiveDataWorker(QObject):
         self._or_skip_ticks  = 0     # back-off countdown after a failed OR fetch
         self._or_fail_streak = 0
         self._started        = False
+        # N-Day / day-history refresh resilience — see refresh_day_history.
+        self._dh_last_good: dict | None = None
+        self._dh_fail_streak = 0
+        self._dh_skip_until  = 0.0    # monotonic deadline; serve last-good until then
 
     # Best-effort daily data — don't let a slow/unreachable server hold the
     # worker thread (and thus do_read) for the client's full default HTTP
     # timeout on every _or_timer tick.
     _OR_TIMEOUT_S = 4
+
+    # N-Day column (compute_day_history) HTTP timeout: generous on the first
+    # fetch of the session (a full stock-universe x up-to-90-day payload the
+    # server may still be generating — issue #22), short once we've had one
+    # success, so a backend that goes slow mid-session costs one brief stall
+    # per user action instead of a full 60s one (issue #40).
+    _DH_COLD_TIMEOUT_S = 60
+    _DH_WARM_TIMEOUT_S = 15
 
     def refresh_opening_range(self) -> None:
         """Pull today's Opening Range High/Low snapshot from the server.
@@ -324,6 +336,18 @@ class _LiveDataWorker(QObject):
         not to what's returned, so a strategy outside the current category
         filter keeps its real active flag instead of being reported back as
         inactive.
+
+        This runs on the same worker thread as do_read, so a slow
+        compute_day_history fetch stalls live updates for its whole
+        duration. Two guards keep that bounded (issue #40 — LMV "not
+        responding" for minutes on a 3-strategy N-Day apply): compute_day_
+        history now makes a single get_range call regardless of how many
+        distinct windows the active strategies reference, and this method
+        drops to a short HTTP timeout once it's had one success, plus an
+        exponential backoff that serves the last good result (or, before
+        any success, a quick failure) with zero network calls while a
+        recent failure's window is open. The explicit "↻ N-Day Data" button
+        (reload_from_store=True) always bypasses that backoff.
         """
         from services import strategy_store
         from services.strategy_alerts import alert_schedule, config_store as alerts_config_store
@@ -367,11 +391,50 @@ class _LiveDataWorker(QObject):
             if not requests:
                 self.day_history_result.emit({}, merged)
                 return
-            try:
-                day_history = compute_day_history(requests, lmv_snapshot_api.get_range)
-            except (ApiError, NetworkError) as exc:
-                self.day_history_failed.emit(f"N-day column refresh failed: {exc}"[:200], merged)
+
+            # Backoff after a failed fetch: a strategy toggle / picker apply
+            # fires this once PER strategy changed, and initial load fires it
+            # too — with a slow/unreachable backend each would otherwise stall
+            # this worker thread (and thus every live do_read tick) for the
+            # HTTP timeout, so LMV goes "not responding" for minutes on a
+            # 3-strategy apply (issue #40). While a recent failure's backoff
+            # window is open, skip the network entirely: serve the last good
+            # day_history if we have one, otherwise just re-report the
+            # failure. The explicit "↻ N-Day Data" button
+            # (reload_from_store=True) always bypasses this — a user asking
+            # for a refresh outright should get a real attempt.
+            now = time.monotonic()
+            if not reload_from_store and now < self._dh_skip_until:
+                if self._dh_last_good is not None:
+                    self.day_history_result.emit(self._dh_last_good, merged)
+                else:
+                    self.day_history_failed.emit(
+                        "N-day column refresh failed: server unreachable, retrying shortly",
+                        merged)
                 return
+
+            warm = self._dh_last_good is not None
+            timeout = self._DH_WARM_TIMEOUT_S if warm else self._DH_COLD_TIMEOUT_S
+            try:
+                day_history = compute_day_history(
+                    requests,
+                    lambda days: lmv_snapshot_api.get_range(days, timeout=timeout),
+                )
+            except (ApiError, NetworkError) as exc:
+                self._dh_fail_streak += 1
+                self._dh_skip_until = now + min(2 ** self._dh_fail_streak, 60)
+                if self._dh_last_good is not None:
+                    # Keep the columns populated with the last good values
+                    # rather than blanking them — same "stale beats empty"
+                    # rule the ExternalImport DB path uses.
+                    self.day_history_result.emit(self._dh_last_good, merged)
+                else:
+                    self.day_history_failed.emit(
+                        f"N-day column refresh failed: {exc}"[:200], merged)
+                return
+            self._dh_fail_streak = 0
+            self._dh_skip_until = 0.0
+            self._dh_last_good = day_history
             self.day_history_result.emit(day_history, merged)
         except Exception as exc:
             # Never let an unexpected error here kill the worker thread —

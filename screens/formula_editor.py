@@ -1781,7 +1781,12 @@ class ExpressionEditorDialog(QDialog):
                                 self_value=self._self_value,
                                 lmv_headers=self._real_lmv_headers,
                                 symbol_col=self._row_symbol_col,
-                                variable_store=self._variable_store)
+                                variable_store=self._variable_store,
+                                # A fmt-rule condition shouldn't be blocked just
+                                # because THIS can't be computed in this editor
+                                # (historic/window value, or an empty cell in the
+                                # sample scrip) — issue #37.
+                                self_value_optional=(self._mode == "condition"))
         if ok:
             self._compiled_tokens = tokens
             self._compiled_ok = True

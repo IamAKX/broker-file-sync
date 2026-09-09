@@ -255,26 +255,35 @@ def test_compute_day_history_returns_per_symbol_aggregates():
     assert result[("High", 20)]["INFY"]["Max"] == 110.0
 
 
-def test_compute_day_history_fetches_once_per_distinct_days_value():
-    """Two requests sharing the same N should share one range_fetcher call
-    (and one compute_stats pass) — not one fetch per request."""
+def test_compute_day_history_fetches_once_for_the_largest_window():
+    """Every window is sliced client-side from ONE range_fetcher call sized
+    to the largest window — get_range(N) is just the N most recent days, so
+    the last W of a larger fetch == get_range(W). A fetch per distinct
+    window used to stall the LMV worker thread once per window on a slow
+    backend (issue #40)."""
     calls = []
 
     def fetcher(days):
         calls.append(days)
-        return {"days": [_day("2026-01-05", [_stock("INFY", {"High": 100.0, "Low": 90.0})])]}
+        return {"days": [   # oldest first, mirroring get_range
+            _day("2026-01-01", [_stock("INFY", {"High": 10.0, "Low": 1.0})]),
+            _day("2026-01-02", [_stock("INFY", {"High": 20.0, "Low": 2.0})]),
+            _day("2026-01-03", [_stock("INFY", {"High": 30.0, "Low": 3.0})]),
+            _day("2026-01-04", [_stock("INFY", {"High": 40.0, "Low": 4.0})]),
+            _day("2026-01-05", [_stock("INFY", {"High": 50.0, "Low": 5.0})]),
+        ]}
 
     requests = [
-        ("High", 20, [tok_col("High")]),
-        ("Low", 20, [tok_col("Low")]),
         ("High", 5, [tok_col("High")]),
+        ("Low", 5, [tok_col("Low")]),
+        ("High", 2, [tok_col("High")]),
     ]
     result = compute_day_history(requests, fetcher)
 
-    assert sorted(calls) == [5, 20]
-    assert result[("High", 20)]["INFY"]["Average"] == 100.0
-    assert result[("Low", 20)]["INFY"]["Average"] == 90.0
-    assert result[("High", 5)]["INFY"]["Average"] == 100.0
+    assert calls == [5]                                     # one fetch, largest window
+    assert result[("High", 5)]["INFY"]["Average"] == 30.0   # (10+20+30+40+50)/5
+    assert result[("Low", 5)]["INFY"]["Average"] == 3.0
+    assert result[("High", 2)]["INFY"]["Average"] == 45.0   # last 2 days only: 40, 50
 
 
 def test_compute_day_history_resolves_custom_formula_source():
@@ -354,23 +363,26 @@ def test_compute_day_history_groups_int_and_date_windows_separately():
     """A request list mixing an int window (_DAYS/VALUE_DAYS_AGO) and a
     (date, date) window (VALUE_ON_DATE) for the SAME column must resolve to
     two distinct cache entries, not collide."""
-    calls = []
+    from datetime import date, timedelta
 
-    def fetcher(days):
-        calls.append(days)
-        if days == 3:
-            return {"days": [_day("2026-01-05", [_stock("INFY", {"High": 50.0})])]}
-        return {"days": [_day("2026-07-15", [_stock("INFY", {"High": 999.0})])]}
-
-    window = ("2026-07-15", "2026-07-15")
+    days = [
+        _day((date.today() - timedelta(days=4 - i)).isoformat(),
+             [_stock("INFY", {"High": float((i + 1) * 10)})])
+        for i in range(5)
+    ]
+    target = days[2]["trade_date"]          # the middle day, High == 30
+    window = (target, target)
     requests = [
         ("High", 3, [tok_col("High")]),
         ("High", window, [tok_col("High")]),
     ]
-    result = compute_day_history(requests, fetcher)
+    result = compute_day_history(requests, lambda _days: {"days": days})
 
-    assert result[("High", 3)]["INFY"]["First"] == 50.0
-    assert result[("High", window)]["INFY"]["First"] == 999.0
+    # int window 3 -> the last 3 days (High 30, 40, 50)
+    assert result[("High", 3)]["INFY"]["Max"] == 50.0
+    # date window -> only the middle day, so a distinct entry that does NOT
+    # collide with the int one
+    assert result[("High", window)]["INFY"]["Max"] == 30.0
 
 
 # ── FormulaStatsScreen ───────────────────────────────────────────────────────

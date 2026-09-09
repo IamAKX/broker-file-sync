@@ -1054,28 +1054,54 @@ class ColumnEditorDialog(QDialog):
             self._day_history = {**self._day_history, **fetched}
         on_ready()
 
+    def _resolve_self_value(self):
+        """The column's own Value-formula result, for resolving THIS in a
+        fmt-rule condition's compile test.
+
+        Tries the compile-test row (self._lmv_first_row) first, then a small
+        slice of other sheet rows, and returns the first non-None result. A
+        column formula legitimately evaluates to None for *some* scrips (an
+        empty cell in that row's data) while working fine for the rest of
+        the sheet — evaluating THIS against only the one picked row then
+        made compile_check report "THIS has no value to test against" and
+        disabled Save, blocking conditional formatting for the whole
+        strategy for no real reason (issue #37: "this happens with certain
+        strategies out of nowhere"). self._day_history is threaded through
+        so a formula using a _DAYS/VALUE_DAYS_AGO/etc function (directly or
+        via a sibling column) resolves too — same reason
+        _combined_headers_and_values passes it.
+
+        Only the first _SELF_VALUE_SCAN_ROWS rows are tried: this runs on
+        the GUI thread when "Edit Condition…" is clicked, and a full
+        ~200-row scan of a formula that resolves to None everywhere (a
+        historic/window field this editor doesn't fetch) put the cursor in
+        a visible "loading" spin for a couple of seconds. When none of them
+        resolve, returns None — compile_check's self_value_optional path
+        then compiles the condition against a placeholder anyway, so
+        nothing is blocked.
+        """
+        from services.strategy_engine import evaluate
+        formula = self._col.get("formula", [])
+        if not formula:
+            return None
+        rows = [self._lmv_first_row, *self._all_lmv_data][:self._SELF_VALUE_SCAN_ROWS]
+        for row in rows:
+            val = evaluate(formula, {**row, **self._extra_row_values},
+                           self._all_lmv_data, day_history=self._day_history)
+            if val is not None:
+                return val
+        return None
+
+    _SELF_VALUE_SCAN_ROWS = 30
+
     def _open_condition_editor_now(self, idx: int, preview_label: QLabel):
         from screens.formula_editor import ExpressionEditorDialog
-        from services.strategy_engine import evaluate
         from PySide6.QtWidgets import QDialog as _QD
         rule = self._col["fmt_rules"][idx]
-        # THIS in a condition refers to this column's own computed value.
-        # Evaluate the column's value formula on the first row so the compile
-        # test can resolve THIS. day_history is required here (unlike
-        # compile_check's own "1.0" placeholder for a bare formula test —
-        # see ExpressionEditorDialog._compile_and_test) since this is a
-        # REAL evaluate() call: without it, any formula using a _DAYS/
-        # VALUE_DAYS_AGO/etc function anywhere (directly, or via a sibling
-        # column it references) always resolves to None regardless of
-        # whether _fetch_own_day_history's background fetch succeeded,
-        # reported as "THIS has no value to test against" no matter how
-        # correct the formula actually is. Same self._day_history
-        # _combined_headers_and_values already threads through correctly
-        # for sibling-column values — this was the one call site that
-        # didn't.
-        self_value = evaluate(self._col.get("formula", []),
-                              self._lmv_first_row, self._all_lmv_data,
-                              day_history=self._day_history)
+        # THIS in a condition refers to this column's own computed value —
+        # resolved against whichever sheet row actually produces one (see
+        # _resolve_self_value).
+        self_value = self._resolve_self_value()
         dlg = ExpressionEditorDialog(
             tokens=list(rule.get("condition", [])),
             lmv_headers=self._lmv,

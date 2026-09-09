@@ -318,6 +318,48 @@ def fetch_range_response(range_fetcher, window) -> dict:
     return range_fetcher(window)
 
 
+def _window_day_count(window) -> int:
+    """Largest number of most-recent trade dates *window* could need — a
+    plain int is itself; a (date_from, date_to) tuple needs back through
+    date_from (same bound fetch_range_response uses)."""
+    if isinstance(window, tuple):
+        return _days_needed_for_date(date.fromisoformat(window[0]))
+    return int(window)
+
+
+def _slice_window(full_response: dict, window) -> dict:
+    """Carve one *window*'s {"days": [...]} out of a single larger
+    get_range response. ``days`` is chronological ascending (oldest first —
+    see compute_stats), so an int window is just the last N entries and a
+    tuple window is the date-filtered subset — identical to what a
+    dedicated fetch_range_response(range_fetcher, window) call would return,
+    without the extra network round trip."""
+    all_days = full_response.get("days", [])
+    if isinstance(window, tuple):
+        date_from_str, date_to_str = window
+        days = [
+            d for d in all_days
+            if date_from_str <= d.get("trade_date", "") <= date_to_str
+        ]
+    else:
+        n = int(window)
+        days = all_days[-n:] if n > 0 else []
+    return {**full_response, "days": days}
+
+
+def _fetch_windows_single_pass(range_fetcher, windows) -> dict:
+    """Resolve every distinct *window* with ONE range_fetcher call, sized to
+    the largest window, then sliced per window (see _slice_window). See
+    compute_day_history's docstring for why a fetch-per-window is a
+    live-update-freezing liability on the LMV worker thread."""
+    windows = list(windows)
+    if not windows:
+        return {}
+    max_days = max(_window_day_count(w) for w in windows)
+    full_response = range_fetcher(max_days) if max_days > 0 else {"days": []}
+    return {w: _slice_window(full_response, w) for w in windows}
+
+
 def compute_day_history(requests: list, range_fetcher) -> dict:
     """Resolve every (col_name, window, formula_tokens) request — as built
     by services.strategy_engine.collect_day_requests — into the lookup
@@ -332,17 +374,25 @@ def compute_day_history(requests: list, range_fetcher) -> dict:
     which resolves either into the same {"days": [...]} shape.
 
     *range_fetcher* is api/lmv_snapshot_api.get_range (injected so this stays
-    network-free/unit-testable) — called once per DISTINCT ``window`` value
-    across every request, not once per request, since compute_stats can
-    already evaluate several columns against the same day range in one pass.
+    network-free/unit-testable) — called ONCE total, for the single largest
+    day count any window needs, with every window then sliced client-side
+    from that one response (get_range(N) is just the N most recent days, so
+    the last W days of a 60-day fetch == get_range(W)). This used to be one
+    fetch per distinct ``window`` value: with a slow/unreachable backend
+    that stalled the caller's thread (the LMV worker thread, which also
+    drives live updates) for the HTTP timeout once PER window — a 3-strategy
+    set with a _DAYS window plus a 60-day row-filter streak = two back-to-
+    back 60s stalls and LMV "not responding" (issue #40).
     """
     by_window: dict = {}
     for col_name, window, formula in requests:
         by_window.setdefault(window, []).append((col_name, formula))
 
+    range_by_window = _fetch_windows_single_pass(range_fetcher, by_window.keys())
+
     out: dict = {}
     for window, entries in by_window.items():
-        range_response = fetch_range_response(range_fetcher, window)
+        range_response = range_by_window[window]
         columns = [{"name": col_name, "formula": formula} for col_name, formula in entries]
         computed = compute_stats(columns, range_response)
         for col_name, _formula in entries:

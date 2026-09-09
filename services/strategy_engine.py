@@ -1502,7 +1502,8 @@ def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
 
 def compile_check(tokens: list, row_data: dict, all_data: list,
                   self_value=None, lmv_headers: list | None = None,
-                  symbol_col: str = SYMBOL_COLUMN, variable_store=None) -> tuple:
+                  symbol_col: str = SYMBOL_COLUMN, variable_store=None,
+                  self_value_optional: bool = False) -> tuple:
     """
     Validate tokens against the actual loaded LMV sheet (never dummy data).
     Returns (True, result_str) on success, (False, error_message) on failure.
@@ -1568,10 +1569,21 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
 
     # 2. A THIS token needs the column's own value to test against.
     uses_self = any(tok.get("type") == "self" for tok in tokens)
+    self_is_placeholder = False
     if uses_self and self_value is None:
-        return False, ("THIS has no value to test against. Define the column's "
-                       "value formula first (and ensure it produces a result "
-                       "on the loaded sheet) before using THIS in a condition.")
+        if not self_value_optional:
+            return False, ("THIS has no value to test against. Define the column's "
+                           "value formula first (and ensure it produces a result "
+                           "on the loaded sheet) before using THIS in a condition.")
+        # self_value_optional: the caller (a fmt-rule condition editor) has a
+        # column value formula but couldn't compute it here — it depends on
+        # historic/window data this editor doesn't fetch, or the picked
+        # sample scrip has an empty cell feeding it. Don't block the
+        # condition over that (issue #37); stand in a numeric placeholder so
+        # the rest of the check still runs, and flag the result as
+        # not-the-real-value below.
+        self_value = 1.0
+        self_is_placeholder = True
 
     # 3. Column-referencing formulas need a loaded sheet to test against.
     referenced = _referenced_columns(tokens)
@@ -1600,7 +1612,7 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     # guards against. Stand in a numeric placeholder for any such field
     # that's still blank; only genuinely-loaded LMV columns are held to a
     # strict, real value from here on.
-    used_placeholder = False
+    used_placeholder = self_is_placeholder
     if lmv_headers is not None:
         substituted = dict(row_data)
         for c in referenced:

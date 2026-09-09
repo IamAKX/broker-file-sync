@@ -1300,6 +1300,43 @@ def test_condition_editor_passes_computed_self_value(qapp, monkeypatch):
     assert captured["self_value"] == 5000.0
 
 
+def test_condition_editor_self_value_falls_back_to_a_row_that_resolves(qapp, monkeypatch):
+    """issue #37: the column's Value formula is None for the picked sample
+    scrip (empty cell) but fine for the rest of the sheet — THIS must resolve
+    from one of those other rows instead of coming back None and blocking
+    conditional formatting for the whole strategy."""
+    from services.strategy_store import new_column, new_fmt_rule
+    from screens.strategy_builder import ColumnEditorDialog
+    from screens import formula_editor
+
+    col = new_column("TestCol")
+    col["formula"] = [{"type": "col", "value": "PWL"},
+                      {"type": "op", "value": "*"},
+                      {"type": "num", "value": "2"}]
+    col["fmt_rules"].append(new_fmt_rule())
+    dlg = ColumnEditorDialog(
+        col, ["PWL"], None,
+        lmv_first_row={"PWL": None, "Scrip Name": "AAA"},      # empty here
+        all_lmv_data=[{"PWL": None, "Scrip Name": "AAA"},
+                      {"PWL": "150", "Scrip Name": "BBB"}],     # resolves here
+    )
+
+    captured = {}
+
+    class _FakeDlg:
+        def __init__(self, *a, **kw):
+            captured["self_value"] = kw.get("self_value")
+        def exec(self):
+            return 0
+        def get_tokens(self):
+            return []
+
+    monkeypatch.setattr(formula_editor, "ExpressionEditorDialog", _FakeDlg)
+    from PySide6.QtWidgets import QLabel
+    dlg._open_condition_editor(0, QLabel())
+    assert captured["self_value"] == 300.0   # 150 * 2, from row BBB
+
+
 def test_condition_editor_self_value_resolves_days_functions(qapp, monkeypatch):
     """Regression: a column whose Value formula uses a _DAYS/VALUE_DAYS_AGO
     function (e.g. AVG_DAYS([CLOSE], 20) > 100) always reported "THIS has

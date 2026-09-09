@@ -200,6 +200,21 @@ def test_lmv_snapshot_range_uses_a_longer_timeout_than_the_default(monkeypatch):
     assert captured["timeout"] > 15
 
 
+def test_lmv_snapshot_range_accepts_a_timeout_override(monkeypatch):
+    """LMV's N-Day refresh passes a short timeout once it's had a warm
+    response (issue #40) — get_range must forward it, not choke on it."""
+    from api.client import api_client
+    from api import lmv_snapshot_api
+
+    captured = {}
+    monkeypatch.setattr(
+        api_client, "get",
+        lambda path, params=None, auth=True, timeout=None: captured.update(timeout=timeout) or {},
+    )
+    lmv_snapshot_api.get_range(30, timeout=15)
+    assert captured["timeout"] == 15
+
+
 def test_build_daily_popup_sorts_dates_descending(qapp):
     from components.formula_stats_panel import build_daily_popup
     daily = [("2026-01-05", 100.0), ("2026-01-07", 120.0), ("2026-01-06", 110.0)]
