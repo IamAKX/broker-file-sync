@@ -1952,6 +1952,15 @@ class VariablesManagerDialog(QDialog):
         root.addLayout(btn_row)
 
         close_row = QHBoxLayout()
+        sync_btn = QPushButton("⟳ Sync")
+        sync_btn.setToolTip(
+            "Re-pull formula variables from the server and clear the "
+            "compiled-formula cache, so a variable created or edited "
+            "elsewhere starts resolving in an open Live Master View "
+            "without reopening its strategy."
+        )
+        sync_btn.clicked.connect(self._sync_from_server)
+        close_row.addWidget(sync_btn)
         close_row.addStretch()
         close_btn = QPushButton("Close")
         close_btn.setStyleSheet(
@@ -1961,6 +1970,33 @@ class VariablesManagerDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         close_row.addWidget(close_btn)
         root.addLayout(close_row)
+
+    def _sync_from_server(self):
+        """"⟳ Sync": force a server refresh of the formula-variable store
+        and drop every cached compiled formula. _refresh_list() already
+        calls load_all() on open, but nothing clears strategy_engine's
+        compile cache — so a formula that referenced a variable the local
+        cache didn't yet have stays compiled with the token dropped until
+        a variable is saved. This does both, no save required."""
+        from services import formula_variable_store as _default_store
+        from services import strategy_engine
+        var_store = self._variable_store or _default_store
+        try:
+            variables = var_store.load_all()
+        except Exception as exc:  # ApiError/NetworkError — surface it, don't crash
+            QMessageBox.warning(
+                self, "Sync failed",
+                f"Could not sync formula variables from the server:\n{exc}",
+            )
+            return
+        strategy_engine.clear_compile_cache()
+        self._refresh_list()
+        QMessageBox.information(
+            self, "Variables synced",
+            f"{len(variables)} formula variable(s) synced from the server. "
+            "An open Live Master View picks up the changes on its next "
+            "refresh.",
+        )
 
     def _refresh_list(self):
         from services import formula_variable_store as _default_store

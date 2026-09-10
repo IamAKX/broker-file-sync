@@ -1187,6 +1187,43 @@ def test_variables_manager_delete_removes_variable(qapp, var_store, monkeypatch)
     assert dlg._list.count() == 0
 
 
+def test_variables_manager_sync_reloads_and_clears_compile_cache(qapp, var_store, monkeypatch):
+    """"⟳ Sync" (Data > Manage Variables) must re-pull the store AND drop
+    strategy_engine's compile cache — the second half is what lets an open
+    LMV pick up a variable it didn't have without re-saving each strategy
+    (see app_window._open_manage_variables / strategy_engine._expand_var_tokens)."""
+    from screens.formula_editor import VariablesManagerDialog
+    from services import strategy_engine
+    from PySide6.QtWidgets import QMessageBox
+
+    var_store.save_variable(var_store.new_variable("RSC"))
+    dlg = VariablesManagerDialog([], {})
+
+    cleared = []
+    monkeypatch.setattr(strategy_engine, "clear_compile_cache",
+                        lambda: cleared.append(True))
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+
+    dlg._sync_from_server()
+
+    assert cleared == [True]
+    assert [dlg._list.item(i).text() for i in range(dlg._list.count())] == ["{RSC}"]
+
+
+def test_variables_manager_sync_surfaces_a_server_error(qapp, var_store, monkeypatch):
+    from screens.formula_editor import VariablesManagerDialog
+    from PySide6.QtWidgets import QMessageBox
+
+    dlg = VariablesManagerDialog([], {})
+    monkeypatch.setattr(var_store, "load_all",
+                        lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    warned = {}
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda *a, **k: warned.setdefault("shown", True))
+    dlg._sync_from_server()
+    assert warned.get("shown") is True
+
+
 def test_variables_manager_rename_rejects_duplicate(qapp, var_store, monkeypatch):
     from screens.formula_editor import VariablesManagerDialog
     from PySide6.QtWidgets import QInputDialog, QMessageBox

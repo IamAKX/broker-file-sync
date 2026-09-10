@@ -42,6 +42,18 @@ def _save_raw(data: list):
         json.dump(data, f, indent=2, ensure_ascii=False)
 
 
+def clear_local_cache() -> None:
+    """Deletes formula_variables.json, the local read-cache behind
+    load_all()/get_by_name() — used by File > Clear Cache (see
+    app_window._clear_cache), same as services.strategy_store.
+    clear_local_cache. load_all() always tries the server first regardless
+    of whether this file exists, so removing it only matters for what a
+    stale/corrupted local copy would otherwise serve while offline. A no-op
+    if the file isn't there."""
+    if os.path.exists(_STORE_FILE):
+        os.remove(_STORE_FILE)
+
+
 def load_all() -> list:
     """Tries the server first, refreshing the local cache on success and
     returning that. Falls back to the local cache on NetworkError/ApiError

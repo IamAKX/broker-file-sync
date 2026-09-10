@@ -57,6 +57,7 @@ class TopBar(QWidget):
     export_strategies_requested = Signal()
     import_strategies_requested = Signal()
     manage_categories_requested = Signal()
+    manage_variables_requested = Signal()
     clear_cache_requested = Signal()
 
     def __init__(self, theme: ThemeManager, parent=None):
@@ -95,6 +96,8 @@ class TopBar(QWidget):
                 ("LMV Upload",      lambda: self.navigate.emit("lmv_upload")),
                 ("High/Low",        lambda: self.navigate.emit("jobs")),
                 ("Formula Stats",   lambda: self.navigate.emit("formula_stats")),
+                ("---",             None),
+                ("Manage Variables…", lambda: self.manage_variables_requested.emit()),
             ]),
             ("View", [
                 ("Full Screen",  lambda: self.fullscreen_requested.emit()),

@@ -158,3 +158,55 @@ def test_close_event_closes_child_windows_when_really_quitting(controller):
     live_viewer.close.assert_called_once()
     historic_viewer_1.close.assert_called_once()
     historic_viewer_2.close.assert_called_once()
+
+
+def test_data_menu_manage_variables_opens_dialog(controller, monkeypatch):
+    """Data > Manage Variables… fires the topbar signal, which MainWindow
+    routes to a VariablesManagerDialog (see app_window._open_manage_variables /
+    the formula-variable sync bug it addresses)."""
+    from app_window import MainWindow
+    import screens.formula_editor as fe
+
+    opened = []
+
+    class _FakeDlg:
+        def __init__(self, *a, **k):
+            opened.append((a, k))
+
+        def exec(self):
+            return 0
+
+    monkeypatch.setattr(fe, "VariablesManagerDialog", _FakeDlg)
+
+    w = MainWindow(controller)
+    data_menu = w._topbar._menu_buttons["Data"].menu()
+    action = next(a for a in data_menu.actions() if a.text() == "Manage Variables…")
+    action.trigger()
+
+    assert len(opened) == 1
+
+
+def test_clear_cache_also_clears_formula_variables_and_compile_cache(controller, monkeypatch):
+    """File > Clear Cache must drop the formula-variable local cache and
+    strategy_engine's compile cache too — otherwise a stale "{Name}"
+    expansion survives the "re-fetch everything" the user just asked for
+    (see app_window._clear_cache)."""
+    from app_window import MainWindow
+    from PySide6.QtWidgets import QMessageBox
+    from services import formula_variable_store, strategy_engine, config_store, strategy_store
+
+    calls = []
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.StandardButton.Yes)
+    monkeypatch.setattr(config_store, "clear_local_cache", lambda: calls.append("config"))
+    monkeypatch.setattr(strategy_store, "clear_local_cache", lambda: calls.append("strategy"))
+    monkeypatch.setattr(formula_variable_store, "clear_local_cache",
+                        lambda: calls.append("variables"))
+    monkeypatch.setattr(strategy_engine, "clear_compile_cache",
+                        lambda: calls.append("compile"))
+
+    w = MainWindow(controller)
+    w._clear_cache()
+
+    assert "variables" in calls
+    assert "compile" in calls

@@ -32,6 +32,7 @@ class MainWindow(QMainWindow):
         self._topbar.export_strategies_requested.connect(self._export_all_strategies)
         self._topbar.import_strategies_requested.connect(self._import_all_strategies)
         self._topbar.manage_categories_requested.connect(self._open_manage_categories)
+        self._topbar.manage_variables_requested.connect(self._open_manage_variables)
         self._topbar.clear_cache_requested.connect(self._clear_cache)
         root.addWidget(self._topbar)
 
@@ -304,12 +305,54 @@ class MainWindow(QMainWindow):
         if strategy_builder is not None:
             strategy_builder.reload_strategies()
 
+    def _open_manage_variables(self):
+        """Data > Manage Variables: the same VariablesManagerDialog the
+        Strategy Builder "Variables" button opens, but reachable without
+        going into Strategy Builder first. Its "⟳ Sync" button re-pulls
+        formula variables from the server AND clears the compiled-formula
+        cache, so a variable created/edited elsewhere starts resolving in
+        an open Live Master View without needing a builder round trip (a
+        strategy formula that references a not-yet-synced "{Name}" variable
+        otherwise silently drops the token — see services.strategy_engine.
+        _expand_var_tokens).
+
+        Column catalogue for any formula edited from here: the loaded LMV's
+        real columns when a Strategy Builder screen already has them, else
+        just the Formula Builder / Inception field codes — same fallback
+        Strategy Builder itself shows before an LMV sheet is loaded.
+        """
+        from screens.formula_editor import VariablesManagerDialog
+        from services.formula_tokens import all_field_codes
+        from services.lmv_inception_fields import FIELD_CODES as _inception_codes
+
+        headers = list(all_field_codes())
+        headers += [c for c in _inception_codes if c not in headers]
+        first_row: dict = {}
+        all_data: list = []
+        sb = self._screens.get("strategy_builder")
+        if sb is not None and getattr(sb, "_lmv_headers", None):
+            headers = list(sb._lmv_headers) + [
+                c for c in headers if c not in sb._lmv_headers
+            ]
+            first_row = getattr(sb, "_lmv_first_row", {}) or {}
+            all_data = getattr(sb, "_all_lmv_data", []) or []
+
+        dlg = VariablesManagerDialog(
+            headers, first_row, all_data,
+            theme=self._controller.theme, parent=self,
+        )
+        dlg.exec()
+
     def _clear_cache(self):
         """File > Clear Cache: deletes the local read-cache files that
         mirror server data (services.config_store's config_data.json —
         Formula Builder formulas, Config Editor tabs, highlight colors,
         theme; services.strategy_store's strategies.json — Strategy
-        Builder strategies), then re-pulls everything fresh into every
+        Builder strategies; services.formula_variable_store's
+        formula_variables.json — reusable {Name} formula variables), drops
+        strategy_engine's compiled-formula cache (which a "{Name}" edit
+        can't invalidate on its own — see strategy_engine.
+        clear_compile_cache), then re-pulls everything fresh into every
         currently open screen — the same reload reload_per_user_data() does
         on login, plus an open Live Master View window, whose own strategy
         list is a separate in-memory snapshot with the exact same
@@ -334,22 +377,28 @@ class MainWindow(QMainWindow):
 
         reply = QMessageBox.question(
             self, "Clear Cache",
-            "This clears locally cached Strategy Builder and Formula "
-            "Builder/Config data, then re-fetches everything fresh from "
-            "the server. Your login session and notification alert "
-            "history are not affected. Continue?",
+            "This clears locally cached Strategy Builder, Formula "
+            "Builder/Config and formula-variable data, then re-fetches "
+            "everything fresh from the server. Your login session and "
+            "notification alert history are not affected. Continue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        from services import config_store, strategy_store
+        from services import config_store, strategy_store, formula_variable_store, strategy_engine
         try:
             config_store.clear_local_cache()
             strategy_store.clear_local_cache()
+            formula_variable_store.clear_local_cache()
         except OSError as exc:
             QMessageBox.warning(self, "Clear Cache", f"Could not remove a cache file:\n\n{exc}")
             return
+
+        # A cached compiled formula keeps its pre-edit "{Name}" expansion
+        # until this is dropped — the same reason formula_variable_store's
+        # own save/delete calls it (see strategy_engine.clear_compile_cache).
+        strategy_engine.clear_compile_cache()
 
         self.reload_per_user_data()
 

@@ -69,6 +69,22 @@ def test_delete_variable(var_store):
     assert var_store.load_all() == []
 
 
+def test_clear_local_cache_removes_file(var_store):
+    import os
+    v = var_store.new_variable("A")
+    var_store.save_variable(v)
+    assert os.path.exists(var_store._STORE_FILE)
+    var_store.clear_local_cache()
+    assert not os.path.exists(var_store._STORE_FILE)
+    # No file + stubbed empty server (see conftest) -> empty, no crash.
+    assert var_store._load_raw() == []
+
+
+def test_clear_local_cache_is_a_noop_when_absent(var_store):
+    var_store.clear_local_cache()  # must not raise
+    var_store.clear_local_cache()
+
+
 # ── Engine expansion (services.strategy_engine._expand_var_tokens) ──────────
 
 def test_evaluate_resolves_simple_variable(var_store):
