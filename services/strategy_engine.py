@@ -1478,20 +1478,33 @@ def get_row_fmt_colors(strat_col_defs: list, row: list, base_col_count: int,
     inception_formula_variable_store (see issue #21).
 
     A fmt rule's condition is always evaluated against its OWNING strategy
-    column's own computed value (THIS) — only WHERE the resulting color
-    paints changes: a rule's "target_column" (see services.strategy_store)
-    is the LMV column the user picked in Strategy Builder, defaulting to the
-    owning strategy column's own cell when none was picked. When two
-    matching rules (from different strategy columns) target the same column
-    for this row, the earlier one in strat_col_defs order wins — same
-    "first match wins" spirit get_cell_color already uses per-column.
+    column's own computed value (THIS), looked up in *row_dict* by the
+    column's name — only WHERE the resulting color paints changes: a rule's
+    "target_column" (see services.strategy_store) is the LMV column the user
+    picked in Strategy Builder, defaulting to the owning strategy column's
+    own cell when none was picked. When two matching rules (from different
+    strategy columns) target the same column for this row, the earlier one
+    in strat_col_defs order wins — same "first match wins" spirit
+    get_cell_color already uses per-column.
+
+    ``row`` and ``base_col_count`` are accepted for backwards compatibility
+    but no longer used (THIS is resolved by name, not by position — see the
+    inline comment / issue #41).
     """
     colors: dict = {}
-    for strat_idx, col_def in enumerate(strat_col_defs):
-        idx = base_col_count + strat_idx
-        if idx >= len(row):
-            continue
-        rule = _match_fmt_rule(col_def, row[idx], row_dict, all_dicts,
+    for col_def in strat_col_defs:
+        # THIS = this strategy column's OWN computed value. Read it by NAME
+        # from row_dict (which callers build as dict(zip(disp_headers, row)))
+        # — NOT by the position base_col_count + strat_idx. That positional
+        # form silently points at the wrong cell as soon as an earlier
+        # row-filtered strategy has inserted its "Days True"/"Since" streak
+        # columns into the row: with two filtered strategies each carrying
+        # one conditional-format rule, the 2nd strategy's rule was matched
+        # against the 1st strategy's streak-count value and so never fired
+        # (issue #41). *row* / *base_col_count* stay in the signature for
+        # backwards compatibility but are no longer read.
+        value = row_dict.get(col_def.get("name"))
+        rule = _match_fmt_rule(col_def, value, row_dict, all_dicts,
                                agg_cache, sym_index, day_history, variable_store)
         if rule is None:
             continue
