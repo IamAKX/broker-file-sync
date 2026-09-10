@@ -2165,10 +2165,18 @@ class StrategyEditor(QWidget):
         filter_info.setStyleSheet(f"color:{txts};")
         self._filter_edit_btn = _btn("Edit Filter…", outlined=True, theme=t, small=True)
         self._filter_edit_btn.clicked.connect(self._open_filter_editor)
+        # Clearing a filter used to mean opening the editor and deleting every
+        # token by hand — this is the one-click "include all rows" the
+        # "(leave blank …)" hint promises. Staged like an edit: not persisted
+        # until the strategy is saved.
+        self._filter_clear_btn = _btn("Clear", danger=True, theme=t, small=True)
+        self._filter_clear_btn.clicked.connect(self._clear_filter)
         filter_hdr.addWidget(filter_title)
         filter_hdr.addSpacing(8)
         filter_hdr.addWidget(filter_info)
         filter_hdr.addStretch()
+        filter_hdr.addWidget(self._filter_clear_btn)
+        filter_hdr.addSpacing(6)
         filter_hdr.addWidget(self._filter_edit_btn)
         root.addLayout(filter_hdr)
 
@@ -2181,6 +2189,7 @@ class StrategyEditor(QWidget):
         )
         self._filter_preview.setWordWrap(True)
         root.addWidget(self._filter_preview)
+        self._refresh_filter_preview()
 
         root.addWidget(_sep(t))
 
@@ -2465,9 +2474,23 @@ class StrategyEditor(QWidget):
         )
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self._strategy["row_filter"] = dlg.get_tokens()
-            self._filter_preview.setText(
-                _tokens_to_display(self._strategy["row_filter"])
-            )
+            self._refresh_filter_preview()
+
+    def _clear_filter(self):
+        """Row Filter > Clear: back to "include all rows". Staged on the
+        in-memory strategy copy exactly like _open_filter_editor — takes
+        effect when the strategy is saved."""
+        if not self._strategy.get("row_filter"):
+            return
+        self._strategy["row_filter"] = []
+        self._refresh_filter_preview()
+
+    def _refresh_filter_preview(self):
+        tokens = self._strategy.get("row_filter", [])
+        self._filter_preview.setText(
+            _tokens_to_display(tokens) if tokens else "(no filter — all rows shown)"
+        )
+        self._filter_clear_btn.setEnabled(bool(tokens))
 
     def _refresh_category_items(self, select: str | None = None):
         """(Re)populates the combo from services.strategy_store.all_categories(),

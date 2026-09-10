@@ -1207,6 +1207,31 @@ def test_column_editor_no_inline_formula_builder(qapp):
     assert dlg._formula_preview is not None  # preview label exists instead
 
 
+def test_row_filter_clear_button_resets_to_all_rows(qapp):
+    """Row Filter > Clear stages an empty filter (include every row) without
+    opening the token editor — see StrategyEditor._clear_filter."""
+    from screens.strategy_builder import StrategyEditor
+    s = {
+        "id": "x", "name": "T", "category": "Daily",
+        "row_filter": [
+            {"type": "col", "value": "Current"},
+            {"type": "op", "value": ">"},
+            {"type": "col", "value": "52WH"},
+        ],
+        "columns": [{"name": "A", "formula": [{"type": "col", "value": "Current"}], "fmt_rules": []}],
+    }
+    editor = StrategyEditor(s, ["Current", "52WH"], None)
+    assert editor._filter_clear_btn.isEnabled() is True
+
+    editor._clear_filter()
+
+    assert editor._strategy["row_filter"] == []
+    assert editor._filter_clear_btn.isEnabled() is False
+    assert "all rows" in editor._filter_preview.text()
+
+    editor._clear_filter()  # idempotent, no crash
+
+
 def test_strategy_editor_has_lmv_data_attrs(qapp):
     from services.strategy_store import new_strategy
     from screens.strategy_builder import StrategyEditor
