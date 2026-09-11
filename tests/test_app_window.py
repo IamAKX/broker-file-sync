@@ -216,3 +216,165 @@ def test_clear_cache_also_clears_formula_variables_and_compile_cache(controller,
 
     assert "variables" in calls
     assert "compile" in calls
+
+
+# ── Export/Import All Data — superset of the old Export/Import All ─────────
+# Strategies: LMV + Inception strategies, both apps' formula variables, and
+# every settings key, all in one bundle (see app_window._export_all_data /
+# _import_all_data).
+
+def _mock_all_message_boxes(monkeypatch):
+    """Every _export_all_data/_import_all_data path ends in a real
+    QMessageBox.information/warning — unmocked, that's a genuine modal that
+    renders on screen and blocks on .exec() (see
+    test_clear_cache_also_clears_formula_variables_and_compile_cache's own
+    note on exactly this happening once already). Mock all three so a test
+    that doesn't care about the dialog text can't accidentally hang."""
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a, **k: None)
+    monkeypatch.setattr(QMessageBox, "question",
+                        lambda *a, **k: QMessageBox.StandardButton.Yes)
+
+
+def test_export_all_data_bundles_every_section(controller, monkeypatch, tmp_path):
+    from app_window import MainWindow
+    from PySide6.QtWidgets import QFileDialog
+    from services import config_store, formula_variable_store, inception_formula_variable_store, inception_strategy_store, strategy_store
+
+    _mock_all_message_boxes(monkeypatch)
+    monkeypatch.setattr(strategy_store, "load_all", lambda: [{"id": "1", "name": "S1"}])
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [{"id": "2", "name": "IS1"}])
+    monkeypatch.setattr(formula_variable_store, "load_all", lambda: [{"id": "3", "name": "V1"}])
+    monkeypatch.setattr(inception_formula_variable_store, "load_all", lambda: [{"id": "4", "name": "IV1"}])
+    monkeypatch.setattr(config_store, "export_all_settings", lambda: {"theme": "dark"})
+
+    out_path = str(tmp_path / "export.json")
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *a, **k: (out_path, "")))
+
+    w = MainWindow(controller)
+    w._export_all_data()
+
+    import json
+    with open(out_path) as f:
+        bundle = json.load(f)
+    assert bundle["strategies"] == [{"id": "1", "name": "S1"}]
+    assert bundle["inception_strategies"] == [{"id": "2", "name": "IS1"}]
+    assert bundle["formula_variables"] == [{"id": "3", "name": "V1"}]
+    assert bundle["inception_formula_variables"] == [{"id": "4", "name": "IV1"}]
+    assert bundle["settings"] == {"theme": "dark"}
+
+
+def test_export_all_data_nothing_to_export(controller, monkeypatch):
+    from app_window import MainWindow
+    from services import config_store, formula_variable_store, inception_formula_variable_store, inception_strategy_store, strategy_store
+
+    shown = []
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "information", lambda self_, title, msg: shown.append(msg))
+    monkeypatch.setattr(strategy_store, "load_all", lambda: [])
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [])
+    monkeypatch.setattr(formula_variable_store, "load_all", lambda: [])
+    monkeypatch.setattr(inception_formula_variable_store, "load_all", lambda: [])
+    monkeypatch.setattr(config_store, "export_all_settings", lambda: {})
+
+    w = MainWindow(controller)
+    w._export_all_data()
+
+    assert shown and "Nothing to export" in shown[0]
+
+
+def test_import_all_data_pushes_every_present_section_to_the_server(controller, monkeypatch, tmp_path):
+    from app_window import MainWindow
+    from PySide6.QtWidgets import QFileDialog
+    from services import config_store, formula_variable_store, inception_formula_variable_store, inception_strategy_store, strategy_store
+
+    _mock_all_message_boxes(monkeypatch)
+    calls = {}
+
+    def _fake_import(section, result):
+        def _importer(items):
+            calls[section] = items
+            return result
+        return _importer
+
+    monkeypatch.setattr(strategy_store, "import_all", _fake_import("strategies", (1, 0)))
+    monkeypatch.setattr(inception_strategy_store, "import_all", _fake_import("inception_strategies", (0, 1)))
+    monkeypatch.setattr(formula_variable_store, "import_all", _fake_import("formula_variables", (2, 0)))
+    monkeypatch.setattr(inception_formula_variable_store, "import_all", _fake_import("inception_formula_variables", (0, 2)))
+
+    def _fake_import_settings(settings):
+        calls["settings"] = settings
+        return len(settings)
+
+    monkeypatch.setattr(config_store, "import_all_settings", _fake_import_settings)
+    monkeypatch.setattr(strategy_store, "load_all", lambda: [])
+
+    import json
+    bundle = {
+        "strategies": [{"id": "1", "name": "S1"}],
+        "inception_strategies": [{"id": "2", "name": "IS1"}],
+        "formula_variables": [{"id": "3", "name": "V1"}],
+        "inception_formula_variables": [{"id": "4", "name": "IV1"}],
+        "settings": {"theme": "dark"},
+    }
+    in_path = tmp_path / "import.json"
+    in_path.write_text(json.dumps(bundle))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(in_path), "")))
+
+    w = MainWindow(controller)
+    w._import_all_data()
+
+    assert calls["strategies"] == bundle["strategies"]
+    assert calls["inception_strategies"] == bundle["inception_strategies"]
+    assert calls["formula_variables"] == bundle["formula_variables"]
+    assert calls["inception_formula_variables"] == bundle["inception_formula_variables"]
+    assert calls["settings"] == bundle["settings"]
+
+
+def test_import_all_data_accepts_the_old_bare_list_strategies_only_format(controller, monkeypatch, tmp_path):
+    """Backward compatibility: a file exported by the old "Export All
+    Strategies" feature (a bare JSON list, no wrapping dict) must still
+    import correctly as strategies-only."""
+    from app_window import MainWindow
+    from PySide6.QtWidgets import QFileDialog
+    from services import strategy_store
+
+    _mock_all_message_boxes(monkeypatch)
+    calls = []
+
+    def _fake_import(items):
+        calls.append(items)
+        return (1, 0)
+
+    monkeypatch.setattr(strategy_store, "import_all", _fake_import)
+    monkeypatch.setattr(strategy_store, "load_all", lambda: [])
+
+    import json
+    old_format = [{"id": "1", "name": "S1"}]
+    in_path = tmp_path / "old_export.json"
+    in_path.write_text(json.dumps(old_format))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(in_path), "")))
+
+    w = MainWindow(controller)
+    w._import_all_data()
+
+    assert calls == [old_format]
+
+
+def test_import_all_data_rejects_a_malformed_file(controller, monkeypatch, tmp_path):
+    from app_window import MainWindow
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    warned = {}
+    monkeypatch.setattr(QMessageBox, "warning",
+                        lambda self_, title, msg: warned.setdefault("shown", msg))
+
+    in_path = tmp_path / "bad.json"
+    in_path.write_text('{"strategies": "not a list"}')
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(in_path), "")))
+
+    w = MainWindow(controller)
+    w._import_all_data()
+
+    assert "shown" in warned

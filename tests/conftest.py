@@ -102,6 +102,7 @@ def _isolate_disk_stores(tmp_path, monkeypatch):
 
     monkeypatch.setattr(settings_api, "get_setting", lambda key: {"key": key, "value": None})
     monkeypatch.setattr(settings_api, "put_setting", lambda key, value: {"key": key, "value": value})
+    monkeypatch.setattr(settings_api, "list_settings", lambda: {"settings": []})
 
     monkeypatch.setattr(strategies_api, "list_strategies", lambda: {"strategies": []})
     monkeypatch.setattr(
@@ -123,6 +124,10 @@ def _isolate_disk_stores(tmp_path, monkeypatch):
         lambda variable_id, name, formula: {"id": variable_id, "name": name, "formula": formula},
     )
     monkeypatch.setattr(formula_variables_api, "delete_variable", lambda variable_id: None)
+    monkeypatch.setattr(
+        formula_variables_api, "import_variables",
+        lambda variables: {"overwritten": 0, "added": len(variables)},
+    )
 
     # services/inception_strategy_store.py and services/inception_formula_
     # variable_store.py have the identical "_STORE_FILE local cache,
@@ -146,6 +151,14 @@ def _isolate_disk_stores(tmp_path, monkeypatch):
     monkeypatch.setattr(inception_strategy_store, "_STORE_FILE", str(tmp_path / "inception_strategies.json"))
     monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
     monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
+    monkeypatch.setattr(
+        inception_api, "import_strategies",
+        lambda strategies: {"overwritten": 0, "added": len(strategies)},
+    )
+    monkeypatch.setattr(
+        inception_api, "import_variables",
+        lambda variables: {"overwritten": 0, "added": len(variables)},
+    )
 
     monkeypatch.setattr(auth_api, "get_theme", lambda: {"theme": "light"})
     monkeypatch.setattr(auth_api, "update_theme", lambda theme: {"theme": theme})

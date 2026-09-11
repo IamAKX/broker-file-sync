@@ -80,6 +80,41 @@ def delete_variable(var_id: str):
     _invalidate_formula_cache()
 
 
+def import_all(variables: list) -> tuple:
+    """Merges *variables* into the persisted list by name via the
+    dedicated bulk /inception/formula-variables/import endpoint — same
+    reasoning as services.formula_variable_store.import_all (mirrors it
+    exactly, pointed at Inception's own separate store/endpoint). Added
+    for the combined Export/Import All Data feature in app_window.py.
+
+    Returns (overwritten_count, added_count).
+    """
+    from api import inception_api
+
+    inception_api.import_variables(variables)
+
+    existing = _load_raw()
+    index_by_name = {}
+    for i, v in enumerate(existing):
+        index_by_name.setdefault(v.get("name"), i)
+
+    overwritten = 0
+    added = 0
+    for imp in variables:
+        name = imp.get("name")
+        if name in index_by_name:
+            existing[index_by_name[name]] = imp
+            overwritten += 1
+        else:
+            index_by_name[name] = len(existing)
+            existing.append(imp)
+            added += 1
+
+    _save_raw(existing)
+    _invalidate_formula_cache()
+    return overwritten, added
+
+
 def new_variable(name: str) -> dict:
     return {"id": str(uuid.uuid4()), "name": name, "formula": []}
 

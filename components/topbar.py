@@ -76,8 +76,8 @@ class TopBar(QWidget):
             ("File", [
                 ("Clear Cache",  lambda: self.clear_cache_requested.emit()),
                 ("---",          None),
-                ("Export All Strategies", lambda: self.export_strategies_requested.emit()),
-                ("Import All Strategies", lambda: self.import_strategies_requested.emit()),
+                ("Export All Data…", lambda: self.export_strategies_requested.emit()),
+                ("Import All Data…", lambda: self.import_strategies_requested.emit()),
                 ("---",          None),
                 ("Restart",      lambda: _restart_app()),
                 ("---",          None),

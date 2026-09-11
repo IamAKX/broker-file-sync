@@ -35,6 +35,7 @@ STRATEGIES_IMPORT = "/strategies/import"
 STRATEGY_SIGNALS = "/strategy-signals"
 
 FORMULA_VARIABLES = "/formula-variables"
+FORMULA_VARIABLES_IMPORT = "/formula-variables/import"
 
 SETTINGS = "/settings"
 
@@ -44,6 +45,8 @@ INCEPTION_AVAILABILITY = "/inception/availability"
 INCEPTION_INSTRUMENTS = "/inception/instruments"
 INCEPTION_BARS = "/inception/bars"
 INCEPTION_STRATEGIES = "/inception/strategies"
+INCEPTION_STRATEGIES_IMPORT = "/inception/strategies/import"
 INCEPTION_FORMULA_VARIABLES = "/inception/formula-variables"
+INCEPTION_FORMULA_VARIABLES_IMPORT = "/inception/formula-variables/import"
 INCEPTION_VENDOR_SYNC = "/inception/vendor-sync"
 INCEPTION_ADMIN_SYNC_LMV_METRICS = "/inception/admin/sync-lmv-metrics"

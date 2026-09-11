@@ -197,6 +197,169 @@ def test_formula_variable_save_raises_when_server_write_fails(monkeypatch):
         store.save_variable(v)
 
 
+def test_formula_variable_import_all_merges_by_name_via_bulk_endpoint(monkeypatch):
+    """import_all must go through the dedicated bulk endpoint, not a
+    per-item save_variable loop — see the function's own docstring for why
+    (an imported variable sharing an existing one's NAME but not its id
+    would otherwise create a duplicate row server-side)."""
+    from services import formula_variable_store as store
+    from api import formula_variables_api
+
+    existing = store.new_variable("Threshold")
+    store._save_raw([existing])
+
+    captured = {}
+
+    def _fake_import(variables):
+        captured["variables"] = variables
+        return {"overwritten": 1, "added": 0}
+
+    monkeypatch.setattr(formula_variables_api, "import_variables", _fake_import)
+
+    imported = {"id": "brand-new-id", "name": "Threshold", "formula": [{"type": "num", "value": "2"}]}
+    overwritten, added = store.import_all([imported])
+
+    assert (overwritten, added) == (1, 0)
+    assert captured["variables"] == [imported]
+    # Local cache reflects the merge-by-name (imported data replaces the
+    # old row entirely, same convention as strategy_store.import_all).
+    assert store._load_raw() == [imported]
+
+
+def test_formula_variable_import_all_raises_when_server_import_fails(monkeypatch):
+    from services import formula_variable_store as store
+    from api import formula_variables_api
+
+    def _raise(variables):
+        raise NetworkError("offline")
+
+    monkeypatch.setattr(formula_variables_api, "import_variables", _raise)
+
+    import pytest
+    with pytest.raises(NetworkError):
+        store.import_all([store.new_variable("X")])
+    assert store._load_raw() == []
+
+
+# ── inception_strategy_store.import_all / inception_formula_variable_ ──────
+# store.import_all — same bulk-endpoint-not-a-loop shape as the LMV stores
+# above, added for the combined Export/Import All Data feature (Inception
+# previously had no bulk import for either).
+
+def test_inception_strategy_import_all_merges_by_name_via_bulk_endpoint(monkeypatch):
+    from services import inception_strategy_store as store
+    from api import inception_api
+
+    existing = store.new_strategy("52WH")
+    store._save_raw([existing])
+
+    captured = {}
+
+    def _fake_import(strategies):
+        captured["strategies"] = strategies
+        return {"overwritten": 1, "added": 0}
+
+    monkeypatch.setattr(inception_api, "import_strategies", _fake_import)
+
+    imported = {"id": "brand-new-id", "name": "52WH", "active": True, "category": "Daily",
+                "columns": [{"name": "c1"}], "row_filter": []}
+    overwritten, added = store.import_all([imported])
+
+    assert (overwritten, added) == (1, 0)
+    assert captured["strategies"] == [imported]
+    assert store._load_raw() == [imported]
+
+
+def test_inception_strategy_import_all_raises_when_server_import_fails(monkeypatch):
+    from services import inception_strategy_store as store
+    from api import inception_api
+
+    def _raise(strategies):
+        raise NetworkError("offline")
+
+    monkeypatch.setattr(inception_api, "import_strategies", _raise)
+
+    import pytest
+    with pytest.raises(NetworkError):
+        store.import_all([store.new_strategy("X")])
+    assert store._load_raw() == []
+
+
+def test_inception_formula_variable_import_all_merges_by_name_via_bulk_endpoint(monkeypatch):
+    from services import inception_formula_variable_store as store
+    from api import inception_api
+
+    existing = store.new_variable("Threshold")
+    store._save_raw([existing])
+
+    captured = {}
+
+    def _fake_import(variables):
+        captured["variables"] = variables
+        return {"overwritten": 1, "added": 0}
+
+    monkeypatch.setattr(inception_api, "import_variables", _fake_import)
+
+    imported = {"id": "brand-new-id", "name": "Threshold", "formula": [{"type": "num", "value": "2"}]}
+    overwritten, added = store.import_all([imported])
+
+    assert (overwritten, added) == (1, 0)
+    assert captured["variables"] == [imported]
+    assert store._load_raw() == [imported]
+
+
+# ── config_store.export_all_settings / import_all_settings ─────────────────
+
+def test_export_all_settings_reads_from_the_server_not_the_local_cache(monkeypatch):
+    """Must NOT just return _load_raw()'s local dict — that only ever
+    holds whatever keys a screen has actually load_json()'d this session,
+    not "every setting this user has" (see the function's own docstring)."""
+    from services import config_store
+    from api import settings_api
+
+    config_store._save_raw({"stale_local_only_key": "should not appear"})
+    monkeypatch.setattr(
+        settings_api, "list_settings",
+        lambda: {"settings": [{"key": "theme", "value": "dark"}, {"key": "main_column_order", "value": ["A", "B"]}]},
+    )
+
+    result = config_store.export_all_settings()
+
+    assert result == {"theme": "dark", "main_column_order": ["A", "B"]}
+
+
+def test_import_all_settings_pushes_every_key_to_the_server(monkeypatch):
+    from services import config_store
+    from api import settings_api
+
+    pushed = {}
+
+    def _fake_put(key, value):
+        pushed[key] = value
+        return {"key": key, "value": value}
+
+    monkeypatch.setattr(settings_api, "put_setting", _fake_put)
+
+    count = config_store.import_all_settings({"theme": "dark", "main_column_order": ["A", "B"]})
+
+    assert count == 2
+    assert pushed == {"theme": "dark", "main_column_order": ["A", "B"]}
+
+
+def test_import_all_settings_raises_on_first_failed_key(monkeypatch):
+    from services import config_store
+    from api import settings_api
+
+    def _raise(key, value):
+        raise NetworkError("offline")
+
+    monkeypatch.setattr(settings_api, "put_setting", _raise)
+
+    import pytest
+    with pytest.raises(NetworkError):
+        config_store.import_all_settings({"theme": "dark"})
+
+
 # ── theme: local-only at boot, best-effort push on toggle, explicit sync ───
 
 def test_load_theme_never_touches_the_network(monkeypatch):

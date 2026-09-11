@@ -135,6 +135,49 @@ def delete_variable(var_id: str):
     _invalidate_formula_cache()
 
 
+def import_all(variables: list) -> tuple:
+    """Merges *variables* into the persisted list by name — same
+    merge-by-name/keep-existing-server-id semantics as services.
+    strategy_store.import_all, via the dedicated bulk /formula-variables/
+    import endpoint (never a per-item save_variable loop: that upserts by
+    id, so an imported variable sharing an existing one's NAME but not its
+    id would insert a duplicate row server-side instead of overwriting it
+    — see services.inception_strategy_store.import_all's docstring for
+    the same reasoning). Added for the combined Export/Import All Data
+    feature in app_window.py; LMV formula variables previously had no
+    bulk import at all.
+
+    Raises on failure — an explicit, deliberate user action, so it fails
+    loudly rather than silently importing local-only.
+
+    Returns (overwritten_count, added_count).
+    """
+    from api import formula_variables_api
+
+    formula_variables_api.import_variables(variables)
+
+    existing = _load_raw()
+    index_by_name = {}
+    for i, v in enumerate(existing):
+        index_by_name.setdefault(v.get("name"), i)
+
+    overwritten = 0
+    added = 0
+    for imp in variables:
+        name = imp.get("name")
+        if name in index_by_name:
+            existing[index_by_name[name]] = imp
+            overwritten += 1
+        else:
+            index_by_name[name] = len(existing)
+            existing.append(imp)
+            added += 1
+
+    _save_raw(existing)
+    _invalidate_formula_cache()
+    return overwritten, added
+
+
 def new_variable(name: str) -> dict:
     return {"id": str(uuid.uuid4()), "name": name, "formula": []}
 

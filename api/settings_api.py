@@ -16,3 +16,13 @@ def get_setting(key: str) -> dict:
 
 def put_setting(key: str, value) -> dict:
     return api_client.put(f"{SETTINGS}/{key}", json_body={"value": value})
+
+
+def list_settings() -> dict:
+    """Every settings row this user has, regardless of key — used by
+    File > Export All Data. Unlike get_setting/put_setting (a hot path,
+    read on every client startup/poll), this is a rare, deliberate action,
+    so the client's own local cache (which only ever holds whatever keys a
+    screen has actually loaded this session) isn't a reliable substitute
+    for "every setting this user has" — this hits the server directly."""
+    return api_client.get(SETTINGS)

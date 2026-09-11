@@ -29,8 +29,8 @@ class MainWindow(QMainWindow):
         self._topbar.logout_requested.connect(self._controller.show_login)
         self._topbar.fullscreen_requested.connect(self._toggle_fullscreen)
         self._topbar.check_for_update_requested.connect(self._open_update_dialog)
-        self._topbar.export_strategies_requested.connect(self._export_all_strategies)
-        self._topbar.import_strategies_requested.connect(self._import_all_strategies)
+        self._topbar.export_strategies_requested.connect(self._export_all_data)
+        self._topbar.import_strategies_requested.connect(self._import_all_data)
         self._topbar.manage_categories_requested.connect(self._open_manage_categories)
         self._topbar.manage_variables_requested.connect(self._open_manage_variables)
         self._topbar.clear_cache_requested.connect(self._clear_cache)
@@ -219,18 +219,52 @@ class MainWindow(QMainWindow):
         dlg = UpdateDialog(self._controller, theme=self._controller.theme, parent=self)
         dlg.exec()
 
-    def _export_all_strategies(self):
+    # Section key -> (label, load_all-style getter). Getters take no args;
+    # "settings" is the one non-list section (a flat {key: value} dict) and
+    # is handled separately in both methods below since it doesn't have a
+    # name/overwrite-by-name concept the way every list section does.
+    _EXPORT_SECTIONS = [
+        ("strategies", "LMV strategies"),
+        ("inception_strategies", "HMV/Inception strategies"),
+        ("formula_variables", "LMV formula variables"),
+        ("inception_formula_variables", "Inception formula variables"),
+    ]
+
+    def _export_all_data(self):
+        """File > Export All Data: bundles every piece of a user's own
+        account-level config into one JSON file — LMV + HMV/Inception
+        strategies, both apps' formula variables, and every settings key
+        (Config Editor tabs, highlight colors, both apps' custom
+        categories, Formula Builder fields, notification/trigger config —
+        see services.config_store.export_all_settings). Superset of the
+        old "Export All Strategies" (LMV strategies only); a file this
+        produces is also still readable by that old feature's shape (a
+        bare list) is NOT produced here, but _import_all_data below still
+        reads an old bare-list file from before this change.
+        """
         import json
         from PySide6.QtWidgets import QFileDialog, QMessageBox
-        from services import strategy_store
+        from services import config_store, formula_variable_store, inception_formula_variable_store, inception_strategy_store, strategy_store
 
-        strategies = strategy_store.load_all()
-        if not strategies:
-            QMessageBox.information(self, "Export All Strategies", "No strategies to export.")
+        getters = {
+            "strategies": strategy_store.load_all,
+            "inception_strategies": inception_strategy_store.load_all,
+            "formula_variables": formula_variable_store.load_all,
+            "inception_formula_variables": inception_formula_variable_store.load_all,
+        }
+        try:
+            bundle = {key: getters[key]() for key, _ in self._EXPORT_SECTIONS}
+            bundle["settings"] = config_store.export_all_settings()
+        except Exception as exc:
+            QMessageBox.warning(self, "Export Failed", f"Could not read data to export:\n\n{exc}")
             return
 
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Export All Strategies", "strategies_export.json", "JSON Files (*.json)"
+        if not any(bundle.values()):
+            QMessageBox.information(self, "Export All Data", "Nothing to export.")
+            return
+
+        path, _unused = QFileDialog.getSaveFileName(
+            self, "Export All Data", "data_export.json", "JSON Files (*.json)"
         )
         if not path:
             return
@@ -238,59 +272,117 @@ class MainWindow(QMainWindow):
             path += ".json"
         try:
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(strategies, f, indent=2, ensure_ascii=False)
+                json.dump(bundle, f, indent=2, ensure_ascii=False)
         except Exception as exc:
             QMessageBox.warning(self, "Export Failed", f"Could not export:\n\n{exc}")
             return
+
+        summary = "\n".join(
+            f"  {label}: {len(bundle[key])}" for key, label in self._EXPORT_SECTIONS
+        )
         QMessageBox.information(
-            self, "Export All Strategies",
-            f"Exported {len(strategies)} strategies to:\n{path}"
+            self, "Export All Data",
+            f"Exported to:\n{path}\n\n{summary}\n  Settings: {len(bundle['settings'])} key(s)",
         )
 
-    def _import_all_strategies(self):
+    def _import_all_data(self):
+        """File > Import All Data: the counterpart to _export_all_data
+        above. Reads either the new bundled shape ({"strategies": [...],
+        "inception_strategies": [...], "formula_variables": [...],
+        "inception_formula_variables": [...], "settings": {...}}, any
+        subset of keys) or the OLD "Export All Strategies" shape (a bare
+        list of strategy dicts) for backward compatibility with files
+        exported before this change.
+
+        Every present section is pushed to the server via that store's own
+        import_all/import_all_settings — each of those already syncs to
+        the server first and raises on failure (an explicit, deliberate
+        user action, so it fails loudly rather than silently importing
+        local-only) — so importing always updates the database, not just
+        the local cache.
+        """
         import json
         from PySide6.QtWidgets import QFileDialog, QMessageBox
-        from services import strategy_store
+        from services import config_store, formula_variable_store, inception_formula_variable_store, inception_strategy_store, strategy_store
 
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Import All Strategies", "", "JSON Files (*.json)"
+        path, _unused = QFileDialog.getOpenFileName(
+            self, "Import All Data", "", "JSON Files (*.json)"
         )
         if not path:
             return
 
         try:
             with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, list) or not all(
-                isinstance(s, dict) and "id" in s and "name" in s for s in data
-            ):
-                raise ValueError("File does not contain a valid strategies export.")
+                raw = json.load(f)
+            if isinstance(raw, list):
+                raw = {"strategies": raw}   # old Export All Strategies shape
+            if not isinstance(raw, dict):
+                raise ValueError("File does not contain a valid data export.")
+            for key, _label in self._EXPORT_SECTIONS:
+                section = raw.get(key)
+                if section is None:
+                    continue
+                if not isinstance(section, list) or not all(
+                    isinstance(item, dict) and "id" in item and "name" in item for item in section
+                ):
+                    raise ValueError(f"'{key}' in the file is not a valid list of items.")
+            settings = raw.get("settings")
+            if settings is not None and not isinstance(settings, dict):
+                raise ValueError("'settings' in the file is not a valid key/value object.")
         except Exception as exc:
             QMessageBox.warning(self, "Import Failed", f"Could not import:\n\n{exc}")
             return
 
-        existing_names = {s.get("name") for s in strategy_store.load_all()}
-        imported_names = {s.get("name") for s in data}
-        overwrite_count = len(existing_names & imported_names)
-        new_count = len(data) - overwrite_count
+        present = [(key, label, raw[key]) for key, label in self._EXPORT_SECTIONS if raw.get(key)]
+        settings = raw.get("settings") or {}
+        if not present and not settings:
+            QMessageBox.information(self, "Import All Data", "Nothing to import — the file is empty.")
+            return
+
+        lines = [f"  {label}: {len(items)}" for _key, label, items in present]
+        if settings:
+            lines.append(f"  Settings: {len(settings)} key(s)")
         reply = QMessageBox.question(
-            self, "Import All Strategies",
-            f"{overwrite_count} strategy name(s) from the file match an existing "
-            f"strategy and will be overwritten; {new_count} will be added as new. "
-            f"Every other existing strategy is left untouched. Continue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+            self, "Import All Data",
+            "This will import:\n" + "\n".join(lines) +
+            "\n\nAn item whose name matches an existing one is overwritten; a new "
+            "name is added. Every other existing item is left untouched. This "
+            "updates your account on the server, not just this device. Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
 
-        overwritten, added = strategy_store.import_all(data)
+        importers = {
+            "strategies": strategy_store.import_all,
+            "inception_strategies": inception_strategy_store.import_all,
+            "formula_variables": formula_variable_store.import_all,
+            "inception_formula_variables": inception_formula_variable_store.import_all,
+        }
+        results = []
+        try:
+            for key, label, items in present:
+                overwritten, added = importers[key](items)
+                results.append(f"  {label}: {overwritten} overwritten, {added} added")
+            if settings:
+                count = config_store.import_all_settings(settings)
+                results.append(f"  Settings: {count} key(s) imported")
+        except Exception as exc:
+            done = "\n".join(results) if results else "  (nothing yet)"
+            QMessageBox.warning(
+                self, "Import Failed",
+                f"Stopped after an error:\n\n{exc}\n\nAlready imported before the error:\n{done}",
+            )
+            return
+
         strategy_builder = self._screens.get("strategy_builder")
         if strategy_builder is not None:
             strategy_builder.reload_strategies()
-        QMessageBox.information(
-            self, "Import All Strategies",
-            f"Imported: {overwritten} strategy(ies) overwritten, {added} added.",
-        )
+        formula_builder = self._screens.get("formula_builder")
+        if formula_builder is not None:
+            formula_builder.reload_formulas()
+
+        QMessageBox.information(self, "Import All Data", "Imported:\n" + "\n".join(results))
 
     def _open_manage_categories(self):
         from screens.strategy_builder import ManageCategoriesDialog

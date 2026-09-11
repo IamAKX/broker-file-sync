@@ -7,10 +7,11 @@ instead of /strategies, and its own local cache file — kept fully separate
 from LMV's strategies per the Inception feature's "fully separate" design
 (see broker-sync-api's InceptionStrategy model docstring).
 
-Simplifications vs strategy_store.py: no import_all (Inception has no bulk
-Export/Import All Strategies menu action) and no one-time local-to-server
-migration push in load_all() (Inception is a brand-new store — there's no
-pre-existing local-only install to migrate up).
+Simplification vs strategy_store.py: no one-time local-to-server migration
+push in load_all() (Inception is a brand-new store — there's no
+pre-existing local-only install to migrate up). import_all (below) was
+added once File > Export/Import All Data grew to cover HMV/Inception
+strategies too, not just LMV's.
 """
 
 import json
@@ -198,6 +199,56 @@ def delete_strategy(strategy_id: str):
 
     all_s = [s for s in _load_raw() if s["id"] != strategy_id]
     _save_raw(all_s)
+
+
+def import_all(strategies: list) -> tuple:
+    """Merges *strategies* into the persisted list by name — same
+    semantics as the client's services.strategy_store.import_all, for
+    Inception, which previously had no bulk import at all. Added for the
+    combined Export/Import All Data feature in app_window.py (see this
+    module's own top-of-file docstring).
+
+    Pushes the same merge to the server first, via the dedicated bulk
+    /inception/strategies/import endpoint (mirrors strategies_api.
+    import_strategies) — NOT a per-item save_strategy loop: that would
+    upsert-by-id, and an imported strategy sharing an existing one's NAME
+    but not its id (the normal case importing between two different
+    accounts) would then insert a genuine duplicate row server-side
+    instead of overwriting the existing one, since save_strategy has no
+    way to know two different ids should merge. The bulk endpoint resolves
+    that the same way strategy_service.import_strategies already does:
+    matched by name, the existing row's own id is kept.
+
+    Raises on failure (an explicit, deliberate user action, so it fails
+    loudly rather than silently importing local-only); the local merge
+    below is this function's own already-proven logic rather than
+    trusting a re-fetch of the server's independently-computed result.
+
+    Returns (overwritten_count, added_count).
+    """
+    from api import inception_api
+
+    inception_api.import_strategies(strategies)
+
+    existing = _load_raw()
+    index_by_name = {}
+    for i, s in enumerate(existing):
+        index_by_name.setdefault(s.get("name"), i)
+
+    overwritten = 0
+    added = 0
+    for imp in strategies:
+        name = imp.get("name")
+        if name in index_by_name:
+            existing[index_by_name[name]] = imp
+            overwritten += 1
+        else:
+            index_by_name[name] = len(existing)
+            existing.append(imp)
+            added += 1
+
+    _save_raw(existing)
+    return overwritten, added
 
 
 def new_strategy(name: str) -> dict:

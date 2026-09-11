@@ -138,6 +138,45 @@ def load_json(key: str, default):
     return default
 
 
+def export_all_settings() -> dict:
+    """{key: value} for every settings row this user has, regardless of
+    key — Config Editor tabs, LMV/Inception highlight colors, both apps'
+    custom categories, Formula Builder fields, notification/trigger config,
+    all of it (see this module's own top docstring for the full "generic
+    per-user key/value store" list) — used by File > Export All Data.
+
+    Hits the server directly (settings_api.list_settings) rather than
+    reading _load_raw()'s local cache: that cache only ever holds whatever
+    keys a screen has actually load_json()'d this session, so it's not a
+    reliable source for "every setting this user has" the way this is.
+    """
+    from api import settings_api
+
+    result = settings_api.list_settings()
+    settings = {row["key"]: row["value"] for row in result.get("settings", [])}
+
+    data = _load_raw()
+    data.update(settings)
+    _save_raw(data)
+    return settings
+
+
+def import_all_settings(settings: dict) -> int:
+    """Pushes every {key: value} pair in *settings* to the server (via the
+    same save_json every other write in this module already uses, so each
+    key still gets its own local-cache update), overwriting whatever that
+    key currently holds — used by File > Import All Data. Raises on the
+    first failed key (an explicit, deliberate user action, so it fails
+    loudly rather than silently importing only part of the file with no
+    indication which keys made it).
+
+    Returns the number of keys imported.
+    """
+    for key, value in settings.items():
+        save_json(key, value)
+    return len(settings)
+
+
 def load_tab(key: str, default: list) -> list:
     """Return saved rows for *key*, or *default* (as lists) when none saved."""
     rows = load_json(key, None)

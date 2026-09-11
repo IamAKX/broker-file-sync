@@ -7,8 +7,10 @@ from api.endpoints import (
     INCEPTION_AVAILABILITY,
     INCEPTION_BARS,
     INCEPTION_FORMULA_VARIABLES,
+    INCEPTION_FORMULA_VARIABLES_IMPORT,
     INCEPTION_INSTRUMENTS,
     INCEPTION_STRATEGIES,
+    INCEPTION_STRATEGIES_IMPORT,
     INCEPTION_VENDOR_SYNC,
 )
 
@@ -65,6 +67,14 @@ def delete_strategy(strategy_id: str) -> None:
     api_client.delete(f"{INCEPTION_STRATEGIES}/{strategy_id}")
 
 
+def import_strategies(strategies: list) -> dict:
+    """Bulk merge-by-name — backs File > Import All Data's HMV/Inception
+    strategies section. Inception never had a bulk import before this
+    (see services/inception_strategy_store.py's own docstring in this
+    same repo)."""
+    return api_client.put(INCEPTION_STRATEGIES_IMPORT, json_body={"strategies": strategies})
+
+
 def list_variables() -> dict:
     return api_client.get(INCEPTION_FORMULA_VARIABLES)
 
@@ -78,6 +88,12 @@ def upsert_variable(variable_id: str, name: str, formula: list) -> dict:
 
 def delete_variable(variable_id: str) -> None:
     api_client.delete(f"{INCEPTION_FORMULA_VARIABLES}/{variable_id}")
+
+
+def import_variables(variables: list) -> dict:
+    """Bulk merge-by-name — backs File > Import All Data's Inception
+    formula-variables section."""
+    return api_client.put(INCEPTION_FORMULA_VARIABLES_IMPORT, json_body={"variables": variables})
 
 
 def sync_vendor_data(email: str, password: str, exchange: str) -> dict:
