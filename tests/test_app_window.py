@@ -198,6 +198,12 @@ def test_clear_cache_also_clears_formula_variables_and_compile_cache(controller,
     calls = []
     monkeypatch.setattr(QMessageBox, "question",
                         lambda *a, **k: QMessageBox.StandardButton.Yes)
+    # _clear_cache ends with a real QMessageBox.information("Cache cleared...")
+    # on success — unmocked, that's a genuine modal that renders on screen and
+    # blocks on .exec() waiting for a click (this is what happened the first
+    # time this test was written without this line: a real "Cache cleared —
+    # data refreshed from the server." dialog popped up and hung the run).
+    monkeypatch.setattr(QMessageBox, "information", lambda *a, **k: None)
     monkeypatch.setattr(config_store, "clear_local_cache", lambda: calls.append("config"))
     monkeypatch.setattr(strategy_store, "clear_local_cache", lambda: calls.append("strategy"))
     monkeypatch.setattr(formula_variable_store, "clear_local_cache",

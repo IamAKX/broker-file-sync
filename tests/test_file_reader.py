@@ -11,6 +11,9 @@ from services.file_reader import (
     read_market_profile_date,
     read_reliable_software_date,
     read_nifty_invest_multi,
+    read_sharekhan,
+    _SHAREKHAN_HEADERS,
+    _SHAREKHAN_HEADER_ROW,
 )
 
 
@@ -191,3 +194,93 @@ def test_read_nifty_invest_multi_skips_blank_symbol_rows(tmp_path):
     f1 = _write_csv(tmp_path, "a.csv", ["Symbol", "Max Pain"], [["INFY", 1800], ["", 999]])
     headers, rows = read_nifty_invest_multi([f1])
     assert rows == [["INFY", "1800"]]
+
+
+# ── Sharekhan: located by header name, not a fixed column letter (issue: a ──
+# second Sharekhan/TradeTiger account's Snap to Excel export laid its columns
+# out in a different order, so the old fixed-position read silently put
+# Open's numbers under the Current header) ──────────────────────────────────
+
+def _write_sharekhan_xlsx(tmp_path, name, headers, data_row):
+    """A Sharekhan-shaped .xlsx: 7 blank/instruction rows, then the header
+    row at row 8 (idx 7) with *headers* in whatever order the caller wants,
+    then one data row aligned to that same order."""
+    import openpyxl
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    for _ in range(_SHAREKHAN_HEADER_ROW):
+        ws.append([])
+    ws.append(headers)
+    ws.append(data_row)
+    path = str(tmp_path / name)
+    wb.save(path)
+    return path
+
+
+def test_read_sharekhan_standard_column_order(tmp_path):
+    data_row = list(range(len(_SHAREKHAN_HEADERS)))  # 0, 1, 2, ... one per header
+    path = _write_sharekhan_xlsx(tmp_path, "sk.xlsx", _SHAREKHAN_HEADERS, data_row)
+
+    headers, rows = read_sharekhan(path)
+
+    assert headers == _SHAREKHAN_HEADERS
+    assert rows == [data_row]
+
+
+def test_read_sharekhan_locates_columns_by_name_when_rearranged(tmp_path):
+    """The actual bug: a different account's export has the SAME headers
+    but in a different order (Current before Open here, reversed from the
+    app's own default layout) — the old fixed-position reader would have
+    read Open's value under the Current header."""
+    scrambled_headers = list(reversed(_SHAREKHAN_HEADERS))
+    scrambled_row = list(reversed(range(len(_SHAREKHAN_HEADERS))))
+    path = _write_sharekhan_xlsx(tmp_path, "sk.xlsx", scrambled_headers, scrambled_row)
+
+    headers, rows = read_sharekhan(path)
+
+    # Output order is always _SHAREKHAN_HEADERS' order, regardless of the
+    # file's own column order — every downstream caller relies on that.
+    assert headers == _SHAREKHAN_HEADERS
+    current_idx = _SHAREKHAN_HEADERS.index("Current")
+    open_idx = _SHAREKHAN_HEADERS.index("Open")
+    # In the scrambled file, "Current" sits where "Open" used to be and
+    # vice versa — read_sharekhan must still return each value under its
+    # OWN correct header, not swapped.
+    file_current_col = scrambled_headers.index("Current")
+    file_open_col = scrambled_headers.index("Open")
+    assert rows[0][current_idx] == scrambled_row[file_current_col]
+    assert rows[0][open_idx] == scrambled_row[file_open_col]
+    assert rows[0][current_idx] != rows[0][open_idx]
+
+
+def test_read_sharekhan_raises_on_missing_expected_header(tmp_path):
+    import pytest
+    headers = [h for h in _SHAREKHAN_HEADERS if h != "TurnOver"]  # drop one
+    data_row = list(range(len(headers)))
+    path = _write_sharekhan_xlsx(tmp_path, "sk.xlsx", headers, data_row)
+
+    with pytest.raises(ValueError, match="TurnOver"):
+        read_sharekhan(path)
+
+
+def test_read_sharekhan_works_for_xls_too(tmp_path):
+    """Real Sharekhan exports are .xls (see resources/sharekhan.xls) —
+    the by-name resolution must work for that format, not just .xlsx."""
+    import xlwt
+    wb = xlwt.Workbook()
+    ws = wb.add_sheet("Sheet1")
+    scrambled_headers = list(reversed(_SHAREKHAN_HEADERS))
+    for c, h in enumerate(scrambled_headers):
+        ws.write(_SHAREKHAN_HEADER_ROW, c, h)
+    scrambled_row = list(reversed(range(len(_SHAREKHAN_HEADERS))))
+    for c, v in enumerate(scrambled_row):
+        ws.write(_SHAREKHAN_HEADER_ROW + 1, c, v)
+    path = str(tmp_path / "sk.xls")
+    wb.save(path)
+
+    headers, rows = read_sharekhan(path)
+
+    assert headers == _SHAREKHAN_HEADERS
+    current_idx = _SHAREKHAN_HEADERS.index("Current")
+    file_current_col = scrambled_headers.index("Current")
+    assert rows[0][current_idx] == scrambled_row[file_current_col]

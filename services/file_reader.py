@@ -1,18 +1,44 @@
 """
 Read broker export files and extract the configured columns.
 
-Column specs (0-based indices):
-  Sharekhan       (.xlsx/.xls): header at row 8 (idx 7), data from row 9
-                  cols C,D,E,F,I,J,K,L,M,N,O,P,Z,AA,AB
+Column specs:
+  Sharekhan       (.xlsx/.xls): header at row 8 (idx 7), data from row 9,
+                  columns located BY HEADER NAME (_SHAREKHAN_HEADERS) —
+                  see read_sharekhan's own docstring for why: a Snap to
+                  Excel export's column ORDER isn't guaranteed the same
+                  across brokers/accounts, only the header text is (issue:
+                  a second Sharekhan account's export had its columns laid
+                  out differently, so the old fixed-position read (col F
+                  is always "Current") silently read Open's numbers under
+                  the Current header instead).
   ReliableSoftware(.xlsx/.xls): header at row 1 (idx 0), data from row 2
-                  cols B,E,F,K,L
+                  cols B,E,F,K,L (0-based indices — still fixed-position;
+                  same rearranged-export risk as Sharekhan had, not yet
+                  converted to header-name matching)
   NiftyInvest     (.csv):       header at row 1 (idx 0), data from row 2
-                  cols A,C
+                  cols A,C (read_nifty_invest, fixed-position) — but see
+                  read_nifty_invest_multi, which already locates its two
+                  columns by header name, the same technique Sharekhan
+                  now uses too
   MarketProfile   (.csv/.xlsx): header at row 1 (idx 0), data from row 2
-                  cols B(stock key),G(VAH),H(POC),I(VAL)
+                  cols B(stock key),G(VAH),H(POC),I(VAL) — fixed-position
 """
 
-_SHAREKHAN_COLS  = [2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 25, 26, 27]
+# Sharekhan's own header text for each column this app needs, IN OUTPUT
+# ORDER — read_sharekhan locates each one by matching this text against
+# the file's actual header row rather than a fixed position (see module
+# docstring). Order here is what every caller (services.master_generator,
+# services.historic_lmv_merge, services.live_merge) has always relied on:
+# [0]=Scrip Name, [1]=Lot Size, [2]=% Change, [3]=Current, [4]=Open,
+# [5]=High, [6]=Low, [7]=Close, [8]=Avg Rate, [9]=OI Difference Percentage,
+# [10]=P.High, [11]=P.Low, [12]=Qty, [13]=P.Quantity, [14]=TurnOver —
+# unchanged from the old fixed-position mapping (cols C,D,E,F,I,J,K,L,M,N,
+# O,P,Z,AA,AB), just resolved by name now instead of by letter.
+_SHAREKHAN_HEADERS = [
+    "Scrip Name", "Lot Size", "% Change", "Current", "Open", "High", "Low",
+    "Close", "Avg Rate", "OI Difference Percentage", "P.High", "P.Low",
+    "Qty", "P.Quantity", "TurnOver",
+]
 _RELIABLE_COLS   = [1, 4, 5, 10, 11]
 _NIFTY_COLS      = [0, 2]
 _MARKET_PROFILE_COLS = [1, 6, 7, 8]   # B=stock(key), G=VAH, H=POC, I=VAL
@@ -65,6 +91,65 @@ def count_rows_market_profile(path: str) -> int:
 
 def _extract_cols(row: tuple | list, col_indices: list, ncols: int) -> list:
     return [row[i] if i < ncols else None for i in col_indices]
+
+
+def _resolve_header_indices(header_row: list, col_names: list[str]) -> list[int]:
+    """Map each of *col_names* to its actual position in *header_row* — the
+    file's own header row, whatever order it's in — instead of a fixed
+    position, so a broker export with columns rearranged still lines up
+    (see module docstring / read_sharekhan). Raises ValueError naming
+    whichever expected header(s) are missing, rather than silently
+    returning a misaligned or blank column for them."""
+    normalized = [str(h).strip() if h is not None else "" for h in header_row]
+    missing = [name for name in col_names if name not in normalized]
+    if missing:
+        raise ValueError(
+            "Expected column header(s) not found in this file: " + ", ".join(missing)
+        )
+    return [normalized.index(name) for name in col_names]
+
+
+def _read_all_columns(path: str, header_row_idx: int) -> tuple[list, list]:
+    """Every column of *path*, header at *header_row_idx* — the raw
+    (header_row, data_rows) this module's own by-name readers resolve
+    _SHAREKHAN_HEADERS-style column lists against. Same per-format
+    parsing as _read_xlsx/_read_xls/_read_csv, just without the col_indices
+    slice those apply."""
+    if path.lower().endswith(".xlsx"):
+        import openpyxl
+        wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        wb.close()
+    elif path.lower().endswith(".xls"):
+        import xlrd
+        wb = xlrd.open_workbook(path)
+        ws = wb.sheet_by_index(0)
+        rows = [[ws.cell_value(r, c) for c in range(ws.ncols)] for r in range(ws.nrows)]
+    elif path.lower().endswith(".csv"):
+        import csv
+        with open(path, "r", encoding="utf-8", errors="replace", newline="") as f:
+            rows = list(csv.reader(f))
+    else:
+        raise ValueError(f"Unsupported file type: {path}")
+
+    if len(rows) <= header_row_idx:
+        return [], []
+    header_row = [str(h).strip() if h is not None else "" for h in (rows[header_row_idx] or [])]
+    data = [list(r) if r else [] for r in rows[header_row_idx + 1:]]
+    return header_row, data
+
+
+def _read_file_by_header_names(path: str, col_names: list[str], header_row_idx: int) -> tuple[list, list]:
+    """Like _read_file, but locates each of *col_names* by matching it
+    against the file's own header row instead of a fixed position — see
+    _resolve_header_indices / module docstring."""
+    header_row, rows = _read_all_columns(path, header_row_idx)
+    if not header_row:
+        return [], []
+    indices = _resolve_header_indices(header_row, col_names)
+    data = [[row[i] if i < len(row) else None for i in indices] for row in rows]
+    return list(col_names), data
 
 
 def _read_xlsx(path: str, col_indices: list, header_row_idx: int) -> tuple[list, list]:
@@ -126,7 +211,17 @@ def _read_file(path: str, col_indices: list, header_row_idx: int) -> tuple[list,
 
 
 def read_sharekhan(path: str) -> tuple[list, list]:
-    return _read_file(path, _SHAREKHAN_COLS, _SHAREKHAN_HEADER_ROW)
+    """Locates each expected column (_SHAREKHAN_HEADERS) by matching its
+    header text against row 8 of the export, not a fixed column letter —
+    a second Sharekhan/TradeTiger account's Snap to Excel export laid its
+    columns out in a different order than the one this app was built
+    against, so the old fixed-position read (col F is always "Current")
+    silently read a different column's numbers under the "Current"
+    header. Raises ValueError if an expected header is genuinely missing
+    (a malformed/unexpected export), rather than returning misaligned or
+    blank data for it.
+    """
+    return _read_file_by_header_names(path, _SHAREKHAN_HEADERS, _SHAREKHAN_HEADER_ROW)
 
 
 def read_reliable_software(path: str) -> tuple[list, list]:

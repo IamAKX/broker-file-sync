@@ -131,7 +131,7 @@ class ExcelLiveReader:
 
     # ── Public read ───────────────────────────────────────────────────────────
 
-    def read_workbook_sheet(self, workbook_path: str, col_indices: list,
+    def read_workbook_sheet(self, workbook_path: str, col_names: list,
                             header_row_idx: int) -> tuple[list, list[list]] | None:
         """
         Read the first sheet of *workbook_path* from the cached Excel instance.
@@ -153,26 +153,33 @@ class ExcelLiveReader:
             self._excel = None
             return None
         try:
-            return _read_sheet_cells(sheet, col_indices, header_row_idx)
+            return _read_sheet_cells(sheet, col_names, header_row_idx)
         except Exception:
             self._invalidate()
             return None
 
 
-def _read_sheet_cells(sheet, col_indices: list,
+def _read_sheet_cells(sheet, col_names: list,
                       header_row_idx: int) -> tuple[list, list[list]] | None:
     """
-    Read a worksheet via COM using absolute row/col indices matching the
-    same conventions as file_reader.py.
+    Read a worksheet via COM, then locate each of *col_names* by matching
+    it against the sheet's own header row (row header_row_idx) — same
+    by-name resolution services.file_reader.read_sharekhan uses for the
+    on-disk fallback, and for the identical reason: TradeTiger's live Snap
+    to Excel feed doesn't guarantee the same column ORDER across accounts,
+    only the header text, so a fixed column-letter read (this function's
+    own behavior before this) can silently read the wrong column's live
+    numbers under the right header on a differently-laid-out account.
 
-    Reads from cell A1 so that header_row_idx and col_indices are the
-    same 0-based values used when reading from disk.
+    Reads from cell A1 so header_row_idx is the same 0-based row used when
+    reading from disk. Returns None (same as any other COM failure here)
+    if a header in *col_names* can't be found in the live sheet — callers
+    already treat None as "fall back to the on-disk reader".
     """
     try:
         used = sheet.UsedRange
         last_row = used.Row + used.Rows.Count - 1
-        last_col = max(used.Column + used.Columns.Count - 1,
-                       max(col_indices) + 1)
+        last_col = used.Column + used.Columns.Count - 1
         rng  = sheet.Range(sheet.Cells(1, 1), sheet.Cells(last_row, last_col))
         raw  = rng.Value
         if not raw:
@@ -183,29 +190,29 @@ def _read_sheet_cells(sheet, col_indices: list,
         rows = [list(r) for r in raw]
         if len(rows) <= header_row_idx:
             return None
-        ncols = len(rows[header_row_idx])
-        headers = [
-            str(rows[header_row_idx][i]) if i < ncols and rows[header_row_idx][i] is not None else ""
-            for i in col_indices
-        ]
+        header_row = [str(h).strip() if h is not None else "" for h in rows[header_row_idx]]
+        if any(name not in header_row for name in col_names):
+            return None
+        indices = [header_row.index(name) for name in col_names]
         data = [
-            [row[i] if i < len(row) else None for i in col_indices]
+            [row[i] if i < len(row) else None for i in indices]
             for row in rows[header_row_idx + 1:]
         ]
-        return headers, data
+        return list(col_names), data
     except Exception:
         return None
 
 
-def read_workbook_sheet(workbook_path: str, col_indices: list,
+def read_workbook_sheet(workbook_path: str, col_names: list,
                         header_row_idx: int) -> tuple[list, list[list]] | None:
     """
     Read the specified workbook from the running Excel instance.
 
     Matches by filename so Sharekhan's live DDE data (which is never
-    flushed back to disk) is read directly from Excel's memory.
-    Returns (headers, rows) on success, None if Excel is not running or
-    the workbook is not open.
+    flushed back to disk) is read directly from Excel's memory. Columns
+    are located by header name — see _read_sheet_cells. Returns (headers,
+    rows) on success, None if Excel is not running, the workbook is not
+    open, or an expected header isn't found in the live sheet.
     """
     if not _WIN32COM_AVAILABLE:
         return None
@@ -231,7 +238,7 @@ def read_workbook_sheet(workbook_path: str, col_indices: list,
         except Exception:
             return None
 
-        return _read_sheet_cells(sheet, col_indices, header_row_idx)
+        return _read_sheet_cells(sheet, col_names, header_row_idx)
 
     except Exception:
         return None

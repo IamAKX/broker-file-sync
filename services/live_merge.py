@@ -209,11 +209,11 @@ class LiveDataReader:
 
     def _read_sharekhan(self):
         from services.file_reader import (
-            read_sharekhan, _SHAREKHAN_COLS, _SHAREKHAN_HEADER_ROW,
+            read_sharekhan, _SHAREKHAN_HEADERS, _SHAREKHAN_HEADER_ROW,
         )
         if self._use_com and self._excel is not None:
             result = self._excel.read_workbook_sheet(
-                self._sharekhan_path, _SHAREKHAN_COLS, _SHAREKHAN_HEADER_ROW
+                self._sharekhan_path, _SHAREKHAN_HEADERS, _SHAREKHAN_HEADER_ROW
             )
             if result is not None:
                 return result

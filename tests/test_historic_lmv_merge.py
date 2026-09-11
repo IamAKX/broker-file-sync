@@ -86,7 +86,7 @@ def test_read_merged_static_overlays_day_to_and_week_month_change(monkeypatch):
     from services.historic_lmv_merge import read_merged_static
 
     # Full-width Sharekhan row so indices 2/3/4/8/12 (diffpcnt/current/open/
-    # avg_rate/qty) are populated, matching _SHAREKHAN_COLS' real layout.
+    # avg_rate/qty) are populated, matching _SHAREKHAN_HEADERS' real layout.
     sk_headers = [
         "Scrip Name", "Lot Size", "% Change", "Current", "Open", "High", "Low",
         "Close", "Avg Rate", "OI Difference Percentage", "P.High", "P.Low",
