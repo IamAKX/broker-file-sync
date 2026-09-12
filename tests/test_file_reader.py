@@ -263,22 +263,37 @@ def test_read_sharekhan_raises_on_missing_expected_header(tmp_path):
         read_sharekhan(path)
 
 
-def test_read_sharekhan_works_for_xls_too(tmp_path):
-    """Real Sharekhan exports are .xls (see resources/sharekhan.xls) —
-    the by-name resolution must work for that format, not just .xlsx."""
-    import xlwt
-    wb = xlwt.Workbook()
-    ws = wb.add_sheet("Sheet1")
-    scrambled_headers = list(reversed(_SHAREKHAN_HEADERS))
-    for c, h in enumerate(scrambled_headers):
-        ws.write(_SHAREKHAN_HEADER_ROW, c, h)
-    scrambled_row = list(reversed(range(len(_SHAREKHAN_HEADERS))))
-    for c, v in enumerate(scrambled_row):
-        ws.write(_SHAREKHAN_HEADER_ROW + 1, c, v)
-    path = str(tmp_path / "sk.xls")
-    wb.save(path)
+def test_read_sharekhan_works_for_xls_too(tmp_path, monkeypatch):
+    """Real Sharekhan exports are .xls — the by-name resolution must work
+    for that format too, not just .xlsx. Fakes xlrd's workbook object
+    directly rather than writing a real .xls file: xlrd is read-only (no
+    write support), and pulling in xlwt as a real dependency just to write
+    one test fixture broke CI (xlwt isn't in requirements.txt, and
+    happened to already be present in one dev's local venv, so this only
+    failed once it ran somewhere clean) — faking the handful of
+    properties/methods _read_all_columns' xls branch actually calls is
+    cheap and dependency-free."""
+    import xlrd
 
-    headers, rows = read_sharekhan(path)
+    scrambled_headers = list(reversed(_SHAREKHAN_HEADERS))
+    scrambled_row = list(reversed(range(len(_SHAREKHAN_HEADERS))))
+    grid = [[] for _ in range(_SHAREKHAN_HEADER_ROW)] + [scrambled_headers, scrambled_row]
+
+    class _FakeSheet:
+        ncols = len(scrambled_headers)
+        nrows = len(grid)
+
+        def cell_value(self, r, c):
+            row = grid[r]
+            return row[c] if c < len(row) else ""
+
+    class _FakeWorkbook:
+        def sheet_by_index(self, idx):
+            return _FakeSheet()
+
+    monkeypatch.setattr(xlrd, "open_workbook", lambda path: _FakeWorkbook())
+
+    headers, rows = read_sharekhan(str(tmp_path / "sk.xls"))
 
     assert headers == _SHAREKHAN_HEADERS
     current_idx = _SHAREKHAN_HEADERS.index("Current")

@@ -12,6 +12,26 @@ def qapp():
 def isolated_store(tmp_path, monkeypatch):
     from services import config_store
     monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "config_data.json"))
+
+    # ThemeManager.apply() (called by both apply() and toggle()) calls
+    # QApplication.setStyleSheet() — an APPLICATION-WIDE stylesheet change,
+    # which forces Qt to recompute style for every widget still alive in
+    # the whole process. In an isolated run that's cheap (nothing else is
+    # alive), but deep into the full `pytest tests/` run this file's own
+    # tests were each taking 60-145s (test_toggle_updates_palette_to_match_
+    # new_mode alone: 144.88s) — the suite disables Python's cyclic GC
+    # entirely (see conftest.py's own pytest_configure docstring, to dodge
+    # a Qt segfault) and doesn't explicitly tear down most of the many
+    # MainWindow/screen trees built by ~1500 other tests, so by the time
+    # this file's tests run, thousands of long-dead-but-still-alive QWidget
+    # instances are still attached to the app and get restyled on every
+    # single setStyleSheet() call here. These tests assert on QPalette
+    # colors (setPalette(), a cheap non-cascading call, is untouched), never
+    # on stylesheet content, so skipping the actual restyle changes nothing
+    # about what's being verified while cutting each call from "however
+    # long thousands of accumulated widgets take to restyle" to instant.
+    monkeypatch.setattr(QApplication, "setStyleSheet", lambda self, *a, **k: None)
+
     return config_store
 
 
