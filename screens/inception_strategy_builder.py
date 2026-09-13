@@ -975,7 +975,6 @@ class InceptionStrategyBuilderScreen(QWidget):
         # LMV's own (unrelated) Formula Builder field list.
         if "Avg Rate" not in self._fields:
             self._fields.append("Avg Rate")
-        self._fields += [v["name"] for v in var_store.load_all()]
         self._strategies = store.load_all()
         self._refresh_list()
 
@@ -1209,10 +1208,6 @@ class InceptionStrategyBuilderScreen(QWidget):
             inception_field_codes=INCEPTION_FIELD_CODES, parent=self,
         )
         dlg.exec()
-        # A variable may have been renamed/added/deleted — refresh the field
-        # universe every editor sees on its next open.
-        self._fields = [f for f in self._fields if f not in [v["name"] for v in var_store.load_all()]]
-        self._fields += [v["name"] for v in var_store.load_all()]
 
     # ── theme ────────────────────────────────────────────────────────────────
 
