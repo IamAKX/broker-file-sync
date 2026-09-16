@@ -158,6 +158,8 @@ class _SlackConfigDialog(QDialog):
     _SETUP_URL = "https://api.slack.com/apps?new_app=1"
     _WEBHOOK_PREFIX = "https://hooks.slack.com/services/"
     _STEPS = [
+        "Don't already have a Slack workspace? Create one first at slack.com/get-started "
+        "(skip this if you're already in one).",
         'Click "Open Slack Setup" below — it opens Slack\'s app creation page in your browser.',
         'On the "Create new app" screen, choose "Blank app" under "Or start your own way".',
         'Name the app (e.g. "Broker File Sync"), pick your workspace, then click "Create App".',
