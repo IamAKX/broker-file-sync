@@ -159,9 +159,10 @@ class _SlackConfigDialog(QDialog):
     _WEBHOOK_PREFIX = "https://hooks.slack.com/services/"
     _STEPS = [
         'Click "Open Slack Setup" below — it opens Slack\'s app creation page in your browser.',
+        'On the "Create new app" screen, choose "Blank app" under "Or start your own way".',
         'Name the app (e.g. "Broker File Sync"), pick your workspace, then click "Create App".',
-        'In the app\'s settings, open "Incoming Webhooks" and turn it On.',
-        'Click "Add New Webhook to Workspace", choose the channel you want alerts in, and click "Allow".',
+        'In the app\'s settings, open "Incoming Webhooks" and toggle "Activate Incoming Webhooks" On.',
+        'Click "Add New Webhook to Workspace", choose the channel you want alerts in, and click "Authorize".',
         f'Copy the URL Slack shows you (starts with {_WEBHOOK_PREFIX}) and paste it below.',
     ]
 
