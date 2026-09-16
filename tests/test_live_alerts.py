@@ -158,6 +158,25 @@ def test_pending_strip_hidden_when_nothing_pending(screen):
     assert screen._pending_lbl.isHidden()
 
 
+def test_pending_strip_caps_long_list_with_more_marker(screen):
+    # A busy day can leave far more than _MAX_PENDING_SHOWN signals pending
+    # at once — the banner must cap the spelled-out list and say "+N more"
+    # rather than growing tall enough to push the alerts table off screen
+    # (the bug this test guards against had no cap at all).
+    total = screen._MAX_PENDING_SHOWN + 5
+    for i in range(total):
+        state_store.set_open_signal(
+            f"strat-1::SYM{i}", _local_pending(symbol=f"SYM{i}"), force_flush=True
+        )
+
+    screen._refresh_pending()
+
+    text = screen._pending_lbl.text()
+    assert text.startswith(f"⏳ Pending ({total}):")
+    assert text.count("since") == screen._MAX_PENDING_SHOWN   # only the shown ones
+    assert "+5 more" in text
+
+
 # ── Filters live in a popup dialog — nothing re-queries until Apply Filters
 # is clicked (screen._on_apply_filters_clicked), not on every combo change.
 

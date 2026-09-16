@@ -648,6 +648,13 @@ class LiveAlertsScreen(QWidget):
 
     # ── Pending strip (local, unfiltered) ───────────────────────────────
 
+    # A busy day can leave dozens/hundreds of signals pending at once (issue:
+    # with no cap this banner listed every single one, wrapping to a wall of
+    # text tall enough to push the actual alerts table off screen). Same
+    # "+N more" convention services.strategy_alerts.messages already uses for
+    # the tray notification's own space-constrained summary line.
+    _MAX_PENDING_SHOWN = 10
+
     def _refresh_pending(self):
         pending = [
             s for s in state_store.get_open_signals().values()
@@ -660,9 +667,13 @@ class LiveAlertsScreen(QWidget):
         parts = [
             f"{s.get('symbol', '')} ({s.get('strategy_name', '')}) since "
             f"{_fmt_dt(_parse_iso(s.get('first_true_at')))}"
-            for s in pending
+            for s in pending[:self._MAX_PENDING_SHOWN]
         ]
-        self._pending_lbl.setText(f"⏳ Pending ({len(pending)}): " + "  ·  ".join(parts))
+        text = f"⏳ Pending ({len(pending)}): " + "  ·  ".join(parts)
+        extra = len(pending) - self._MAX_PENDING_SHOWN
+        if extra > 0:
+            text += f"  ·  +{extra} more"
+        self._pending_lbl.setText(text)
         self._pending_lbl.setVisible(True)
 
     # ── Filtered / paginated table (backend-driven) ─────────────────────
