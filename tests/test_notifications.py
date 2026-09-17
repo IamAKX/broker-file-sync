@@ -99,7 +99,7 @@ def test_email_card_prefilled_with_logged_in_user_email(qapp, isolated_store, mo
     from screens.notifications import NotificationsScreen
     screen = NotificationsScreen(AppController(qapp))
 
-    assert screen._email_card.get_value("Email Address") == "user@example.com"
+    assert screen._email_card.get_value("Email Addresses") == "user@example.com"
 
 
 def test_test_notification_button_sends_to_configured_email(qapp, isolated_store, monkeypatch):
@@ -135,7 +135,7 @@ def test_test_notification_button_sends_to_reconfigured_email(screen, monkeypatc
     from PySide6.QtCore import QTimer
     from api import notifications_api
 
-    screen._email_card._values["Email Address"] = "other@example.com"
+    screen._email_card._values["Email Addresses"] = "other@example.com"
 
     scheduled = []
     monkeypatch.setattr(QTimer, "singleShot", staticmethod(lambda ms, cb: scheduled.append(cb)))
@@ -149,10 +149,31 @@ def test_test_notification_button_sends_to_reconfigured_email(screen, monkeypatc
     assert calls[0][0] == "other@example.com"
 
 
+def test_test_notification_button_sends_to_first_of_several_configured_emails(screen, monkeypatch):
+    """Multiple recipients configured — Test Notification only needs to
+    verify deliverability once, so it uses the first address."""
+    import screens.notifications as notifications_module
+    from PySide6.QtCore import QTimer
+    from api import notifications_api
+
+    screen._email_card._values["Email Addresses"] = "first@example.com; second@example.com"
+
+    scheduled = []
+    monkeypatch.setattr(QTimer, "singleShot", staticmethod(lambda ms, cb: scheduled.append(cb)))
+    calls = []
+    monkeypatch.setattr(notifications_api, "send_test_email", lambda *a: calls.append(a))
+    monkeypatch.setattr(notifications_module.QMessageBox, "information", MagicMock())
+
+    screen._email_card._send_btn.click()
+    scheduled[0]()
+
+    assert calls[0][0] == "first@example.com"
+
+
 def test_test_notification_button_warns_when_email_address_blank(screen, monkeypatch):
     import screens.notifications as notifications_module
 
-    screen._email_card._values["Email Address"] = ""
+    screen._email_card._values["Email Addresses"] = ""
     warn = MagicMock()
     monkeypatch.setattr(notifications_module.QMessageBox, "warning", warn)
 

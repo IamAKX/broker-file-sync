@@ -18,7 +18,7 @@ from api import notifications_api
 from api.exceptions import ApiError, NetworkError
 from api.token_store import token_manager
 from components.error_popup import show_api_error
-from services import notification_channels, slack_config, trigger_config
+from services import email_recipients_config, notification_channels, slack_config, trigger_config
 from services.notifications.channels.slack import send_to_webhook
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "assets", "icons")
@@ -140,6 +140,82 @@ class _ChannelConfigDialog(QDialog):
 
     def values(self) -> dict:
         return {label: inp.text() for label, inp in self._inputs.items()}
+
+
+class _EmailConfigDialog(QDialog):
+    """Email's Configure dialog — one "Email Addresses" field accepting
+    several addresses separated by ";" (issue: "add capability to add
+    multiple email[s] separated by ; , cap it to 20 emails"). Unlike
+    _ChannelConfigDialog's plain fields (no validation at all — fine for a
+    single free-text address that only ever fed the Test Notification
+    button), this now IS what real delivery uses (see NotificationsScreen.
+    _on_email_config_saved), so a malformed or over-the-cap value is
+    refused here rather than failing silently server-side later — same
+    "validate before accept" shape _SlackConfigDialog already uses for its
+    webhook URL field."""
+
+    def __init__(self, values: dict, theme, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Configure Email")
+        from screens.strategy_builder import _apply_dialog_bg
+        _apply_dialog_bg(self, theme)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(10)
+
+        intro = QLabel(
+            f"Alerts are emailed to every address below (up to "
+            f"{email_recipients_config.MAX_RECIPIENTS}), separated by \";\"."
+        )
+        intro.setWordWrap(True)
+        intro.setFont(font_scale.font(font_scale.MEDIUM, True))
+        layout.addWidget(intro)
+
+        addr_lbl = QLabel("EMAIL ADDRESSES")
+        addr_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        addr_lbl.setStyleSheet(f"color: {theme.get('text_secondary')};")
+        layout.addWidget(addr_lbl)
+
+        self._input = QLineEdit(values.get("Email Addresses", ""))
+        self._input.setPlaceholderText("you@example.com; teammate@example.com")
+        self._input.setFont(font_scale.font(font_scale.MEDIUM, False))
+        self._input.setFixedHeight(38)
+        layout.addWidget(self._input)
+
+        self._error_lbl = QLabel("")
+        self._error_lbl.setStyleSheet("color: #e5484d;")
+        self._error_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._error_lbl.setWordWrap(True)
+        self._error_lbl.setVisible(False)
+        layout.addWidget(self._error_lbl)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+        save_btn = QPushButton("Save")
+        save_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_btn.setStyleSheet(
+            f"background: {theme.get('accent')}; color: {theme.get('background')}; border: none;"
+        )
+        save_btn.clicked.connect(self._try_accept)
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_btn)
+        layout.addLayout(btn_row)
+
+    def _try_accept(self):
+        _recipients, error = email_recipients_config.parse_recipients(self._input.text())
+        if error:
+            self._error_lbl.setText(error)
+            self._error_lbl.setVisible(True)
+            return
+        self._error_lbl.setVisible(False)
+        self.accept()
+
+    def values(self) -> dict:
+        return {"Email Addresses": self._input.text().strip()}
 
 
 class _SlackConfigDialog(QDialog):
@@ -435,18 +511,27 @@ class NotificationsScreen(QWidget):
 
         enabled_channels = notification_channels.load_enabled_channels()
 
+        # Prefilled with the already-saved recipient list, if any — real
+        # delivery always reads services.email_recipients_config fresh at
+        # send time (the backend's own /notifications/email/send resolves it
+        # server-side from the same synced setting), this just seeds the
+        # Configure dialog and the Test Notification target. Falls back to
+        # the logged-in user's own email (today's implicit behavior) when
+        # nothing's been saved yet.
+        saved_recipients = email_recipients_config.load_recipients()
         self._email_card = ChannelRow(
             "Email", "notification.svg",
-            [("Email Address", "you@example.com")],
+            [("Email Addresses", "you@example.com; teammate@example.com")],
             "Test Notification", t,
             default_enabled=enabled_channels["email"],
-            # Prefilled with the logged-in user's own email — real notifications
-            # always go there regardless of this field; it only controls where
-            # the Test Notification button sends, so it can be pointed anywhere.
-            default_values={"Email Address": token_manager.get_user_email() or ""},
+            default_values={
+                "Email Addresses": "; ".join(saved_recipients or [token_manager.get_user_email() or ""]),
+            },
+            dialog_factory=_EmailConfigDialog,
         )
         self._email_card.connect_toggle(self._on_toggle_changed)
         self._email_card.connect_send(self._on_test_email_notification)
+        self._email_card.connect_config_saved(self._on_email_config_saved)
 
         self._slack_card = ChannelRow(
             "Slack", "notification.svg",
@@ -610,18 +695,22 @@ class NotificationsScreen(QWidget):
         )
 
     def _on_test_email_notification(self):
-        """Sends to whatever address is set in the Email row's gear-icon
-        Configure dialog (defaults to the logged-in user's own email — see
-        _build). Real notifications always go to the logged-in user
-        automatically regardless of this field; it only controls where the
-        test send goes, so it can be pointed at any inbox to verify
-        delivery."""
-        to_email = self._email_card.get_value("Email Address").strip()
-        if not to_email:
+        """Sends to the FIRST address in the Email row's gear-icon Configure
+        dialog (defaults to the logged-in user's own email — see _build).
+        Real notifications go to every saved address (see
+        _on_email_config_saved) — testing just the first is enough to
+        verify deliverability without sending N test emails for N
+        recipients."""
+        recipients, error = email_recipients_config.parse_recipients(
+            self._email_card.get_value("Email Addresses")
+        )
+        if error or not recipients:
             QMessageBox.warning(
-                self, "Error", "Set an email address via Email's Configure button first.",
+                self, "Error",
+                error or "Set an email address via Email's Configure button first.",
             )
             return
+        to_email = recipients[0]
 
         self._email_card._send_btn.setEnabled(False)
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -640,6 +729,18 @@ class NotificationsScreen(QWidget):
             QApplication.restoreOverrideCursor()
             self._email_card._send_btn.setEnabled(True)
         QMessageBox.information(self, "Test Email Sent", f"A test email was sent to {to_email}.")
+
+    def _on_email_config_saved(self, values: dict):
+        """Unlike this field's old single-address, test-only behavior,
+        Email's recipient list is now what real delivery actually uses (the
+        backend's /notifications/email/send resolves it server-side from
+        this same synced setting — see services.email_recipients_config's
+        own docstring) — so it has to be persisted the moment the Configure
+        dialog is accepted, same as Slack's webhook URL below. The dialog
+        itself (_EmailConfigDialog) already refused anything that wouldn't
+        parse/fit the cap, so this can trust *values* is valid."""
+        recipients, _error = email_recipients_config.parse_recipients(values.get("Email Addresses", ""))
+        email_recipients_config.save_recipients(recipients)
 
     def _on_slack_config_saved(self, values: dict):
         """Unlike Email's address field (only ever used by its own Test
