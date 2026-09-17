@@ -19,6 +19,8 @@ from datetime import datetime
 from services.notifications.levels import NotificationLevel
 from services.strategy_alerts.models import (
     EVENT_ENTRY,
+    EVENT_INTRADAY_CLOSE,
+    EVENT_REPEAT,
     EVENT_STOP_OUT,
     EVENT_TARGET,
     EVENT_TRADE_CANCELLED,
@@ -65,6 +67,11 @@ def render_title(event: AlertEvent) -> str:
         return f"{event.strategy_name} — {event.symbol}: Stopped Out"
     if event.kind == EVENT_TRADE_CANCELLED:
         return f"{event.strategy_name} — {event.symbol}: Trade Cancelled"
+    if event.kind == EVENT_REPEAT:
+        direction = event.payload.get("direction", "")
+        return f"{event.strategy_name} — {direction} Signal (Repeat): {event.symbol}"
+    if event.kind == EVENT_INTRADAY_CLOSE:
+        return f"{event.strategy_name} — {event.symbol}: Closed (Intraday)"
     return f"{event.strategy_name} — {event.symbol}"
 
 
@@ -115,14 +122,45 @@ def render_message(event: AlertEvent) -> str:
             lines.append(f"  {m.get('name', '?')} ({m.get('role')}): {_fmt_price(m.get('value'))}")
         return "\n".join(lines)
 
+    if event.kind == EVENT_REPEAT:
+        lines = [
+            f"Sector: {p.get('sector') or '—'}",
+            f"Current Price: {_fmt_price(p.get('price'))} @ {_fmt_time(p.get('time'))}",
+        ]
+        lines.extend(_metric_lines(p.get("metrics", {})))
+        lines.append(f"Open since {_fmt_time(p.get('entry_time'))}")
+        return "\n".join(lines)
+
+    if event.kind == EVENT_INTRADAY_CLOSE:
+        lines = [
+            "Closed at end of today's alert window.",
+            f"Exit Price: {_fmt_price(p.get('exit_price'))} @ {_fmt_time(p.get('time'))}",
+            f"Entry Price: {_fmt_price(p.get('entry_price'))} @ {_fmt_time(p.get('entry_time'))}",
+        ]
+        pct = _pct_move_for_message(p.get("entry_price"), p.get("exit_price"), p.get("direction"))
+        if pct is not None:
+            lines.append(f"% move: {pct:.2f}%")
+        return "\n".join(lines)
+
     return ""
+
+
+def _pct_move_for_message(entry_price, exit_price, direction) -> float | None:
+    if entry_price in (None, 0) or exit_price is None:
+        return None
+    move = (exit_price - entry_price) / entry_price * 100
+    return move if direction != "SELL" else -move
 
 
 # ── Batch rendering (several AlertEvents from one tick, one notification) ───
 
-_KIND_ORDER = (EVENT_ENTRY, EVENT_TARGET, EVENT_STOP_OUT, EVENT_TRADE_CANCELLED)
+_KIND_ORDER = (
+    EVENT_ENTRY, EVENT_REPEAT, EVENT_TARGET, EVENT_STOP_OUT,
+    EVENT_INTRADAY_CLOSE, EVENT_TRADE_CANCELLED,
+)
 _KIND_SUMMARY_LABEL = {
-    EVENT_ENTRY: "Entries", EVENT_TARGET: "Targets", EVENT_STOP_OUT: "Stop-Outs",
+    EVENT_ENTRY: "Entries", EVENT_REPEAT: "Repeats", EVENT_TARGET: "Targets",
+    EVENT_STOP_OUT: "Stop-Outs", EVENT_INTRADAY_CLOSE: "Closed (Intraday)",
     EVENT_TRADE_CANCELLED: "Cancelled",
 }
 # A tray notification has real, OS-enforced space limits — cap how many
@@ -145,10 +183,14 @@ def _counts_by_kind(events: list[AlertEvent]) -> dict:
 def _kind_count_label(kind: str, count: int) -> str:
     if kind == EVENT_ENTRY:
         return "New Entry" if count == 1 else "New Entries"
+    if kind == EVENT_REPEAT:
+        return "Repeat" if count == 1 else "Repeats"
     if kind == EVENT_TARGET:
         return "Target Achieved" if count == 1 else "Targets Achieved"
     if kind == EVENT_STOP_OUT:
         return "Stopped Out"
+    if kind == EVENT_INTRADAY_CLOSE:
+        return "Closed (Intraday)"
     if kind == EVENT_TRADE_CANCELLED:
         return "Trade Cancelled" if count == 1 else "Trades Cancelled"
     return kind
@@ -193,8 +235,10 @@ def render_summary_line(event: AlertEvent) -> str:
     p = event.payload
     if event.kind == EVENT_ENTRY:
         return f"{event.symbol} @{_fmt_price(p.get('entry_price'))}"
-    if event.kind in (EVENT_TARGET, EVENT_STOP_OUT):
+    if event.kind in (EVENT_TARGET, EVENT_STOP_OUT, EVENT_REPEAT):
         return f"{event.symbol} @{_fmt_price(p.get('price'))}"
+    if event.kind == EVENT_INTRADAY_CLOSE:
+        return f"{event.symbol} @{_fmt_price(p.get('exit_price'))}"
     if event.kind == EVENT_TRADE_CANCELLED:
         return f"{event.symbol} @{_fmt_price(p.get('entry_price'))}"
     return event.symbol

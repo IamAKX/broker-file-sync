@@ -49,6 +49,7 @@ _STATUS_OPTIONS = [
     ("Targets Achieved", "all_targets_achieved"),
     ("Stopped Out", "stopped_out"),
     ("Trade Cancelled", "trade_cancelled"),
+    ("Closed (Intraday)", "intraday_closed"),
 ]
 _DIRECTION_OPTIONS = [("All", None), ("BUY", "BUY"), ("SELL", "SELL")]
 
@@ -108,6 +109,8 @@ def _status_text(signal: dict) -> str:
         return "Targets Achieved"
     if resolution == "trade_cancelled":
         return "Trade Cancelled"
+    if resolution == "intraday_closed":
+        return "Closed (Intraday)"
     if signal.get("state") == "pending":
         return "Pending"
     if signal.get("state") == "open":
@@ -131,7 +134,9 @@ def _signal_from_api_item(item: dict) -> dict:
     against that local shape originally) works unchanged regardless of
     whether a row came from local state or the backend."""
     status = item.get("status")
-    resolution = status if status in ("stopped_out", "all_targets_achieved", "trade_cancelled") else None
+    resolution = status if status in (
+        "stopped_out", "all_targets_achieved", "trade_cancelled", "intraday_closed",
+    ) else None
     return {
         "id": item.get("id"),
         "state": "open",   # the backend never stores "pending" — see module docstring
@@ -160,6 +165,7 @@ _STATUS_COLOR_TOKEN = {
     "Open": "status_blue",
     "Pending": "status_orange",
     "Trade Cancelled": "status_purple",
+    "Closed (Intraday)": "status_amber",
 }
 
 

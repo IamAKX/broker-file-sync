@@ -25,11 +25,15 @@ from datetime import datetime, timedelta
 
 from services.strategy_alerts import messages, state_store
 from services.strategy_alerts.models import (
+    ALERT_MODE_INTRADAY,
     DIRECTION_BUY,
     EVENT_ENTRY,
+    EVENT_INTRADAY_CLOSE,
+    EVENT_REPEAT,
     EVENT_STOP_OUT,
     EVENT_TARGET,
     EVENT_TRADE_CANCELLED,
+    RESOLUTION_INTRADAY_CLOSED,
     RESOLUTION_TRADE_CANCELLED,
     ROLE_STOP_LOSS,
     ROLE_TARGET,
@@ -391,6 +395,44 @@ def _update_open_signal(
         if backfilled is not None:
             m["value"] = backfilled
 
+    # Issue #43: repeat alerts — re-notify this still-open signal whenever
+    # repeat_condition re-triggers (edge-triggered, same "armed" idiom
+    # state_store's cooldown set uses at the top-level entry/resolve boundary
+    # — fires once per false->true edge, not once per tick it stays true),
+    # gated by repeat_min_gap_minutes so a condition that stays true for many
+    # consecutive ticks (e.g. "% change increasing") can't refire every tick —
+    # see this module's own docstring / the plan behind issue #43 for why
+    # that floor exists (the alert-email spam-filtering lesson).
+    if config.get("repeat_enabled") and config.get("repeat_condition"):
+        repeat_is_true = evaluate_condition(
+            config["repeat_condition"], row, all_dicts, agg_cache=agg_cache,
+            sym_index=sym_index, day_history=day_history,
+        )
+        if repeat_is_true and signal.get("repeat_armed", True):
+            last_repeat_at = signal.get("last_repeat_at")
+            gap = timedelta(minutes=config.get("repeat_min_gap_minutes", 5))
+            if last_repeat_at is None or now - datetime.fromisoformat(last_repeat_at) >= gap:
+                signal["last_repeat_at"] = now.isoformat()
+                signal["repeat_armed"] = False
+                event = AlertEvent(
+                    kind=EVENT_REPEAT, strategy_id=strategy_id, strategy_name=strategy_name,
+                    symbol=symbol, timestamp=now,
+                    payload={
+                        "direction": direction, "sector": signal.get("sector"),
+                        "price": price, "time": now, "entry_time": signal.get("entry_time"),
+                        "metrics": signal["metrics"],
+                    },
+                )
+                event.payload["title"] = messages.render_title(event)
+                event.payload["message"] = messages.render_message(event)
+                # Deliberately NO "_signal" key here — see this module's
+                # docstring: a repeat never changes the signal's state, so
+                # backend_sync.sync_event (which no-ops without "_signal")
+                # correctly never fires a network call for it.
+                events.append(event)
+        elif not repeat_is_true:
+            signal["repeat_armed"] = True
+
     if price is not None:
         for metric_id, m in signal["metrics"].items():
             if m.get("role") != ROLE_TARGET or m.get("achieved") or m.get("value") is None:
@@ -467,6 +509,80 @@ def _update_open_signal(
         # event here (rather than one deepcopy per event) is safe.
         snapshot = copy.deepcopy(signal)
         for event in events:
+            # EVENT_REPEAT deliberately excluded — see its own construction
+            # above: a repeat never changes the signal's state, so it must
+            # stay without a "_signal" key or backend_sync.sync_event would
+            # push a pointless duplicate "open" upsert for every repeat.
+            if event.kind == EVENT_REPEAT:
+                continue
             event.payload["_signal"] = snapshot
+
+    return events
+
+
+def close_intraday_signals(
+    strategies: list, configs: dict, all_dicts: list, now: datetime,
+) -> list[AlertEvent]:
+    """Issue #43: force-resolve every OPEN signal belonging to an "intraday"
+    alert_mode strategy, using this tick's own row data for the exit price —
+    called exactly once per day, right as the alert window closes (see
+    services.strategy_alerts.alert_schedule.should_close_intraday_now; the
+    one caller, screens.live_viewer.LiveViewerWindow._run_strategy_alert_checks,
+    checks that BEFORE its own should_run_now() gate, since by definition the
+    window has just closed). A merely-PENDING signal for an intraday strategy
+    is dropped silently instead (no history entry, no notification) — it
+    never became a real alert, and letting it survive to tomorrow would fire
+    an entry the instant the market reopens with its debounce window already
+    satisfied purely by elapsed wall-clock time, which isn't what "intraday"
+    means. Positional-mode signals (the default), and any signal whose
+    strategy has since been deleted/disabled (config missing), are left
+    completely untouched — same as any other tick.
+
+    ``strategies``/``configs`` match evaluate_tick's own params. ``all_dicts``
+    is this tick's already-computed rows (same data evaluate_tick itself
+    reads) — used only to look up each signal's symbol's current row for its
+    exit price, not to re-evaluate any condition."""
+    events: list[AlertEvent] = []
+    row_by_symbol = {row.get(SYMBOL_COLUMN): row for row in all_dicts}
+    open_signals = state_store.get_open_signals()
+
+    for key, signal in list(open_signals.items()):
+        config = configs.get(signal.get("strategy_id"))
+        if not config or config.get("alert_mode") != ALERT_MODE_INTRADAY:
+            continue
+
+        if signal.get("state") == "pending":
+            state_store.clear_open_signal(key)
+            continue
+
+        if signal.get("state") != "open":
+            continue
+
+        row = row_by_symbol.get(signal.get("symbol"))
+        exit_price = _to_float(row.get(_PRICE_COLUMN)) if row else None
+
+        signal["resolved_at"] = now.isoformat()
+        signal["resolution"] = RESOLUTION_INTRADAY_CLOSED
+        signal["exit_price"] = exit_price
+        state_store.append_alert_history(signal)
+        state_store.clear_open_signal(key)
+        # Same rationale as every other resolve path in this module — don't
+        # let this symbol/strategy immediately re-arm into a brand new
+        # signal while its trigger is very possibly still sitting true.
+        state_store.set_cooldown(key)
+
+        event = AlertEvent(
+            kind=EVENT_INTRADAY_CLOSE, strategy_id=signal["strategy_id"],
+            strategy_name=signal.get("strategy_name", ""), symbol=signal["symbol"], timestamp=now,
+            payload={
+                "exit_price": exit_price, "time": now,
+                "entry_price": signal.get("entry_price"), "entry_time": signal.get("entry_time"),
+                "direction": signal.get("direction"),
+            },
+        )
+        event.payload["title"] = messages.render_title(event)
+        event.payload["message"] = messages.render_message(event)
+        event.payload["_signal"] = copy.deepcopy(signal)
+        events.append(event)
 
     return events

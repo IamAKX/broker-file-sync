@@ -1,9 +1,11 @@
 from datetime import datetime, timedelta
 
 from services.strategy_alerts import state_store
-from services.strategy_alerts.engine import evaluate_tick
+from services.strategy_alerts.engine import close_intraday_signals, evaluate_tick
 from services.strategy_alerts.models import (
     EVENT_ENTRY,
+    EVENT_INTRADAY_CLOSE,
+    EVENT_REPEAT,
     EVENT_STOP_OUT,
     EVENT_TARGET,
     EVENT_TRADE_CANCELLED,
@@ -27,13 +29,14 @@ def _gt_condition(col_name, threshold):
     return [_col(col_name), {"type": "op", "value": ">"}, _num(threshold)]
 
 
-def _row(signal=0, price=100, high=None, low=None, symbol="INFY"):
+def _row(signal=0, price=100, high=None, low=None, symbol="INFY", change=0):
     return {
         "Scrip Name": symbol,
         "Signal": signal,
         "Current": price,
         "High": high if high is not None else price,
         "Low": low if low is not None else price,
+        "Change": change,
     }
 
 
@@ -627,3 +630,153 @@ def test_cancelled_trade_does_not_immediately_restart_while_condition_still_true
     )
     assert events == []
     assert state_store.get_open_signals() == {}
+
+
+# ── Repeat Alerts (issue #43) ─────────────────────────────────────────────
+
+def _make_open_config(**kwargs):
+    """A config already driven open by T0+3min, for repeat-alert tests to
+    build on without re-deriving the pending->open dance each time."""
+    configs = {"strat-1": _make_config(debounce_minutes=2, **kwargs)}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(minutes=3))
+    assert next(iter(state_store.get_open_signals().values()))["state"] == "open"
+    return configs
+
+
+def test_repeat_disabled_by_default_no_repeat_event():
+    configs = _make_open_config()
+    configs["strat-1"]["repeat_condition"] = _gt_condition("Change", 0)
+    # repeat_enabled left at its default (False)
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=100, change=1)], now=T0 + timedelta(minutes=4),
+    )
+    assert not any(e.kind == EVENT_REPEAT for e in events)
+
+
+def test_repeat_fires_on_true_edge_then_stays_quiet_while_still_true():
+    configs = _make_open_config()
+    configs["strat-1"]["repeat_enabled"] = True
+    configs["strat-1"]["repeat_condition"] = _gt_condition("Change", 0)
+    configs["strat-1"]["repeat_min_gap_minutes"] = 5
+
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=101, change=1)], now=T0 + timedelta(minutes=4),
+    )
+    repeats = [e for e in events if e.kind == EVENT_REPEAT]
+    assert len(repeats) == 1
+    assert repeats[0].symbol == "INFY"
+    assert "title" in repeats[0].payload and "message" in repeats[0].payload
+    # Never synced to the backend — a repeat doesn't change signal state.
+    assert "_signal" not in repeats[0].payload
+
+    # Condition stays continuously true, well within the min gap — must not
+    # refire every tick.
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=101, change=1)], now=T0 + timedelta(minutes=4, seconds=30),
+    )
+    assert not any(e.kind == EVENT_REPEAT for e in events)
+
+
+def test_repeat_min_gap_blocks_immediate_refire_after_rearming():
+    configs = _make_open_config()
+    configs["strat-1"]["repeat_enabled"] = True
+    configs["strat-1"]["repeat_condition"] = _gt_condition("Change", 0)
+    configs["strat-1"]["repeat_min_gap_minutes"] = 5
+
+    evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=101, change=1)], now=T0 + timedelta(minutes=4),
+    )
+    # Goes false (rearms) then true again just 1 minute later — inside the
+    # 5-minute floor, so this edge must NOT refire yet.
+    evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=101, change=0)], now=T0 + timedelta(minutes=4, seconds=30),
+    )
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=101, change=1)], now=T0 + timedelta(minutes=5),
+    )
+    assert not any(e.kind == EVENT_REPEAT for e in events)
+
+
+def test_repeat_fires_again_once_condition_re_edges_past_the_gap():
+    configs = _make_open_config()
+    configs["strat-1"]["repeat_enabled"] = True
+    configs["strat-1"]["repeat_condition"] = _gt_condition("Change", 0)
+    configs["strat-1"]["repeat_min_gap_minutes"] = 5
+
+    evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=101, change=1)], now=T0 + timedelta(minutes=4),
+    )
+    evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=101, change=0)], now=T0 + timedelta(minutes=6),
+    )
+    events = evaluate_tick(
+        [STRATEGY], configs, [_row(signal=1, price=101, change=1)], now=T0 + timedelta(minutes=10),
+    )
+    assert len([e for e in events if e.kind == EVENT_REPEAT]) == 1
+
+
+# ── Intraday close (issue #43) ────────────────────────────────────────────
+
+def _open_signal_row_lookup(price=105):
+    return [_row(signal=1, price=price)]
+
+
+def test_close_intraday_signals_resolves_open_signal_with_exit_price():
+    configs = _make_open_config()
+    configs["strat-1"]["alert_mode"] = "intraday"
+
+    events = close_intraday_signals(
+        [STRATEGY], configs, _open_signal_row_lookup(price=105), T0 + timedelta(hours=6),
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert event.kind == EVENT_INTRADAY_CLOSE
+    assert event.symbol == "INFY"
+    assert event.payload["exit_price"] == 105
+    assert "_signal" in event.payload   # DOES sync — real state change
+
+    assert state_store.get_open_signals() == {}
+    history = state_store.get_alert_history()
+    assert history[-1]["resolution"] == "intraday_closed"
+    assert history[-1]["exit_price"] == 105
+
+
+def test_close_intraday_signals_clears_pending_signal_silently():
+    configs = {"strat-1": _make_config(debounce_minutes=2)}
+    configs["strat-1"]["alert_mode"] = "intraday"
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    assert next(iter(state_store.get_open_signals().values()))["state"] == "pending"
+
+    events = close_intraday_signals(
+        [STRATEGY], configs, _open_signal_row_lookup(), T0 + timedelta(hours=6),
+    )
+
+    assert events == []   # no notification for a signal that never confirmed
+    assert state_store.get_open_signals() == {}
+    assert state_store.get_alert_history() == []   # not a real alert — no history entry
+
+
+def test_close_intraday_signals_leaves_positional_signal_untouched():
+    configs = _make_open_config()   # alert_mode defaults to "positional"
+
+    events = close_intraday_signals(
+        [STRATEGY], configs, _open_signal_row_lookup(), T0 + timedelta(hours=6),
+    )
+
+    assert events == []
+    signals = state_store.get_open_signals()
+    assert len(signals) == 1
+    assert next(iter(signals.values()))["state"] == "open"
+
+
+def test_close_intraday_signals_ignores_signal_with_no_matching_config():
+    _make_open_config()
+
+    events = close_intraday_signals(
+        [STRATEGY], {}, _open_signal_row_lookup(), T0 + timedelta(hours=6),
+    )
+
+    assert events == []
+    assert len(state_store.get_open_signals()) == 1

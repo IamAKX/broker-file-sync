@@ -122,6 +122,21 @@ def test_trade_cancelled_status(screen, monkeypatch):
     assert screen._table.item(row, 5).text() == "Trade Cancelled"
 
 
+def test_intraday_closed_status(screen, monkeypatch):
+    """Issue #43: an "intraday" alert_mode strategy's signal force-resolved
+    at the day's alert-window close must render as "Closed (Intraday)", not
+    fall back to "Open" the way a backend-synced status not in
+    _signal_from_api_item's resolution allowlist would."""
+    fake = _FakeListApi(items=[_api_item(
+        symbol="RELIANCE", status="intraday_closed", resolved_at=datetime.now().isoformat(),
+    )])
+    monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
+    screen._refresh_table()
+
+    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, 3).text() == "RELIANCE")
+    assert screen._table.item(row, 5).text() == "Closed (Intraday)"
+
+
 def test_metrics_summary_shows_target_achieved_marker(screen, monkeypatch):
     item = _api_item(symbol="HDFC")
     item["metrics"]["m2"]["achieved"] = True
@@ -543,6 +558,25 @@ def test_trade_cancelled_status_has_its_own_distinct_color(screen, monkeypatch):
     stopped_color = screen._table.item(stopped_row, status_col).foreground().color()
     cancelled_color = screen._table.item(cancelled_row, status_col).foreground().color()
     assert stopped_color != cancelled_color
+
+
+def test_intraday_closed_status_has_its_own_distinct_color(screen, monkeypatch):
+    fake = _FakeListApi(items=[
+        _api_item(symbol="STOPPED", status="stopped_out"),
+        _api_item(symbol="CLOSED", status="intraday_closed"),
+    ])
+    monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
+    screen._refresh_table()
+
+    status_col = screen._COLUMNS.index("Status")
+    stock_col = screen._COLUMNS.index("Stock")
+
+    stopped_row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, stock_col).text() == "STOPPED")
+    closed_row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, stock_col).text() == "CLOSED")
+
+    stopped_color = screen._table.item(stopped_row, status_col).foreground().color()
+    closed_color = screen._table.item(closed_row, status_col).foreground().color()
+    assert stopped_color != closed_color
 
 
 # ── Row click -> detail popup ────────────────────────────────────────────────

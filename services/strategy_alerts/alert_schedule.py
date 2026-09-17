@@ -57,6 +57,13 @@ _checked_date: date | None = None    # the date the trading-day check last resol
 _is_trading_day = True               # fail-open until/unless proven otherwise (see module docstring)
 _loading = False
 
+# Issue #43: the calendar date should_close_intraday_now() last fired True for
+# — so it fires exactly once per day, right as the window closes, rather than
+# on every tick for the rest of the day. Separate from _checked_date above
+# (that one tracks the trading-day *fetch*, this one tracks the intraday-close
+# *action* itself).
+_intraday_closed_date: date | None = None
+
 
 def _parse_hhmm(value, default: dtime) -> dtime:
     if not value:
@@ -173,15 +180,39 @@ def should_run_now(now: datetime | None = None) -> bool:
     return start <= now.time() <= end
 
 
+def should_close_intraday_now(now: datetime | None = None) -> bool:
+    """True exactly once per calendar date — the first call whose *now* is at
+    or past the alert window's end (on any date, trading day or not; a
+    caller only reaches this once should_run_now() has been true at some
+    point that day, so there's always something to close). False every
+    other call, including every later tick that same day. Pure/cheap/safe
+    on the GUI thread, same as should_run_now() — see
+    services.strategy_alerts.engine.close_intraday_signals for what a True
+    result should trigger, and screens.live_viewer.LiveViewerWindow.
+    _run_strategy_alert_checks for the one call site (checked BEFORE
+    should_run_now(), since by definition the window has just closed)."""
+    global _intraday_closed_date
+    now = now or datetime.now()
+    today = now.date()
+    if _intraday_closed_date == today:
+        return False
+    _, end = peek_alert_window()
+    if now.time() < end:
+        return False
+    _intraday_closed_date = today
+    return True
+
+
 def reload_cache() -> None:
     """Drop every in-memory cache here so the next check re-fetches —
     call on login/logout (services.strategy_alerts.config_store.
     reload_cache's own call site, app_window.py's reload_per_user_data)
     so a second user on the same running app instance doesn't keep
     evaluating alerts against the first user's saved window."""
-    global _window_cache, _checked_date, _is_trading_day, _loading
+    global _window_cache, _checked_date, _is_trading_day, _loading, _intraday_closed_date
     _window_cache = None
     with _lock:
         _checked_date = None
         _is_trading_day = True
         _loading = False
+        _intraday_closed_date = None

@@ -55,6 +55,75 @@ def test_direction_combo_updates_config(qapp):
     assert section.result_config()["direction"] == "SELL"
 
 
+# ── Alert Mode (issue #43) ────────────────────────────────────────────────
+
+def test_alert_mode_defaults_positional(qapp):
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    assert section.result_config()["alert_mode"] == "positional"
+
+
+def test_alert_mode_combo_updates_config(qapp):
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    section._alert_mode_combo.setCurrentText("intraday")
+    assert section.result_config()["alert_mode"] == "intraday"
+
+
+# ── Repeat Alerts (issue #43) ─────────────────────────────────────────────
+
+def test_repeat_alerts_defaults(qapp):
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    cfg = section.result_config()
+    assert cfg["repeat_enabled"] is False
+    assert cfg["repeat_condition"] == []
+    assert cfg["repeat_min_gap_minutes"] == 5
+    assert section._repeat_widget.isHidden()
+
+
+def test_repeat_enabled_toggle_shows_widget_and_updates_config(qapp):
+    # isVisible() only reflects reality once the screen is actually shown in
+    # a real window (which this test fixture never does) — check the
+    # explicit-visibility flag instead, same convention test_live_alerts.py
+    # already uses for the same reason.
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    section._repeat_enabled_check.toggled.emit(True)
+    assert section.result_config()["repeat_enabled"] is True
+    assert not section._repeat_widget.isHidden()
+
+
+def test_repeat_gap_spin_updates_config(qapp):
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    section._repeat_gap_spin.setValue(15)
+    assert section.result_config()["repeat_min_gap_minutes"] == 15
+
+
+def test_accepting_repeat_condition_editor_saves_it(qapp, monkeypatch):
+    editor = _make_editor(qapp)
+    section = editor._notif_section
+    from screens import formula_editor
+    from PySide6.QtWidgets import QDialog as _QD
+
+    tokens = [{"type": "col", "value": "% Change"}, {"type": "op", "value": ">"}, {"type": "num", "value": "0"}]
+
+    class _FakeDlg:
+        def __init__(self, *a, **kw):
+            pass
+        def exec(self):
+            return _QD.DialogCode.Accepted
+        def get_tokens(self):
+            return tokens
+
+    monkeypatch.setattr(formula_editor, "ExpressionEditorDialog", _FakeDlg)
+    section._open_repeat_condition_editor()
+
+    assert section.result_config()["repeat_condition"] == tokens
+    assert "% Change" in section._repeat_preview.text()
+
+
 # ── Trigger ──────────────────────────────────────────────────────────────────
 #
 # Deliberately a single standalone condition, not "pick one column's existing

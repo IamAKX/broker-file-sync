@@ -28,7 +28,11 @@ import concurrent.futures
 from api import strategy_signals_api
 from api.exceptions import ApiError, NetworkError
 from services.error_logging import error_logger
-from services.strategy_alerts.models import RESOLUTION_TRADE_CANCELLED, AlertEvent
+from services.strategy_alerts.models import (
+    RESOLUTION_INTRADAY_CLOSED,
+    RESOLUTION_TRADE_CANCELLED,
+    AlertEvent,
+)
 
 # One shared, small pool for the app's lifetime — same rationale as
 # channels/email.py's _executor: signal transitions are infrequent (only on
@@ -45,6 +49,8 @@ def _status_for(signal: dict) -> str:
         return "all_targets_achieved"
     if resolution == RESOLUTION_TRADE_CANCELLED:
         return RESOLUTION_TRADE_CANCELLED
+    if resolution == RESOLUTION_INTRADAY_CLOSED:
+        return RESOLUTION_INTRADAY_CLOSED
     return "open"
 
 

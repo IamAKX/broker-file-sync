@@ -1980,19 +1980,12 @@ class LiveViewerWindow(QWidget):
         and marks "+N more" rather than let the OS truncate silently), Email
         gets the full per-stock detail for every event, unabridged.
         """
+        from datetime import datetime
+
         from services.strategy_alerts import alert_schedule
         from services.strategy_alerts import config_store as alerts_config_store
         from services.strategy_alerts import state_store as alerts_state_store
-        from services.strategy_alerts.engine import evaluate_tick
-
-        # Never evaluate outside the configured alert window, or on a
-        # non-trading day — issue #31: a live feed that keeps ticking with
-        # stale/leftover data well after market close (or on a weekend/
-        # holiday) has no way to know that itself; evaluate_tick just sees
-        # row data and fires whatever it matches. See alert_schedule's own
-        # docstring — this check is pure/cheap, never a network call.
-        if not alert_schedule.should_run_now():
-            return
+        from services.strategy_alerts.engine import close_intraday_signals, evaluate_tick
 
         # peek_configs(), not load_configs() — this runs on the GUI thread,
         # on EVERY render pass (every live tick), so it must never risk a
@@ -2001,11 +1994,36 @@ class LiveViewerWindow(QWidget):
         # block here). Worst case with peek_configs is one tick with no
         # live-alert coverage while the cache is still cold, not a frozen
         # window.
-        configs = alerts_config_store.peek_configs()
-        if not configs:
-            return
-        events = evaluate_tick(active_strategies, configs, all_dicts, sym_index,
-                               agg_cache, day_history=self._day_history)
+        events = []
+
+        # Issue #43: checked BEFORE should_run_now() below, and unconditionally
+        # (not inside that gate) — by definition this fires exactly once, right
+        # as the window closes, i.e. the first tick for which should_run_now()
+        # is ABOUT to go False for the day. This call site runs every tick
+        # regardless of the alert window (Live Master View keeps polling/
+        # rendering after hours; only alert *evaluation* below is gated), so
+        # it reliably gets that one shot at the day's last live row data.
+        if alert_schedule.should_close_intraday_now():
+            configs_for_close = alerts_config_store.peek_configs()
+            if configs_for_close:
+                events.extend(
+                    close_intraday_signals(active_strategies, configs_for_close, all_dicts, datetime.now())
+                )
+
+        # Never evaluate outside the configured alert window, or on a
+        # non-trading day — issue #31: a live feed that keeps ticking with
+        # stale/leftover data well after market close (or on a weekend/
+        # holiday) has no way to know that itself; evaluate_tick just sees
+        # row data and fires whatever it matches. See alert_schedule's own
+        # docstring — this check is pure/cheap, never a network call.
+        if alert_schedule.should_run_now():
+            configs = alerts_config_store.peek_configs()
+            if configs:
+                events.extend(
+                    evaluate_tick(active_strategies, configs, all_dicts, sym_index,
+                                 agg_cache, day_history=self._day_history)
+                )
+
         if not events:
             return
 

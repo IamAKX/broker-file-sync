@@ -1658,6 +1658,31 @@ class NotificationSection(QWidget):
         dir_row.addStretch()
         root.addLayout(dir_row)
 
+        # ── Alert Mode (issue #43) ──────────────────────────────────────────
+        # Positional (default, today's only behavior): a still-open signal
+        # carries past the day's alert window close into the next day.
+        # Intraday: force-closed right at window close instead, using the
+        # Current price at that moment as the exit — see
+        # services.strategy_alerts.alert_schedule.should_close_intraday_now /
+        # engine.close_intraday_signals.
+        mode_row = QHBoxLayout()
+        mode_lbl = QLabel("Alert Mode:")
+        mode_lbl.setFixedWidth(140)
+        self._alert_mode_combo = QComboBox()
+        self._alert_mode_combo.addItems(
+            [alerts_models.ALERT_MODE_POSITIONAL, alerts_models.ALERT_MODE_INTRADAY]
+        )
+        self._alert_mode_combo.setCurrentText(
+            self._config.get("alert_mode", alerts_models.ALERT_MODE_POSITIONAL)
+        )
+        self._alert_mode_combo.currentTextChanged.connect(
+            lambda v: self._config.update({"alert_mode": v})
+        )
+        mode_row.addWidget(mode_lbl)
+        mode_row.addWidget(self._alert_mode_combo)
+        mode_row.addStretch()
+        root.addLayout(mode_row)
+
         # ── Trigger condition ────────────────────────────────────────────
         # Deliberately a single standalone condition, not "pick one column's
         # existing conditional-formatting rule": a strategy can have several
@@ -1687,6 +1712,65 @@ class NotificationSection(QWidget):
         cond_row.addWidget(self._trigger_preview, 1)
         cond_row.addWidget(edit_trigger_btn)
         root.addLayout(cond_row)
+
+        # ── Repeat Alerts (issue #43) ────────────────────────────────────
+        # Re-notifies a still-OPEN signal whenever repeat_condition
+        # re-triggers (edge-triggered — fires once per false->true edge, not
+        # every tick it stays true), no more often than repeat_min_gap_minutes
+        # apart. For a strategy the user considers "strong" and wants to keep
+        # hearing about while a position runs, e.g. repeat_condition =
+        # "% change increasing".
+        root.addWidget(_sep(t))
+        repeat_hdr = QHBoxLayout()
+        repeat_title = QLabel("Repeat Alerts")
+        repeat_title.setFont(font_scale.font(font_scale.SMALL, True))
+        self._repeat_enabled_check = QCheckBox("Enabled")
+        self._repeat_enabled_check.setChecked(bool(self._config.get("repeat_enabled")))
+        self._repeat_enabled_check.toggled.connect(self._on_repeat_enabled_toggled)
+        repeat_hdr.addWidget(repeat_title)
+        repeat_hdr.addStretch()
+        repeat_hdr.addWidget(self._repeat_enabled_check)
+        root.addLayout(repeat_hdr)
+
+        self._repeat_widget = QWidget()
+        repeat_lay = QVBoxLayout(self._repeat_widget)
+        repeat_lay.setContentsMargins(0, 0, 0, 0)
+        repeat_lay.setSpacing(6)
+
+        self._config.setdefault("repeat_condition", [])
+
+        repeat_cond_row = QHBoxLayout()
+        repeat_cond_lbl = QLabel("Condition:")
+        repeat_cond_lbl.setFixedWidth(140)
+        self._repeat_preview = QLabel(
+            _tokens_to_display(self._config.get("repeat_condition", []))
+        )
+        self._repeat_preview.setFont(QFont("Menlo,Consolas,monospace", 9))
+        self._repeat_preview.setStyleSheet(f"color:{_t(t,'accent')};background:transparent;")
+        self._repeat_preview.setWordWrap(True)
+        edit_repeat_btn = _btn("Edit Condition…", outlined=True, theme=t, small=True)
+        edit_repeat_btn.clicked.connect(self._open_repeat_condition_editor)
+        repeat_cond_row.addWidget(repeat_cond_lbl)
+        repeat_cond_row.addWidget(self._repeat_preview, 1)
+        repeat_cond_row.addWidget(edit_repeat_btn)
+        repeat_lay.addLayout(repeat_cond_row)
+
+        repeat_gap_row = QHBoxLayout()
+        repeat_gap_lbl = QLabel("Min gap (minutes):")
+        repeat_gap_lbl.setFixedWidth(140)
+        self._repeat_gap_spin = QSpinBox()
+        self._repeat_gap_spin.setRange(1, 120)
+        self._repeat_gap_spin.setValue(int(self._config.get("repeat_min_gap_minutes", 5)))
+        self._repeat_gap_spin.valueChanged.connect(
+            lambda v: self._config.update({"repeat_min_gap_minutes": v})
+        )
+        repeat_gap_row.addWidget(repeat_gap_lbl)
+        repeat_gap_row.addWidget(self._repeat_gap_spin)
+        repeat_gap_row.addStretch()
+        repeat_lay.addLayout(repeat_gap_row)
+
+        root.addWidget(self._repeat_widget)
+        self._repeat_widget.setVisible(bool(self._config.get("repeat_enabled")))
 
         # ── Debounce ─────────────────────────────────────────────────────
         root.addWidget(_sep(t))
@@ -1811,6 +1895,29 @@ class NotificationSection(QWidget):
             self._config["trigger_condition"] = dlg.get_tokens()
             self._trigger_preview.setText(
                 _tokens_to_display(self._config["trigger_condition"]) or "—"
+            )
+
+    # ── Repeat Alerts ────────────────────────────────────────────────────
+
+    def _on_repeat_enabled_toggled(self, checked: bool):
+        self._config["repeat_enabled"] = checked
+        self._repeat_widget.setVisible(checked)
+
+    def _open_repeat_condition_editor(self):
+        from screens.formula_editor import ExpressionEditorDialog
+        headers, extra_values = self._combined_headers_fn()
+        dlg = ExpressionEditorDialog(
+            tokens=list(self._config.get("repeat_condition", [])),
+            lmv_headers=headers, strategy_col_headers=[],
+            lmv_first_row=self._lmv_first_row, all_lmv_data=self._all_lmv_data,
+            theme=self._theme, mode="condition", allow_self=False,
+            extra_row_values=extra_values,
+            real_lmv_headers=list(self._lmv_first_row.keys()), parent=self,
+        )
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._config["repeat_condition"] = dlg.get_tokens()
+            self._repeat_preview.setText(
+                _tokens_to_display(self._config["repeat_condition"]) or "—"
             )
 
     # ── Score ────────────────────────────────────────────────────────────
