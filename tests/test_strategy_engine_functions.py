@@ -944,7 +944,13 @@ def test_value_days_ago_resolves_via_first_key_with_n_plus_1_window():
     assert result == 97.0
 
 
-def test_value_days_ago_zero_means_today():
+def test_value_days_ago_zero_means_most_recent_saved_day_not_today():
+    """Issue #44: 0 is the most recent day with saved historic data — during
+    live trading that's usually YESTERDAY (today's data isn't saved as a
+    historic snapshot until end of day), never "today" itself. This test
+    only pins the (window, key) mechanics (0 -> window=1 -> "First"); which
+    calendar day that window actually resolves to is entirely up to
+    range_fetcher/get_range, not this function."""
     day_history = {("High", 1): {"INFY": {"First": 105.0}}}   # window = 0+1
     result = evaluate(days_ago_tok("High", 0), ROW_WITH_SYMBOL, [ROW_WITH_SYMBOL],
                       day_history=day_history)

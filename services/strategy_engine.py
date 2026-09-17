@@ -24,8 +24,9 @@ Supported:
              N historic trading days — see "Historic (N days) aggregates"
              below)
   Point    : VALUE_DAYS_AGO  VALUE_ON_DATE  (per stock, a single historic
-             value — N trading days before today, or on one specific
-             calendar date — see "Historic value (point lookup)" below)
+             value — N trading days before the most recent saved day, or on
+             one specific calendar date — see "Historic value (point
+             lookup)" below)
   Extreme  : VALUE_AT_MAX_DAYS  VALUE_AT_MIN_DAYS  (per stock, another
              column's value on whichever of the last N historic trading days
              a DRIVER column was at its highest/lowest — see "Historic value
@@ -61,7 +62,11 @@ rather than crash" fallback as a column missing from a row.
 VALUE_DAYS_AGO([High], 2) and VALUE_ON_DATE([High], "2026-07-15") are a
 column's own value on ONE specific historic day for the SAME stock — not an
 aggregate over a window, just that one day's value. VALUE_DAYS_AGO counts
-back N trading days from today (N=0 is today/the most recent day);
+back N trading days from the most recent day with saved historic data —
+NOT "today" (issue #44): N=0 is that most recent SAVED day, which during
+live trading is usually YESTERDAY, since today's data isn't saved as a
+historic snapshot until end of day (see api/lmv_snapshot_api.py::get_range's
+own docstring — "the N most recent trade dates with saved snapshot data").
 VALUE_ON_DATE takes an exact calendar date instead. Both reuse the exact
 same day_history cache/plumbing as the _DAYS family above (see
 services.formula_stats_engine.compute_stats' "First" key) — VALUE_DAYS_AGO's

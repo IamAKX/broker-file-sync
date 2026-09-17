@@ -107,7 +107,7 @@ FUNCTION_CATALOGUE = [
 # services.strategy_engine's "Historic value (point lookup)"/"Historic value
 # at a window extreme" docstring sections.
 POINT_LOOKUP_CATALOGUE = [
-    {"name": "VALUE_DAYS_AGO", "signature": "VALUE_DAYS_AGO(column, days_ago)", "description": "This stock's own column value exactly N trading days before today (0 = today/most recent). Not an aggregate — just that one day's value.", "token": {"type": "func", "value": "VALUE_DAYS_AGO(", "needs_point_picker": "days_ago"}},
+    {"name": "VALUE_DAYS_AGO", "signature": "VALUE_DAYS_AGO(column, days_ago)", "description": "This stock's own column value exactly N trading days before the most recent day with saved historic data — 0 is that most recent saved day (usually YESTERDAY during live trading, since today's data isn't saved as a historic snapshot until end of day), 1 is the day before that, and so on. Not an aggregate — just that one day's value.", "token": {"type": "func", "value": "VALUE_DAYS_AGO(", "needs_point_picker": "days_ago"}},
     {"name": "VALUE_ON_DATE",  "signature": "VALUE_ON_DATE(column, date)",      "description": "This stock's own column value on one specific calendar date you pick — e.g. the High on a particular day.", "token": {"type": "func", "value": "VALUE_ON_DATE(", "needs_point_picker": "on_date"}},
     {"name": "VALUE_AT_MAX_DAYS", "signature": "VALUE_AT_MAX_DAYS(column, driver_column, days)", "description": "This stock's own column value on whichever of the last N historic trading days a second (driver) column was at its HIGHEST — e.g. High on the day CWTO peaked in the last 5 days. Either column can be a raw sheet column or another of this strategy's own columns.", "token": {"type": "func", "value": "VALUE_AT_MAX_DAYS(", "needs_point_picker": "extreme_days"}},
     {"name": "VALUE_AT_MIN_DAYS", "signature": "VALUE_AT_MIN_DAYS(column, driver_column, days)", "description": "Same as VALUE_AT_MAX_DAYS, but for whichever day the driver column was at its LOWEST — e.g. Low on the day CWTO bottomed in the last 5 days.", "token": {"type": "func", "value": "VALUE_AT_MIN_DAYS(", "needs_point_picker": "extreme_days"}},
@@ -668,7 +668,10 @@ class _ColumnPickerDialog(QDialog):
 
 class _DaysAgoPickerDialog(QDialog):
     """Step 2 of building VALUE_DAYS_AGO: how many trading days back from
-    today (0 = today/most recent)."""
+    the most recent day with saved historic data (0 = that day itself —
+    issue #44: NOT "today", since today's live data isn't saved as a
+    historic snapshot until end of day; 0 is usually yesterday during live
+    trading)."""
 
     def __init__(self, theme, parent=None):
         super().__init__(parent)
@@ -682,7 +685,12 @@ class _DaysAgoPickerDialog(QDialog):
         )
         lay = QVBoxLayout(self)
         lay.setSpacing(10)
-        lay.addWidget(QLabel("Trading days before today (0 = today/most recent):"))
+        days_lbl = QLabel(
+            "Trading days before the most recent saved day (0 = that day, "
+            "usually YESTERDAY during live trading — not today):"
+        )
+        days_lbl.setWordWrap(True)
+        lay.addWidget(days_lbl)
         self._spin = QSpinBox()
         self._spin.setRange(0, 3650)
         self._spin.setValue(1)
