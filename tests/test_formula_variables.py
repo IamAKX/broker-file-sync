@@ -177,6 +177,23 @@ def test_compile_check_reports_unknown_column_inside_variable(var_store):
     assert "GhostColumn" in msg
 
 
+def test_compile_check_names_unresolved_variable_mid_formula(var_store):
+    """A {Name} token that isn't the whole formula, just one comparison's
+    operand (e.g. `[Open] >= {NotYetCreated}`), used to be silently dropped
+    by _expand_var_tokens, leaving a dangling operator ("[Open] >= ") that
+    fails compile()'s structural check with a generic "check your brackets"
+    SyntaxError message — not naming the real cause: the variable was never
+    created (e.g. a formula copied from another strategy and retyped with a
+    new variable name that hasn't been saved yet)."""
+    from services.strategy_engine import compile_check
+    tokens = [tok_col("Open"), tok_op(">="), tok_var("NeverCreated")]
+    ok, msg = compile_check(tokens, {"Open": "1"}, [{"Open": "1"}])
+    assert ok is False
+    assert "NeverCreated" in msg
+    assert "bracket" not in msg.lower()
+    assert "matching" not in msg.lower()
+
+
 # ── End-to-end: the digit-tiered threshold as a variable ────────────────────
 
 def test_digit_tiered_threshold_variable_five_digit(var_store):
@@ -227,8 +244,7 @@ def test_digit_tiered_threshold_variable_used_in_comparison(var_store):
 # (services.inception_formula_variable_store), so any variable used in an
 # Inception formula silently resolved against the wrong (LMV) store: found
 # nothing, got dropped, and either evaluated as if it were never there or
-# (for a formula that was JUST the variable) failed compile_check outright
-# with "The variable(s) this formula refers to are empty or missing."
+# failed compile_check outright naming the variable as unresolved.
 
 @pytest.fixture
 def inception_var_store(tmp_path, monkeypatch):
@@ -261,7 +277,7 @@ def test_inception_variable_resolves_via_explicit_variable_store(inception_var_s
     assert msg == "42"
     ok2, msg2 = compile_check(tokens, {}, [{}])
     assert ok2 is False
-    assert "empty or missing" in msg2
+    assert "Unknown variable" in msg2 and "MyVar" in msg2
 
 
 def test_lmv_and_inception_variables_of_the_same_name_do_not_collide(var_store, inception_var_store):

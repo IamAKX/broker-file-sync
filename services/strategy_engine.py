@@ -359,6 +359,32 @@ def _expand_var_tokens(tokens: list, variable_store=None, _seen: frozenset = fro
     return out
 
 
+def _missing_var_names(tokens: list, variable_store=None, _seen: frozenset = frozenset()) -> list:
+    """Names of every {"type": "var"} token in ``tokens`` (recursively, through
+    resolved variables' own formulas) that _expand_var_tokens would silently
+    drop because ``variable_store`` has no variable by that name. Used by
+    compile_check to report the real cause up front instead of letting the
+    dropped token corrupt the derived expression's syntax."""
+    if not any(tok.get("type") == "var" for tok in tokens):
+        return []
+    if variable_store is None:
+        from services import formula_variable_store as variable_store
+    missing = []
+    for tok in tokens:
+        if tok.get("type") != "var":
+            continue
+        name = tok.get("value")
+        if name in _seen:
+            continue
+        var = variable_store.get_by_name(name)
+        if var is None:
+            missing.append(name)
+            continue
+        missing.extend(_missing_var_names(var.get("formula", []), variable_store, _seen | {name}))
+    seen_out = set()
+    return [n for n in missing if not (n in seen_out or seen_out.add(n))]
+
+
 # ── token → expression string ──────────────────────────────────────────────
 
 def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
@@ -1561,6 +1587,20 @@ def compile_check(tokens: list, row_data: dict, all_data: list,
     """
     if not tokens:
         return False, "Formula is empty."
+
+    # Name any {Name} variable that won't resolve *before* expanding it away.
+    # _expand_var_tokens silently drops an unknown variable token (by design,
+    # for runtime evaluation robustness — see its own docstring), which can
+    # leave a dangling operator behind (e.g. "... >= )") that fails the
+    # structural compile() below with the generic "check your brackets"
+    # message instead of naming the actual missing variable.
+    missing_vars = _missing_var_names(tokens, variable_store)
+    if missing_vars:
+        names = ", ".join(f"{{{n}}}" for n in missing_vars)
+        return False, (f"Unknown variable(s): {names}. This name doesn't match "
+                       f"any saved formula variable — check Data > Manage "
+                       f"Variables (Sync if it was just added elsewhere), or "
+                       f"pick it from the Variables list instead of typing it.")
 
     # Expand {"type": "var"} references up front so every check below (the
     # unknown-column scan included) sees the referenced variable's own
