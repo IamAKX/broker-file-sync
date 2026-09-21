@@ -1,5 +1,6 @@
 """Tests for services/inception_day_history.py — pure logic, no Qt/DB."""
-from datetime import date
+from datetime import date, timedelta
+from unittest.mock import patch
 
 from services import inception_day_history as idh
 
@@ -80,8 +81,12 @@ def test_raw_day_specs_picks_up_raw_field_only():
 
 def test_raw_day_specs_excludes_derived_columns():
     """A _DAYS reference to a Group A/B or Formula Builder derived code
-    (not a raw OHLCV field) is out of this module's scope — see its
-    docstring — and must not show up here."""
+    (not a raw OHLCV field) is out of raw_day_specs' own scope — it stays
+    that way even after issue #45's fix (derived_day_specs picks up VALUE_
+    DAYS_AGO/VALUE_ON_DATE against a derived column instead — _DAYS-family
+    aggregates like AVG_DAYS against a derived column are still out of
+    scope everywhere, see derived_day_specs' own docstring) — see
+    test_derived_day_specs_* below for what IS now supported."""
     strategies = [_strategy([tok_days("AVG_DAYS", "52WH", 30)])]
     assert idh.raw_day_specs(strategies) == []
 
@@ -181,14 +186,19 @@ def test_raw_extreme_specs_dates_variant():
 
 
 def test_raw_extreme_specs_excludes_when_driver_is_derived():
-    """CWTO is a Group A/B derived column, not a raw OHLCV field — same
-    RAW_FIELDS-only scoping as raw_day_specs, applied to the driver side
-    too."""
+    """CWTO is a Formula Builder derived column (services.formula_engine.
+    FORMULA_CODES), not a raw OHLCV field — same RAW_FIELDS-only scoping
+    as raw_day_specs, applied to the driver side too. raw_extreme_specs
+    itself stays this way after issue #45's fix — see
+    test_extreme_specs_for_strategies_includes_mixed_kind_pairs and
+    test_build_extreme_for_pairs_resolves_raw_side_of_mixed_kind_spec
+    below for what a mixed raw/derived pair now resolves to instead."""
     strategies = [_strategy([tok_extreme_days("VALUE_AT_MAX_DAYS", "HIGH", "CWTO", 5)])]
     assert idh.raw_extreme_specs(strategies) == []
 
 
 def test_raw_extreme_specs_excludes_when_value_col_is_derived():
+    """52WH is a Group A/B derived column, not a raw OHLCV field."""
     strategies = [_strategy([tok_extreme_days("VALUE_AT_MAX_DAYS", "52WH", "CLOSE", 5)])]
     assert idh.raw_extreme_specs(strategies) == []
 
@@ -255,3 +265,340 @@ def test_merge_into_different_symbols_coexist():
     idh.merge_into(day_history, {("HIGH", 20): {"A": {"Average": 1.0}}})
     idh.merge_into(day_history, {("HIGH", 20): {"B": {"Average": 2.0}}})
     assert day_history[("HIGH", 20)] == {"A": {"Average": 1.0}, "B": {"Average": 2.0}}
+
+
+# ── issue #45 — Formula Builder / Group A/B columns ──────────────────────
+# derived_day_specs/resolve_formula_builder_day/resolve_group_a_b_day (the
+# VALUE_DAYS_AGO/VALUE_ON_DATE analogues) and extreme_specs_for_strategies/
+# extreme_needed_pairs/split_extreme_pairs_by_kind/build_extreme_for_pairs/
+# resolve_formula_builder_extreme/resolve_group_a_b_extreme (the VALUE_AT_
+# MAX/MIN_DAYS/DATES analogues) — see the module docstring's "Formula
+# Builder / Group A/B columns" section.
+
+def test_derived_day_specs_picks_up_value_days_ago_for_formula_builder_column():
+    """CWTO is a Formula Builder code (services.formula_engine.
+    FORMULA_CODES) — raw_day_specs drops it (see
+    test_raw_day_specs_excludes_derived_columns' sibling), derived_day_specs
+    picks it up instead."""
+    strategies = [_strategy([tok_days("VALUE_DAYS_AGO", "CWTO", 4)])]
+    assert idh.derived_day_specs(strategies) == [("First", "CWTO", 5)]
+
+
+def test_derived_day_specs_picks_up_value_on_date_for_group_ab_column():
+    strategies = [_strategy([tok_on_date("52WH", "2025-01-05")])]
+    assert idh.derived_day_specs(strategies) == [("First", "52WH", ("2025-01-05", "2025-01-05"))]
+
+
+def test_derived_day_specs_excludes_raw_fields():
+    """Raw fields stay raw_day_specs' own job — not duplicated here."""
+    strategies = [_strategy([tok_days("VALUE_DAYS_AGO", "CLOSE", 4)])]
+    assert idh.derived_day_specs(strategies) == []
+
+
+def test_derived_day_specs_excludes_days_family_aggregates():
+    """AVG_DAYS/MAX_DAYS/etc against a derived column stay out of scope —
+    _DAYS_AGG_BASE never produces agg_key "First", see this fix's
+    Non-goals."""
+    strategies = [_strategy([tok_days("AVG_DAYS", "CWTO", 20)])]
+    assert idh.derived_day_specs(strategies) == []
+
+
+def test_derived_day_specs_excludes_value_before_change():
+    """VALUE_BEFORE_CHANGE's own tagged window is services.
+    inception_value_before_change's job, not this module's, even against a
+    derived column."""
+    strategies = [_strategy([tok_before_change("CWTO", 6)])]
+    assert idh.derived_day_specs(strategies) == []
+
+
+def test_derived_day_specs_deduped_across_strategies():
+    strategies = [
+        _strategy([tok_days("VALUE_DAYS_AGO", "CWTO", 4)]),
+        _strategy([tok_days("VALUE_DAYS_AGO", "CWTO", 4)]),
+    ]
+    assert idh.derived_day_specs(strategies) == [("First", "CWTO", 5)]
+
+
+def test_derived_day_specs_scans_active_and_inactive_strategies():
+    strategies = [dict(_strategy([tok_days("VALUE_DAYS_AGO", "CWTO", 4)]), active=False)]
+    assert idh.derived_day_specs(strategies) == [("First", "CWTO", 5)]
+
+
+def test_resolve_formula_builder_day_value_days_ago_reported_case():
+    """The issue's own reported case: VALUE_DAYS_AGO([CWTO], 4)."""
+    bars = _bars([100, 105, 110, 90, 95, 120])   # 6 bars
+    specs = [("First", "CWTO", 5)]   # VALUE_DAYS_AGO([CWTO], 4) -> window=5
+
+    def fake_compute_for_bars(symbol, bar_slice):
+        return {"CWTO": len(bar_slice) * 10}
+
+    with patch("services.inception_formula_builder_columns.compute_for_bars", side_effect=fake_compute_for_bars):
+        result = idh.resolve_formula_builder_day(specs, "ABB", bars)
+
+    # idx = len(bars) - window = 6 - 5 = 1 -> slice length 2 -> value 20
+    assert result == {("CWTO", 5): {"ABB": {"First": 20}}}
+
+
+def test_resolve_formula_builder_day_value_on_date():
+    bars = _bars([100, 105, 110])   # 2025-01-01..03
+    specs = [("First", "CWTO", ("2025-01-02", "2025-01-02"))]
+
+    def fake_compute_for_bars(symbol, bar_slice):
+        return {"CWTO": len(bar_slice) * 10}
+
+    with patch("services.inception_formula_builder_columns.compute_for_bars", side_effect=fake_compute_for_bars):
+        result = idh.resolve_formula_builder_day(specs, "ABB", bars)
+
+    # 2025-01-02 is bars[1] -> slice length 2 -> value 20
+    assert result == {("CWTO", ("2025-01-02", "2025-01-02")): {"ABB": {"First": 20}}}
+
+
+def test_resolve_formula_builder_day_not_enough_bars_is_none():
+    bars = _bars([100, 105])
+    specs = [("First", "CWTO", 10)]
+    result = idh.resolve_formula_builder_day(specs, "ABB", bars)
+    assert result == {("CWTO", 10): {"ABB": {"First": None}}}
+
+
+def test_resolve_formula_builder_day_date_not_found_is_none():
+    bars = _bars([100, 105, 110])
+    specs = [("First", "CWTO", ("2030-01-01", "2030-01-01"))]
+    result = idh.resolve_formula_builder_day(specs, "ABB", bars)
+    assert result == {("CWTO", ("2030-01-01", "2030-01-01")): {"ABB": {"First": None}}}
+
+
+def test_resolve_formula_builder_day_no_specs_or_bars_is_noop():
+    assert idh.resolve_formula_builder_day([], "ABB", _bars([100])) == {}
+    assert idh.resolve_formula_builder_day([("First", "CWTO", 5)], "ABB", []) == {}
+
+
+def test_extreme_specs_for_strategies_includes_mixed_kind_pairs():
+    """Superset of raw_extreme_specs — a raw driver + Formula Builder value
+    column (or vice versa) IS included here, unlike raw_extreme_specs (see
+    test_raw_extreme_specs_excludes_when_driver_is_derived)."""
+    strategies = [_strategy([tok_extreme_days("VALUE_AT_MAX_DAYS", "CLOSE", "CWTO", 5)])]
+    assert idh.extreme_specs_for_strategies(strategies) == [("CLOSE", "CWTO", 5, True)]
+
+
+def test_extreme_specs_for_strategies_deduped_across_strategies():
+    strategies = [
+        _strategy([tok_extreme_days("VALUE_AT_MAX_DAYS", "CLOSE", "CWTO", 5)]),
+        _strategy([tok_extreme_days("VALUE_AT_MAX_DAYS", "CLOSE", "CWTO", 5)]),
+    ]
+    assert idh.extreme_specs_for_strategies(strategies) == [("CLOSE", "CWTO", 5, True)]
+
+
+def test_extreme_needed_pairs_unions_value_and_driver_sides():
+    specs = [("CLOSE", "CWTO", 5, True)]
+    assert idh.extreme_needed_pairs(specs) == {("CLOSE", 5), ("CWTO", 5)}
+
+
+def test_extreme_needed_pairs_self_referential_collapses_to_one_pair():
+    specs = [("CWTO", "CWTO", 5, True)]
+    assert idh.extreme_needed_pairs(specs) == {("CWTO", 5)}
+
+
+def test_split_extreme_pairs_by_kind_partitions_raw_fb_and_other():
+    """An unresolvable name (SOME_STRATEGY_OUTPUT_COL — neither raw, nor
+    Formula Builder, nor a real Group A/B code) lands in the "other" bucket
+    alongside genuine Group A/B columns, both handled the same
+    silent-blank-if-missing way by resolve_group_a_b_extreme."""
+    pairs = {("CLOSE", 5), ("CWTO", 5), ("52WH", 5), ("SOME_STRATEGY_OUTPUT_COL", 5)}
+    raw_pairs, fb_pairs, other_pairs = idh.split_extreme_pairs_by_kind(pairs)
+    assert raw_pairs == {("CLOSE", 5)}
+    assert fb_pairs == {("CWTO", 5)}
+    assert other_pairs == {("52WH", 5), ("SOME_STRATEGY_OUTPUT_COL", 5)}
+
+
+def test_build_extreme_for_pairs_resolves_raw_side_of_mixed_kind_spec():
+    """The mixed-kind case raw_extreme_specs itself drops entirely (see
+    test_raw_extreme_specs_excludes_when_driver_is_derived) — the raw
+    VALUE side must still resolve via this function."""
+    bars = _bars([100, 105, 110])   # highs: 101,106,111
+    result = idh.build_extreme_for_pairs({("HIGH", 3)}, "TEST", bars)
+    assert [v for _, v in result[("HIGH", 3)]["TEST"]["daily"]] == [101, 106, 111]
+
+
+def test_build_extreme_for_pairs_date_range():
+    bars = _bars([100, 105, 110])   # 2025-01-01..03
+    window = ("2025-01-02", "2025-01-03")
+    result = idh.build_extreme_for_pairs({("HIGH", window)}, "TEST", bars)
+    assert [v for _, v in result[("HIGH", window)]["TEST"]["daily"]] == [106, 111]
+
+
+def test_build_extreme_for_pairs_skips_non_raw_column():
+    result = idh.build_extreme_for_pairs({("CWTO", 3)}, "TEST", _bars([100, 105, 110]))
+    assert result == {}
+
+
+def test_build_extreme_for_pairs_no_pairs_or_bars_is_noop():
+    assert idh.build_extreme_for_pairs(set(), "TEST", _bars([100])) == {}
+    assert idh.build_extreme_for_pairs({("HIGH", 3)}, "TEST", []) == {}
+
+
+def test_resolve_formula_builder_extreme_int_window_daily_list():
+    bars = _bars([100, 105, 110, 90])   # 4 bars
+
+    def fake_compute_for_bars(symbol, bar_slice):
+        return {"CWTO": len(bar_slice) * 10}
+
+    with patch("services.inception_formula_builder_columns.compute_for_bars", side_effect=fake_compute_for_bars):
+        result = idh.resolve_formula_builder_extreme({("CWTO", 3)}, "ABB", bars)
+
+    # last 3 bars -> indices 1,2,3 -> slice lengths 2,3,4 -> values 20,30,40
+    assert [v for _, v in result[("CWTO", 3)]["ABB"]["daily"]] == [20, 30, 40]
+
+
+def test_resolve_formula_builder_extreme_date_range_daily_list():
+    bars = _bars([100, 105, 110])   # 2025-01-01..03
+
+    def fake_compute_for_bars(symbol, bar_slice):
+        return {"CWTO": len(bar_slice) * 10}
+
+    window = ("2025-01-02", "2025-01-03")
+    with patch("services.inception_formula_builder_columns.compute_for_bars", side_effect=fake_compute_for_bars):
+        result = idh.resolve_formula_builder_extreme({("CWTO", window)}, "ABB", bars)
+
+    assert [v for _, v in result[("CWTO", window)]["ABB"]["daily"]] == [20, 30]
+
+
+def test_resolve_formula_builder_extreme_not_enough_bars_gives_empty_daily_list():
+    result = idh.resolve_formula_builder_extreme({("CWTO", 10)}, "ABB", _bars([100, 105]))
+    assert result[("CWTO", 10)]["ABB"]["daily"] == []
+
+
+def test_resolve_formula_builder_extreme_no_pairs_or_bars_is_noop():
+    assert idh.resolve_formula_builder_extreme(set(), "ABB", _bars([100])) == {}
+    assert idh.resolve_formula_builder_extreme({("CWTO", 3)}, "ABB", []) == {}
+
+
+def test_group_a_b_date_from_none_when_nothing_needed():
+    assert idh.group_a_b_date_from([], set(), date(2025, 7, 29)) is None
+
+
+def test_group_a_b_date_from_uses_explicit_date_tuple_directly():
+    day_specs = [("First", "52WH", ("2025-01-05", "2025-01-05"))]
+    assert idh.group_a_b_date_from(day_specs, set(), date(2025, 7, 29)) == date(2025, 1, 5)
+
+
+def test_group_a_b_date_from_pads_int_window_by_calendar_ratio():
+    from services.inception_value_before_change import (
+        VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS, _DAILY_LOOKBACK_CALENDAR_DAYS,
+    )
+    import math
+    as_of = date(2025, 7, 29)
+    result = idh.group_a_b_date_from([], {("52WH", 10)}, as_of)
+    calendar_days = math.ceil(10 * _DAILY_LOOKBACK_CALENDAR_DAYS / VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS) + 30
+    assert result == as_of - timedelta(days=calendar_days)
+
+
+def test_group_a_b_date_from_takes_min_across_day_specs_and_extreme_pairs():
+    day_specs = [("First", "52WH", ("2025-01-05", "2025-01-05"))]
+    extreme_pairs = {("ATH", 400)}   # a large int window pads well before Jan 5
+    result = idh.group_a_b_date_from(day_specs, extreme_pairs, date(2025, 7, 29))
+    assert result < date(2025, 1, 5)
+
+
+def test_resolve_group_a_b_day_value_on_date_fetches_range_rows_when_not_supplied():
+    def fake_range_rows(date_from, date_to, progress_cb=None):
+        assert date_from == date(2025, 6, 20)   # explicit window date used directly, no padding
+        return {"days": [
+            {"trade_date": "2025-06-20", "stocks": [
+                {"symbol": "ABB_I", "display_name": "ABB_I", "metrics": {"52WH": 400}},
+            ]},
+        ]}
+
+    specs = [("First", "52WH", ("2025-06-20", "2025-06-20"))]
+    with patch("services.inception_compute_service.range_rows", side_effect=fake_range_rows):
+        result = idh.resolve_group_a_b_day(specs, date(2025, 7, 29))
+
+    assert result == {("52WH", ("2025-06-20", "2025-06-20")): {"ABB_I": {"First": 400}}}
+
+
+def test_resolve_group_a_b_day_value_days_ago_uses_global_trading_day_index():
+    """A caller-supplied range_response (the shared-fetch convention) means
+    range_rows is never called, and int windows count back through the
+    GLOBAL sorted trading-day list, not a per-symbol calendar."""
+    range_response = {"days": [
+        {"trade_date": (date(2025, 1, 1) + timedelta(days=i)).isoformat(), "stocks": [
+            {"symbol": "ABB_I", "display_name": "ABB_I", "metrics": {"52WH": i}},
+        ]}
+        for i in range(20)
+    ]}
+    as_of = date(2025, 1, 20)   # index 19 of 20 daily entries
+    specs = [("First", "52WH", 5)]   # VALUE_DAYS_AGO([52WH], 4) -> window=5
+    with patch("services.inception_compute_service.range_rows") as mock_range_rows:
+        result = idh.resolve_group_a_b_day(specs, as_of, range_response=range_response)
+
+    mock_range_rows.assert_not_called()
+    # target_idx = as_of_idx - window + 1 = 19 - 5 + 1 = 15
+    assert result[("52WH", 5)]["ABB_I"]["First"] == 15
+
+
+def test_resolve_group_a_b_day_no_specs_is_noop():
+    assert idh.resolve_group_a_b_day([], date(2025, 7, 29)) == {}
+
+
+def test_resolve_group_a_b_extreme_int_window_daily_list():
+    range_response = {"days": [
+        {"trade_date": (date(2025, 1, 1) + timedelta(days=i)).isoformat(), "stocks": [
+            {"symbol": "ABB_I", "display_name": "ABB_I", "metrics": {"52WH": i * 10}},
+        ]}
+        for i in range(20)
+    ]}
+    as_of = date(2025, 1, 20)   # index 19
+    with patch("services.inception_compute_service.range_rows") as mock_range_rows:
+        result = idh.resolve_group_a_b_extreme({("52WH", 3)}, as_of, range_response=range_response)
+
+    mock_range_rows.assert_not_called()
+    # last 3 sorted dates ending at index 19 -> indices 17,18,19 -> 170,180,190
+    assert [v for _, v in result[("52WH", 3)]["ABB_I"]["daily"]] == [170, 180, 190]
+
+
+def test_resolve_group_a_b_extreme_date_range_window():
+    range_response = {"days": [
+        {"trade_date": (date(2025, 1, 1) + timedelta(days=i)).isoformat(), "stocks": [
+            {"symbol": "ABB_I", "display_name": "ABB_I", "metrics": {"52WH": i * 10}},
+        ]}
+        for i in range(20)
+    ]}
+    window = ("2025-01-05", "2025-01-06")
+    with patch("services.inception_compute_service.range_rows") as mock_range_rows:
+        result = idh.resolve_group_a_b_extreme({("52WH", window)}, date(2025, 1, 20), range_response=range_response)
+
+    mock_range_rows.assert_not_called()
+    assert [v for _, v in result[("52WH", window)]["ABB_I"]["daily"]] == [40, 50]
+
+
+def test_resolve_group_a_b_extreme_no_pairs_is_noop():
+    assert idh.resolve_group_a_b_extreme(set(), date(2025, 7, 29)) == {}
+
+
+def test_mixed_kind_extreme_resolves_end_to_end_via_evaluate_compiled():
+    """The concrete regression for issue #45's mixed-kind case: VALUE_AT_
+    MAX_DAYS([CLOSE], [CWTO], 3) — a raw value column driven by a Formula
+    Builder column. raw_extreme_specs/build_extreme alone can't resolve
+    this (see test_raw_extreme_specs_excludes_when_driver_is_derived) —
+    build_extreme_for_pairs (raw side) + resolve_formula_builder_extreme
+    (Formula Builder side), merged via merge_into, must together produce a
+    day_history services.strategy_engine.evaluate can actually use."""
+    from services import strategy_engine
+
+    bars = _bars([100, 105, 110, 90])   # closes; CWTO mocked below
+
+    def fake_compute_for_bars(symbol, bar_slice):
+        return {"CWTO": len(bar_slice) * 10}
+
+    day_history = {}
+    idh.merge_into(day_history, idh.build_extreme_for_pairs({("CLOSE", 3)}, "ABB", bars))
+    with patch("services.inception_formula_builder_columns.compute_for_bars", side_effect=fake_compute_for_bars):
+        idh.merge_into(day_history, idh.resolve_formula_builder_extreme({("CWTO", 3)}, "ABB", bars))
+
+    tokens = [tok_extreme_days("VALUE_AT_MAX_DAYS", "CLOSE", "CWTO", 3)]
+    result = strategy_engine.evaluate(
+        tokens, {"Symbol": "ABB"}, [{"Symbol": "ABB"}],
+        day_history=day_history, symbol_col="Symbol",
+    )
+    # CWTO peaks (40) on the last bar (2025-01-04) -> CLOSE on that same
+    # date is 90.
+    assert result == 90

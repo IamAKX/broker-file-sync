@@ -199,6 +199,29 @@ def _earliest_date_from(as_of_date: date, months_back: int) -> date:
     return _months_before(_month_first(as_of_date), months_back + 1)
 
 
+def group_a_b_date_from(specs: list, n_specs: list, as_of_date: date):
+    """The earliest date_from a SINGLE range_rows call needs to cover every
+    (col_name, months_back) in *specs* (resolve_group_a_b's own shape) and
+    every (col_name, n) in *n_specs* (resolve_group_a_b_n's — always
+    day-granularity, see this module's docstring). Same math resolve_
+    group_a_b/resolve_group_a_b_n each compute inline for their own single
+    call; extracted so a caller resolving MORE than just VALUE_BEFORE_
+    CHANGE/VALUE_BEFORE_CHANGE_N in the same Load (see services.
+    inception_day_history's own derived-column resolvers) can size ONE
+    shared range_rows call instead of one per resolver. Returns None when
+    neither list has anything needing a fetch."""
+    if not specs and not n_specs:
+        return None
+    month_specs = [m for _, m in specs if m is not None]
+    needs_daily = (len(month_specs) < len(specs)) or bool(n_specs)
+    candidates = []
+    if month_specs:
+        candidates.append(_earliest_date_from(as_of_date, max(month_specs)))
+    if needs_daily:
+        candidates.append(as_of_date - timedelta(days=_DAILY_LOOKBACK_CALENDAR_DAYS))
+    return min(candidates) if candidates else None
+
+
 # ── Formula Builder codes ───────────────────────────────────────────────────
 
 def resolve_formula_builder(specs: list, symbol: str, bars: list) -> dict:
@@ -285,26 +308,28 @@ def resolve_formula_builder_n(specs: list, symbol: str, bars: list) -> dict:
 
 # ── Group A/B (and raw) codes ────────────────────────────────────────────────
 
-def resolve_group_a_b(specs: list, as_of_date: date, progress_cb=None) -> dict:
+def resolve_group_a_b(specs: list, as_of_date: date, progress_cb=None, range_response: dict = None) -> dict:
     """*specs*: [(col_name, months_back), ...] already filtered to
     NON-Formula-Builder codes (Group A/B or raw). months_back may be None
     (the "auto" day-granularity form — see this module's docstring). One
     services.inception_compute_service.range_rows call covers every symbol
     and every candidate day in a single full-universe pass — see this
     module's own docstring for why that's cheap relative to walking
-    day-by-day/month-by-month per symbol."""
+    day-by-day/month-by-month per symbol.
+
+    *range_response*: when the caller already has a range_rows response
+    covering the needed span (e.g. sized via group_a_b_date_from to also
+    cover services.inception_day_history's own Group A/B specs in the same
+    Load), pass it here to skip fetching a second one. None (every caller
+    before this parameter existed) fetches its own, sized exactly as
+    before."""
     if not specs:
         return {}
     from services import inception_compute_service
 
-    month_specs = [m for _, m in specs if m is not None]
-    date_from_candidates = []
-    if month_specs:
-        date_from_candidates.append(_earliest_date_from(as_of_date, max(month_specs)))
-    if len(month_specs) < len(specs):  # at least one "auto" spec present
-        date_from_candidates.append(as_of_date - timedelta(days=_DAILY_LOOKBACK_CALENDAR_DAYS))
-    date_from = min(date_from_candidates)
-    range_response = inception_compute_service.range_rows(date_from, as_of_date, progress_cb=progress_cb)
+    if range_response is None:
+        date_from = group_a_b_date_from(specs, [], as_of_date)
+        range_response = inception_compute_service.range_rows(date_from, as_of_date, progress_cb=progress_cb)
 
     by_date: dict = {}
     for day in range_response.get("days", []):
@@ -348,19 +373,23 @@ def resolve_group_a_b(specs: list, as_of_date: date, progress_cb=None) -> dict:
     return out
 
 
-def resolve_group_a_b_n(specs: list, as_of_date: date, progress_cb=None) -> dict:
+def resolve_group_a_b_n(specs: list, as_of_date: date, progress_cb=None, range_response: dict = None) -> dict:
     """*specs*: [(col_name, n), ...] — VALUE_BEFORE_CHANGE_N's own spec
     shape (see n_specs_for_strategies), already filtered to NON-Formula-
     Builder codes (Group A/B or raw). n is 1-based — see resolve_
     formula_builder_n's own docstring for exactly what it means and the
     same total-walk cap. One services.inception_compute_service.range_rows
-    call covers every symbol, same reasoning as resolve_group_a_b above."""
+    call covers every symbol, same reasoning as resolve_group_a_b above.
+
+    *range_response*: same caller-supplied-response convention as
+    resolve_group_a_b's own parameter — see its docstring."""
     if not specs:
         return {}
     from services import inception_compute_service
 
-    date_from = as_of_date - timedelta(days=_DAILY_LOOKBACK_CALENDAR_DAYS)
-    range_response = inception_compute_service.range_rows(date_from, as_of_date, progress_cb=progress_cb)
+    if range_response is None:
+        date_from = group_a_b_date_from([], specs, as_of_date)
+        range_response = inception_compute_service.range_rows(date_from, as_of_date, progress_cb=progress_cb)
 
     by_date: dict = {}
     for day in range_response.get("days", []):

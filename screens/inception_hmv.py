@@ -165,11 +165,44 @@ class _HmvLoadWorker(QThread):
         vbc_n_fb_specs = [(c, n) for c, n in vbc_n_specs if c in FORMULA_CODES]
         vbc_n_other_specs = [(c, n) for c, n in vbc_n_specs if c not in FORMULA_CODES]
 
+        # issue #45 — VALUE_DAYS_AGO/VALUE_ON_DATE/VALUE_AT_MAX_DAYS/
+        # VALUE_AT_MIN_DAYS/VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES against a
+        # Formula Builder or Group A/B column (raw_day_specs/raw_extreme_
+        # specs above only cover raw OHLCV) — see inception_day_history's
+        # "Formula Builder / Group A/B columns" section for the resolvers.
+        derived_specs = inception_day_history.derived_day_specs(strategies)
+        derived_fb_specs = [s for s in derived_specs if s[1] in FORMULA_CODES]
+        derived_group_specs = [s for s in derived_specs if s[1] not in FORMULA_CODES]
+
+        all_extreme_specs = inception_day_history.extreme_specs_for_strategies(strategies)
+        needed_pairs = inception_day_history.extreme_needed_pairs(all_extreme_specs)
+        raw_covered_pairs = inception_day_history.extreme_needed_pairs(extreme_specs)
+        extra_pairs = needed_pairs - raw_covered_pairs
+        extra_raw_pairs, extra_fb_pairs, extra_group_pairs = (
+            inception_day_history.split_extreme_pairs_by_kind(extra_pairs))
+
+        # One shared range_rows call (not one per Group A/B resolver) sized
+        # to cover both VALUE_BEFORE_CHANGE's own Group A/B specs and the
+        # new derived ones — see inception_day_history.group_a_b_date_from.
+        range_response = None
+        date_from_candidates = []
+        vbc_date_from = inception_value_before_change.group_a_b_date_from(
+            vbc_other_specs, vbc_n_other_specs, as_of_date)
+        if vbc_date_from is not None:
+            date_from_candidates.append(vbc_date_from)
+        derived_date_from = inception_day_history.group_a_b_date_from(
+            derived_group_specs, extra_group_pairs, as_of_date)
+        if derived_date_from is not None:
+            date_from_candidates.append(derived_date_from)
+        if date_from_candidates:
+            range_response = inception_compute_service.range_rows(min(date_from_candidates), as_of_date)
+
         day_history: dict = {}
         for row in rows:
             bars = inception_bars_store.bars_for_symbol(row["symbol"], date_to=as_of_date)
             row["values"].update(inception_formula_builder_columns.compute_for_bars(row["symbol"], bars))
-            if specs or extreme_specs or vbc_fb_specs or vbc_n_fb_specs:
+            if (specs or extreme_specs or vbc_fb_specs or vbc_n_fb_specs
+                    or derived_fb_specs or extra_raw_pairs or extra_fb_pairs):
                 # Keyed by the DISPLAY symbol (suffix stripped), not
                 # row["symbol"] (the raw "_I" roll-series name) — that's
                 # what ends up in the "Symbol" column apply_strategies'
@@ -192,16 +225,38 @@ class _HmvLoadWorker(QThread):
                     inception_day_history.merge_into(
                         day_history, inception_value_before_change.resolve_formula_builder_n(
                             vbc_n_fb_specs, symbol, bars))
+                if extra_raw_pairs:
+                    inception_day_history.merge_into(
+                        day_history, inception_day_history.build_extreme_for_pairs(
+                            extra_raw_pairs, symbol, bars))
+                if derived_fb_specs:
+                    inception_day_history.merge_into(
+                        day_history, inception_day_history.resolve_formula_builder_day(
+                            derived_fb_specs, symbol, bars))
+                if extra_fb_pairs:
+                    inception_day_history.merge_into(
+                        day_history, inception_day_history.resolve_formula_builder_extreme(
+                            extra_fb_pairs, symbol, bars))
         if vbc_other_specs:
             inception_day_history.merge_into(
                 day_history, _remap_to_display_symbols(
                     inception_value_before_change.resolve_group_a_b(
-                        vbc_other_specs, as_of_date)))
+                        vbc_other_specs, as_of_date, range_response=range_response)))
         if vbc_n_other_specs:
             inception_day_history.merge_into(
                 day_history, _remap_to_display_symbols(
                     inception_value_before_change.resolve_group_a_b_n(
-                        vbc_n_other_specs, as_of_date)))
+                        vbc_n_other_specs, as_of_date, range_response=range_response)))
+        if derived_group_specs:
+            inception_day_history.merge_into(
+                day_history, _remap_to_display_symbols(
+                    inception_day_history.resolve_group_a_b_day(
+                        derived_group_specs, as_of_date, range_response=range_response)))
+        if extra_group_pairs:
+            inception_day_history.merge_into(
+                day_history, _remap_to_display_symbols(
+                    inception_day_history.resolve_group_a_b_extreme(
+                        extra_group_pairs, as_of_date, range_response=range_response)))
         return day_history
 
 

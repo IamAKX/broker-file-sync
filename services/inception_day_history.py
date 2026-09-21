@@ -18,19 +18,27 @@ build_extreme's own docstring). Combine their output into one shared
 day_history dict via merge_into (not a bare dict.update — see its
 docstring for why a shallow merge would clobber instead).
 
-Deliberately scoped to RAW OHLCV fields only (services.inception_columns.
-RAW_FIELDS: OPEN/HIGH/LOW/CLOSE/VOL/OPENINT) — a reference to a Group A/B
-(52WH, ...) or Formula Builder (MT, MB, ...) derived column is NOT
-resolved here and stays unsupported (blank, via evaluate()'s own "missing
-day_history entry" fallback) — those aren't stored per-historical-bar the
-way raw OHLCV is, only computed as of a single as-of-date, so answering
-them here would mean re-running the full Group A/B/Formula Builder
-computation over every historical bar in the window, not just slicing
-already-fetched data. A narrower scope than LMV's own day_history support,
-not a regression — before this module existed, EVERY _DAYS/VALUE_DAYS_AGO
-reference (raw field or otherwise) was silently blank in Inception's HMV/
-View by Date grids, reported as "AVG_DAYS(CLOSE, 200)" (the "200 Average"
-strategy) computing nothing at all.
+build()/build_extreme() above are scoped to RAW OHLCV fields only
+(services.inception_columns.RAW_FIELDS: OPEN/HIGH/LOW/CLOSE/VOL/OPENINT) —
+a reference to a Group A/B (52WH, ...) or Formula Builder (MT, MB, ...)
+derived column ISN'T resolved by raw_day_specs/build/raw_extreme_specs/
+build_extreme, since those aren't stored per-historical-bar the way raw
+OHLCV is, only computed as of a single as-of-date. The "Formula Builder /
+Group A/B columns" section further down (derived_day_specs,
+resolve_formula_builder_day, resolve_group_a_b_day, and their extreme-spec
+counterparts — added for issue #45) DOES resolve those, via the same
+two-path split services.inception_value_before_change already established
+for VALUE_BEFORE_CHANGE: re-slicing this symbol's own bars through
+services.inception_formula_builder_columns.compute_for_bars for Formula
+Builder codes, or one services.inception_compute_service.range_rows pass
+for the whole universe for Group A/B — see that section's own module
+comment for the full split. A column that's neither raw, Formula Builder,
+nor Group A/B (e.g. a reference to another of the strategy's own derived
+output columns) still stays unsupported (blank, via evaluate()'s own
+"missing day_history entry" fallback) — before this module existed, EVERY
+_DAYS/VALUE_DAYS_AGO reference (raw field or otherwise) was silently blank
+in Inception's HMV/View by Date grids, reported as "AVG_DAYS(CLOSE, 200)"
+(the "200 Average" strategy) computing nothing at all.
 
 One as-of-date, one shared history: unlike Formula Stats (services.
 formula_stats_engine.compute_stats), where every historic day in a range
@@ -41,6 +49,9 @@ symbol per Load, same "single shared day_history" shape apply_strategies
 expects from a live LMV tick's own day_history (services.strategy_engine.
 compute_day_history).
 """
+import math
+from datetime import date, timedelta
+
 from services.inception_columns import RAW_FIELDS
 from services.strategy_engine import (
     VALUE_BEFORE_CHANGE_DAILY_TAG, VALUE_BEFORE_CHANGE_N_TAG,
@@ -270,3 +281,381 @@ def merge_into(day_history: dict, source: dict):
         per_symbol = day_history.setdefault(key, {})
         for symbol, values in entry.items():
             per_symbol.setdefault(symbol, {}).update(values)
+
+
+# ── Formula Builder / Group A/B columns (issue #45) ─────────────────────────
+# raw_day_specs/build and raw_extreme_specs/build_extreme above stay exactly
+# as they were — every function below is purely additive, resolving the
+# SAME VALUE_DAYS_AGO/VALUE_ON_DATE/VALUE_AT_MAX_DAYS/VALUE_AT_MIN_DAYS/
+# VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES functions against a column that
+# ISN'T a raw OHLCV field: a Formula Builder code (services.formula_engine.
+# FORMULA_CODES, e.g. CWTO, MT, MB, DT, DB) or a Group A/B (Inception)
+# column (services.inception_columns.GROUP_A/GROUP_B, e.g. 52WH, ATH).
+# Mirrors the two-path split services.inception_value_before_change already
+# established for VALUE_BEFORE_CHANGE/VALUE_BEFORE_CHANGE_N: Formula
+# Builder columns re-slice this symbol's own already-fetched bars and call
+# services.inception_formula_builder_columns.compute_for_bars; Group A/B
+# columns are resolved from ONE services.inception_compute_service.
+# range_rows call for the whole instrument universe per Load, not a
+# per-symbol recompute. See docs/PLAN or the issue #45 fix commit message
+# for the full design rationale.
+
+def derived_day_specs(strategies: list) -> list:
+    """[(agg_key, col_name, window), ...], deduped — raw_day_specs' own
+    complement: every VALUE_DAYS_AGO/VALUE_ON_DATE reference (agg_key ==
+    "First" — the only agg_key either function ever produces, see
+    services.strategy_engine._build_compiled) whose col_arg does NOT name a
+    raw OHLCV field. Deliberately excludes the _DAYS-family aggregates
+    (AVG_DAYS/MAX_DAYS/...) even against a derived column — services.
+    strategy_engine._DAYS_AGG_BASE never produces agg_key "First", so this
+    filter already excludes them for free; extending those to derived
+    columns is out of this fix's scope. Also excludes VALUE_BEFORE_CHANGE's
+    own tagged windows, same _VALUE_BEFORE_CHANGE_TAGS check raw_day_specs
+    uses above (services.inception_value_before_change's job, unchanged).
+
+    *strategies*: every saved strategy, active or not — same reasoning as
+    raw_day_specs' own docstring."""
+    seen: set = set()
+    out = []
+    for strat in strategies:
+        for col in strat.get("columns", []):
+            compiled = get_compiled(col.get("formula", []))
+            if compiled is None:
+                continue
+            for _, agg_key, col_name, window in compiled.day_specs:
+                if col_name in RAW_FIELDS or agg_key != "First":
+                    continue
+                if isinstance(window, tuple) and window and window[0] in _VALUE_BEFORE_CHANGE_TAGS:
+                    continue
+                key = (agg_key, col_name, window)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(key)
+    return out
+
+
+def resolve_formula_builder_day(specs: list, symbol: str, bars: list) -> dict:
+    """{(col_name, window): {symbol: {"First": value}}} for *specs*
+    (derived_day_specs' output, pre-filtered by the caller to services.
+    formula_engine.FORMULA_CODES only) — the Formula Builder analogue of
+    build() above, resolved the way services.inception_value_before_change.
+    resolve_formula_builder resolves its own per-symbol lookups: re-slicing
+    *bars* (this ONE symbol's own ascending bar history, already fetched —
+    no extra query) and calling services.inception_formula_builder_columns.
+    compute_for_bars on that slice (reusing that module's own per-(symbol,
+    slice-length) memoization for free).
+
+    int window (VALUE_DAYS_AGO, already N+1 per services.strategy_engine.
+    _build_compiled) -> the value at bars[len(bars) - window] — the OLDEST
+    bar in a last-*window*-days slice, same indexing build()'s own
+    int-window branch uses for a raw column — None if there isn't that
+    much history fetched yet. (date, date) window (VALUE_ON_DATE) -> a
+    linear scan for that exact trade_date, None if absent, same "not
+    found" convention build()'s own tuple-window branch uses."""
+    if not specs or not bars:
+        return {}
+    from services import inception_formula_builder_columns
+
+    out: dict = {}
+    for agg_key, col_name, window in specs:
+        value = None
+        if isinstance(window, tuple):
+            target_date = window[0]
+            idx = None
+            for i, bar in enumerate(bars):
+                if bar["trade_date"].isoformat() == target_date:
+                    idx = i
+                    break
+            if idx is not None:
+                v = inception_formula_builder_columns.compute_for_bars(symbol, bars[:idx + 1]).get(col_name)
+                value = v if isinstance(v, (int, float)) else None
+        elif window > 0 and len(bars) >= window:
+            idx = len(bars) - window
+            v = inception_formula_builder_columns.compute_for_bars(symbol, bars[:idx + 1]).get(col_name)
+            value = v if isinstance(v, (int, float)) else None
+        out.setdefault((col_name, window), {}).setdefault(symbol, {})[agg_key] = value
+    return out
+
+
+def extreme_specs_for_strategies(strategies: list) -> list:
+    """[(col_name, driver_col_name, window, want_max), ...], deduped —
+    raw_extreme_specs' own superset: every VALUE_AT_MAX_DAYS/VALUE_AT_MIN_
+    DAYS/VALUE_AT_MAX_DATES/VALUE_AT_MIN_DATES reference across
+    *strategies*, WITHOUT raw_extreme_specs' "both sides raw" filter — a
+    mixed-kind pair (e.g. a raw driver against a Formula Builder value
+    column, or vice versa — confirmed in-scope by screens.formula_editor's
+    own column-picker copy: "Either column can be a raw sheet column or
+    another of this strategy's own columns") is included here. See
+    extreme_needed_pairs/split_extreme_pairs_by_kind below for how a
+    caller turns this into per-kind resolution work. *strategies*: every
+    saved strategy, active or not, same reasoning as raw_extreme_specs'
+    own docstring."""
+    seen: set = set()
+    out = []
+    for strat in strategies:
+        for col in strat.get("columns", []):
+            compiled = get_compiled(col.get("formula", []))
+            if compiled is None:
+                continue
+            for _, col_name, driver_col_name, window, want_max in compiled.extreme_specs:
+                key = (col_name, driver_col_name, window, want_max)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(key)
+    return out
+
+
+def extreme_needed_pairs(specs: list) -> set:
+    """{(col_name, window), ...} — every DISTINCT column+window a "daily"
+    list is needed for across *specs* (raw_extreme_specs' or
+    extreme_specs_for_strategies' own shape — the value side AND the
+    driver side of each spec each contribute their own pair), mirroring
+    the same `needed` set build_extreme already computes internally.
+    Exposed so a caller can compute this ONCE, diff it against
+    raw_extreme_specs' own (already-covered) pairs, and only resolve the
+    REMAINDER via the per-kind resolvers below — see
+    build_extreme_for_pairs/resolve_formula_builder_extreme/
+    resolve_group_a_b_extreme."""
+    needed: set = set()
+    for col_name, driver_col_name, window, _want_max in specs:
+        needed.add((col_name, window))
+        needed.add((driver_col_name, window))
+    return needed
+
+
+def split_extreme_pairs_by_kind(pairs: set) -> tuple:
+    """(raw_pairs, formula_builder_pairs, other_pairs) — partitions *pairs*
+    ({(col_name, window), ...}, extreme_needed_pairs' own shape) by column
+    kind: raw OHLCV (RAW_FIELDS), Formula Builder (services.formula_engine.
+    FORMULA_CODES), or "everything else" — Group A/B, or a genuinely
+    unresolvable name (e.g. a reference to another of the strategy's own
+    output columns), both handled the same way by resolve_group_a_b_
+    extreme below (an unresolvable name simply never appears in a day's
+    metrics dict, producing an empty "daily" list — the same silent-blank
+    fallback services.strategy_engine.evaluate_compiled already applies
+    for a missing day_history entry, never a crash)."""
+    from services.formula_engine import FORMULA_CODES
+
+    raw_pairs, fb_pairs, other_pairs = set(), set(), set()
+    for col_name, window in pairs:
+        if col_name in RAW_FIELDS:
+            raw_pairs.add((col_name, window))
+        elif col_name in FORMULA_CODES:
+            fb_pairs.add((col_name, window))
+        else:
+            other_pairs.add((col_name, window))
+    return raw_pairs, fb_pairs, other_pairs
+
+
+def build_extreme_for_pairs(pairs: set, symbol: str, bars: list) -> dict:
+    """{(col_name, window): {symbol: {"daily": [(date_iso, value), ...]}}}
+    for an EXPLICIT set of raw (col_name, window) *pairs* — not a spec
+    list. Needed because a MIXED-kind extreme spec (e.g. VALUE_AT_MAX_DAYS(
+    [CLOSE], [CWTO], N) — a raw value column driven by a Formula Builder
+    column) means the raw SIDE of that spec must still resolve even though
+    raw_extreme_specs' "both sides raw" filter drops the spec entirely —
+    see extreme_needed_pairs/split_extreme_pairs_by_kind above for how a
+    caller isolates just this remainder. Same per-pair int/date-tuple
+    slicing build_extreme uses internally, duplicated (not shared/called)
+    so build_extreme itself stays completely untouched by this fix."""
+    if not pairs or not bars:
+        return {}
+    out: dict = {}
+    for col_name, window in pairs:
+        if col_name not in RAW_FIELDS:
+            continue
+        bar_key = _BAR_KEY[col_name]
+        if isinstance(window, tuple):
+            date_from_s, date_to_s = window
+            daily = [
+                (b["trade_date"].isoformat(), b.get(bar_key))
+                for b in bars
+                if date_from_s <= b["trade_date"].isoformat() <= date_to_s
+                and isinstance(b.get(bar_key), (int, float))
+            ]
+        elif window > 0 and len(bars) >= window:
+            daily = [
+                (b["trade_date"].isoformat(), b.get(bar_key))
+                for b in bars[-window:]
+                if isinstance(b.get(bar_key), (int, float))
+            ]
+        else:
+            daily = []
+        out[(col_name, window)] = {symbol: {"daily": daily}}
+    return out
+
+
+def resolve_formula_builder_extreme(pairs: set, symbol: str, bars: list) -> dict:
+    """{(col_name, window): {symbol: {"daily": [(date_iso, value), ...]}}}
+    for Formula Builder (col_name, window) *pairs* (split_extreme_pairs_
+    by_kind's own output) — the Formula Builder analogue of
+    build_extreme_for_pairs above. int window -> every bar index in the
+    last *window* bars; (date_from, date_to) window -> every bar index
+    whose trade_date falls in that inclusive range. One services.
+    inception_formula_builder_columns.compute_for_bars(symbol,
+    bars[:idx + 1]) call per day IN the window — cost bounded by the
+    window the user themselves chose, same cost model services.
+    inception_value_before_change.resolve_formula_builder's own "auto"
+    walk already has (no new unbounded cost)."""
+    if not pairs or not bars:
+        return {}
+    from services import inception_formula_builder_columns
+
+    out: dict = {}
+    for col_name, window in pairs:
+        if isinstance(window, tuple):
+            date_from_s, date_to_s = window
+            indices = [
+                i for i, b in enumerate(bars)
+                if date_from_s <= b["trade_date"].isoformat() <= date_to_s
+            ]
+        elif window > 0 and len(bars) >= window:
+            indices = list(range(len(bars) - window, len(bars)))
+        else:
+            indices = []
+        daily = []
+        for idx in indices:
+            v = inception_formula_builder_columns.compute_for_bars(symbol, bars[:idx + 1]).get(col_name)
+            if isinstance(v, (int, float)):
+                daily.append((bars[idx]["trade_date"].isoformat(), v))
+        out[(col_name, window)] = {symbol: {"daily": daily}}
+    return out
+
+
+def group_a_b_date_from(day_specs: list, extreme_pairs, as_of_date: date):
+    """The earliest date_from a SINGLE range_rows call needs to cover every
+    Group A/B *day_specs* (derived_day_specs' own shape, already filtered
+    by the caller to non-Formula-Builder columns) and *extreme_pairs*
+    ({(col_name, window), ...}, split_extreme_pairs_by_kind's "other"
+    bucket) — analogous to services.inception_value_before_change's own
+    group_a_b_date_from, generalized for a window the user chose directly
+    (VALUE_DAYS_AGO/VALUE_AT_MAX_DAYS's int N) rather than that module's
+    fixed VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS cap. A (date, date) or
+    (date_from, date_to) window's own date_from is used directly —
+    trivial, no padding needed. An int window N is padded to calendar days
+    using the SAME ratio services.inception_value_before_change already
+    establishes for its own 252-trading-day/400-calendar-day cap (holiday/
+    weekend density), plus the same slack so the OLDEST candidate day
+    still has bars behind it. Returns None when neither *day_specs* nor
+    *extreme_pairs* has anything needing a fetch."""
+    if not day_specs and not extreme_pairs:
+        return None
+    from services.inception_value_before_change import (
+        VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS, _DAILY_LOOKBACK_CALENDAR_DAYS,
+    )
+
+    windows = [window for _, _, window in day_specs] + [window for _, window in extreme_pairs]
+    candidates = []
+    for window in windows:
+        if isinstance(window, tuple) and window:
+            candidates.append(date.fromisoformat(window[0]))
+        elif isinstance(window, int) and window > 0:
+            calendar_days = math.ceil(
+                window * _DAILY_LOOKBACK_CALENDAR_DAYS / VALUE_BEFORE_CHANGE_DAILY_MAX_DAYS
+            ) + 30
+            candidates.append(as_of_date - timedelta(days=calendar_days))
+    return min(candidates) if candidates else None
+
+
+def resolve_group_a_b_day(specs: list, as_of_date: date, range_response: dict = None, progress_cb=None) -> dict:
+    """{(col_name, window): {symbol: {"First": value}}} for Group A/B
+    *specs* (derived_day_specs' own shape, already filtered by the caller
+    to non-Formula-Builder columns) — the Group A/B analogue of build()
+    above, resolved the way services.inception_value_before_change.
+    resolve_group_a_b resolves its own lookups: ONE services.
+    inception_compute_service.range_rows call for the WHOLE instrument
+    universe (reused via *range_response* when the caller already has one
+    covering the needed span — see group_a_b_date_from above — or fetched
+    fresh, sized via group_a_b_date_from, when omitted), then cheap
+    in-memory dict lookups per symbol/day.
+
+    A (date, date) window (VALUE_ON_DATE) is a direct by_date[date][symbol]
+    lookup. An int window (VALUE_DAYS_AGO) means "N entries back in the
+    GLOBAL sorted list of every trading day range_rows returned" — the
+    SAME sorted-trading-day-index convention services.inception_value_
+    before_change.resolve_group_a_b's own "auto" walk already establishes
+    (not a per-symbol calendar, since Group A/B has no per-symbol bars
+    list to slice the way raw/Formula Builder columns do)."""
+    if not specs:
+        return {}
+    from services import inception_compute_service
+
+    if range_response is None:
+        date_from = group_a_b_date_from(specs, set(), as_of_date)
+        range_response = inception_compute_service.range_rows(date_from, as_of_date, progress_cb=progress_cb)
+
+    by_date: dict = {}
+    for day in range_response.get("days", []):
+        trade_date = date.fromisoformat(day["trade_date"])
+        by_date[trade_date] = {s["symbol"]: s.get("metrics", {}) for s in day.get("stocks", [])}
+    sorted_dates = sorted(by_date)
+    as_of_idx = sorted_dates.index(as_of_date) if as_of_date in sorted_dates else len(sorted_dates)
+
+    out: dict = {}
+    for agg_key, col_name, window in specs:
+        entries: dict = {}
+        if isinstance(window, tuple):
+            target_date = date.fromisoformat(window[0])
+            for symbol, metrics in by_date.get(target_date, {}).items():
+                v = metrics.get(col_name)
+                entries[symbol] = {agg_key: v if isinstance(v, (int, float)) else None}
+        elif window > 0:
+            # Same indexing build()'s own int-window branch uses for a raw
+            # column (bars[-window:][0]) — see this function's docstring.
+            target_idx = as_of_idx - window + 1
+            if 0 <= target_idx < len(sorted_dates):
+                for symbol, metrics in by_date.get(sorted_dates[target_idx], {}).items():
+                    v = metrics.get(col_name)
+                    entries[symbol] = {agg_key: v if isinstance(v, (int, float)) else None}
+        out[(col_name, window)] = entries
+    return out
+
+
+def resolve_group_a_b_extreme(pairs, as_of_date: date, range_response: dict = None, progress_cb=None) -> dict:
+    """{(col_name, window): {symbol: {"daily": [(date_iso, value), ...]}}}
+    for Group A/B (col_name, window) *pairs* (split_extreme_pairs_by_kind's
+    "other" bucket) — same range_response reuse convention as
+    resolve_group_a_b_day above. int window -> the last *window* entries
+    of the GLOBAL sorted-trading-day list ending at as_of_date (same
+    indexing resolve_group_a_b_day's own int-window branch uses); a
+    (date_from, date_to) window -> every trading day in that inclusive
+    range. Both read straight from the shared by_date/sorted_dates built
+    from ONE range_rows response, iterating the symbol universe present on
+    as_of_date (same convention services.inception_value_before_change.
+    resolve_group_a_b's own current_by_symbol iteration uses)."""
+    if not pairs:
+        return {}
+    from services import inception_compute_service
+
+    if range_response is None:
+        date_from = group_a_b_date_from([], pairs, as_of_date)
+        range_response = inception_compute_service.range_rows(date_from, as_of_date, progress_cb=progress_cb)
+
+    by_date: dict = {}
+    for day in range_response.get("days", []):
+        trade_date = date.fromisoformat(day["trade_date"])
+        by_date[trade_date] = {s["symbol"]: s.get("metrics", {}) for s in day.get("stocks", [])}
+    sorted_dates = sorted(by_date)
+    as_of_idx = sorted_dates.index(as_of_date) if as_of_date in sorted_dates else len(sorted_dates)
+    current_by_symbol = by_date.get(as_of_date, {})
+
+    out: dict = {}
+    for col_name, window in pairs:
+        if isinstance(window, tuple):
+            date_from_s, date_to_s = window
+            window_dates = [d for d in sorted_dates if date_from_s <= d.isoformat() <= date_to_s]
+        elif window > 0:
+            start_idx = max(0, as_of_idx - window + 1)
+            window_dates = sorted_dates[start_idx:as_of_idx + 1]
+        else:
+            window_dates = []
+        entries: dict = {}
+        for symbol in current_by_symbol:
+            daily = []
+            for d in window_dates:
+                v = by_date.get(d, {}).get(symbol, {}).get(col_name)
+                if isinstance(v, (int, float)):
+                    daily.append((d.isoformat(), v))
+            entries[symbol] = {"daily": daily}
+        out[(col_name, window)] = entries
+    return out

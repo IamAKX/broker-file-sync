@@ -351,3 +351,72 @@ def test_resolve_group_a_b_n_walks_multiple_distinct_changes():
 
 def test_resolve_group_a_b_n_no_specs_is_noop():
     assert ivbc.resolve_group_a_b_n([], date(2025, 7, 29)) == {}
+
+
+# ── group_a_b_date_from / range_response reuse (issue #45) ──────────────
+# Extracted from resolve_group_a_b/resolve_group_a_b_n's own inline date_
+# from computation so services.inception_day_history's own Group A/B
+# resolvers can size ONE shared range_rows call alongside this module's —
+# see that module's own "Formula Builder / Group A/B columns" section.
+
+def test_group_a_b_date_from_none_when_both_empty():
+    assert ivbc.group_a_b_date_from([], [], date(2025, 7, 29)) is None
+
+
+def test_group_a_b_date_from_explicit_months_only_matches_earliest_date_from():
+    as_of = date(2026, 8, 15)
+    assert ivbc.group_a_b_date_from([("52WH", 6)], [], as_of) == ivbc._earliest_date_from(as_of, 6)
+
+
+def test_group_a_b_date_from_auto_spec_needs_daily_lookback():
+    as_of = date(2026, 8, 15)
+    result = ivbc.group_a_b_date_from([("WT", None)], [], as_of)
+    assert result == as_of - timedelta(days=ivbc._DAILY_LOOKBACK_CALENDAR_DAYS)
+
+
+def test_group_a_b_date_from_n_specs_alone_need_daily_lookback():
+    """n_specs (VALUE_BEFORE_CHANGE_N) is always day-granularity — even
+    with no *specs* at all, its presence alone should require the daily
+    lookback span."""
+    as_of = date(2026, 8, 15)
+    result = ivbc.group_a_b_date_from([], [("52WH", 1)], as_of)
+    assert result == as_of - timedelta(days=ivbc._DAILY_LOOKBACK_CALENDAR_DAYS)
+
+
+def test_group_a_b_date_from_takes_min_of_month_and_daily_candidates():
+    as_of = date(2025, 7, 29)
+    result = ivbc.group_a_b_date_from([("WT", None), ("52WH", 6)], [], as_of)
+    assert result == min(
+        ivbc._earliest_date_from(as_of, 6),
+        as_of - timedelta(days=ivbc._DAILY_LOOKBACK_CALENDAR_DAYS),
+    )
+
+
+def test_resolve_group_a_b_reuses_supplied_range_response():
+    """A caller-supplied range_response means range_rows is never called —
+    the shared-fetch convention services.inception_day_history's own new
+    resolvers rely on to avoid a second full-universe pass in the same
+    Load."""
+    range_response = {"days": [
+        {"trade_date": "2025-07-29", "stocks": [
+            {"symbol": "ABB_I", "display_name": "ABB_I", "metrics": {"52WH": 400}},
+        ]},
+    ]}
+    with patch("services.inception_compute_service.range_rows") as mock_range_rows:
+        result = ivbc.resolve_group_a_b([("52WH", 6)], date(2025, 7, 29), range_response=range_response)
+
+    mock_range_rows.assert_not_called()
+    assert result[("52WH", ("months_before_change", 6))]["ABB_I"]["First"] is None
+
+
+def test_resolve_group_a_b_n_reuses_supplied_range_response():
+    range_response = {"days": [
+        {"trade_date": "2025-07-29", "stocks": [
+            {"symbol": "ABB_I", "display_name": "ABB_I", "metrics": {"52WH": 400}},
+        ]},
+    ]}
+    with patch("services.inception_compute_service.range_rows") as mock_range_rows:
+        result = ivbc.resolve_group_a_b_n([("52WH", 1)], date(2025, 7, 29), range_response=range_response)
+
+    mock_range_rows.assert_not_called()
+    assert result[("52WH", ("nth_before_change", 1))]["ABB_I"]["First"] is None
