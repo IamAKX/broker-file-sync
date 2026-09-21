@@ -204,6 +204,110 @@ def test_strategies_sync_failed_re_enables_button_keeps_existing_strategies(lmv)
     assert [s["name"] for s in lmv._filtered_strategies()] == ["X"]   # untouched
 
 
+# ── StrategyPickerPopup.Select All / Deselect All (issue #46) ─────────────
+# EMV/HMV auto-select every Strategy Builder-"active" strategy on each
+# Load/View with no fast way to pick a different subset — these bulk-toggle
+# every checkbox in one click. See screens.live_viewer.StrategyPickerPopup's
+# _select_all/_deselect_all.
+
+def test_select_all_checks_every_strategy(qapp):
+    from screens.live_viewer import StrategyPickerPopup
+
+    strategies = [
+        {"id": "1", "name": "A", "active": False},
+        {"id": "2", "name": "B", "active": True},
+        {"id": "3", "name": "C", "active": False},
+    ]
+    popup = StrategyPickerPopup(strategies)
+
+    popup._select_all()
+
+    assert all(cb.isChecked() for cb in popup._checks)
+
+
+def test_deselect_all_unchecks_every_strategy(qapp):
+    from screens.live_viewer import StrategyPickerPopup
+
+    strategies = [
+        {"id": "1", "name": "A", "active": True},
+        {"id": "2", "name": "B", "active": True},
+    ]
+    popup = StrategyPickerPopup(strategies)
+
+    popup._deselect_all()
+
+    assert not any(cb.isChecked() for cb in popup._checks)
+
+
+def test_select_all_ignores_search_filter(qapp):
+    """A checkbox hidden by the search box is still "in the picker" as far
+    as Select All is concerned — search only controls visibility, never
+    what the bulk actions touch (the scope the user explicitly chose)."""
+    from screens.live_viewer import StrategyPickerPopup
+
+    strategies = [
+        {"id": "1", "name": "A", "active": False},
+        {"id": "2", "name": "B", "active": False},
+    ]
+    popup = StrategyPickerPopup(strategies)
+    popup._filter_checks("no-such-strategy-name")   # hides every checkbox
+
+    popup._select_all()
+
+    assert all(cb.isChecked() for cb in popup._checks)
+
+
+def test_apply_after_select_all_emits_all_strategies_active(qapp):
+    from screens.live_viewer import StrategyPickerPopup
+
+    strategies = [
+        {"id": "1", "name": "A", "active": True},
+        {"id": "2", "name": "B", "active": False},
+        {"id": "3", "name": "C", "active": False},
+    ]
+    popup = StrategyPickerPopup(strategies)
+    emitted = []
+    popup.applied.connect(lambda strats: emitted.append(strats))
+
+    popup._select_all()
+    popup._apply()
+
+    assert len(emitted) == 1
+    assert all(s["active"] is True for s in emitted[0])
+
+
+def test_apply_after_deselect_all_emits_all_strategies_inactive(qapp):
+    from screens.live_viewer import StrategyPickerPopup
+
+    strategies = [
+        {"id": "1", "name": "A", "active": True},
+        {"id": "2", "name": "B", "active": True},
+    ]
+    popup = StrategyPickerPopup(strategies)
+    emitted = []
+    popup.applied.connect(lambda strats: emitted.append(strats))
+
+    popup._deselect_all()
+    popup._apply()
+
+    assert len(emitted) == 1
+    assert all(s["active"] is False for s in emitted[0])
+
+
+def test_select_all_buttons_not_built_when_no_strategies(qapp):
+    """The new button row lives entirely inside _build()'s existing
+    non-empty-strategies branch — the empty-state ("No strategies defined
+    yet.") branch must stay completely unaffected."""
+    from screens.live_viewer import StrategyPickerPopup
+
+    popup = StrategyPickerPopup([])
+
+    assert popup._checks == []
+    # Doesn't raise calling the bulk methods with nothing to act on either.
+    popup._select_all()
+    popup._deselect_all()
+
+
 def test_show_strategy_picker_falls_back_to_sync_open_when_worker_not_up(lmv, monkeypatch):
     """Shouldn't happen once the window is visible, but must degrade
     gracefully (open with whatever's already known) rather than silently

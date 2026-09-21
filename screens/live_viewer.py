@@ -604,6 +604,34 @@ class StrategyPickerPopup(QWidget):
             search.textChanged.connect(self._filter_checks)
             lay.addWidget(search)
 
+            # Select All / Deselect All — issue #46: EMV/HMV auto-select
+            # every Strategy Builder-"active" strategy on each Load/View
+            # with no fast way to pick a different subset; these bulk-
+            # toggle every checkbox in one click instead of one at a time.
+            # Deliberately act on EVERY strategy, not just the ones the
+            # search box currently filters into view — _filter_checks only
+            # ever calls setVisible, never touches check state, so a
+            # hidden checkbox is still "in the picker" as far as these are
+            # concerned.
+            bulk_row = QHBoxLayout()
+            select_all_btn = QPushButton("Select All")
+            deselect_all_btn = QPushButton("Deselect All")
+            for btn in (select_all_btn, deselect_all_btn):
+                btn.setFlat(True)
+                btn.setCursor(Qt.CursorShape.PointingHandCursor)
+                btn.setFont(font_scale.font(font_scale.SMALL, False))
+                btn.setStyleSheet(
+                    f"QPushButton{{color:{accent};background:transparent;"
+                    "border:none;padding:2px 4px;}"
+                    "QPushButton:hover{text-decoration:underline;}"
+                )
+            select_all_btn.clicked.connect(self._select_all)
+            deselect_all_btn.clicked.connect(self._deselect_all)
+            bulk_row.addWidget(select_all_btn)
+            bulk_row.addWidget(deselect_all_btn)
+            bulk_row.addStretch()
+            lay.addLayout(bulk_row)
+
             # Checkbox per strategy, in a bounded, scrollable list so the
             # popup doesn't grow off-screen when there are many strategies.
             list_widget = QWidget()
@@ -661,6 +689,14 @@ class StrategyPickerPopup(QWidget):
         q = text.strip().lower()
         for cb in self._checks:
             cb.setVisible(q in cb.text().lower())
+
+    def _select_all(self):
+        for cb in self._checks:
+            cb.setChecked(True)
+
+    def _deselect_all(self):
+        for cb in self._checks:
+            cb.setChecked(False)
 
     def _apply(self):
         for i, cb in enumerate(self._checks):
