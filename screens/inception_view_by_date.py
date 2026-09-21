@@ -34,6 +34,7 @@ popup's left edge via components.frozen_table_columns, same as HMV's grid.
 
 import calendar as _cal
 import font_scale
+import html
 from datetime import date
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar
@@ -330,6 +331,18 @@ class InceptionViewByDateScreen(QWidget):
         bottom_row.addWidget(self._status_lbl)
         bottom_row.addStretch()
 
+        # Bottom-right "applied strategies" display — issue #47, the same
+        # thing LMV already shows via LiveViewerWindow._strategy_names_lbl
+        # (screens/live_viewer.py).
+        self._strategy_names_lbl = QLabel("")
+        self._strategy_names_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._strategy_names_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        self._strategy_names_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.LinksAccessibleByMouse)
+        self._strategy_names_lbl.linkActivated.connect(self._show_strategy_names_popup)
+        self._all_active_strategy_names: list = []
+        bottom_row.addWidget(self._strategy_names_lbl)
+        bottom_row.addSpacing(8)
+
         self._strat_btn = QPushButton("⚡  Strategies")
         self._strat_btn.setFixedHeight(32)
         self._strat_btn.setFont(font_scale.font(font_scale.SMALL, False))
@@ -447,6 +460,37 @@ class InceptionViewByDateScreen(QWidget):
         active = sum(1 for s in self._strategies if s.get("active"))
         total = len(self._strategies)
         self._strat_btn.setText("⚡  Strategies" if total == 0 else f"⚡  Strategies  {active}/{total}")
+        self._update_strategy_names_label()
+
+    _MAX_INLINE_STRATEGY_NAMES = 10
+
+    def _update_strategy_names_label(self):
+        """Bottom-right "applied strategies" display (issue #47) — same
+        format/behavior as LiveViewerWindow._update_strategy_names_label
+        (screens.live_viewer): names every currently-active strategy,
+        truncated inline past _MAX_INLINE_STRATEGY_NAMES with a "view more"
+        link opening the full list (see _show_strategy_names_popup)."""
+        names = [s.get("name", "Unnamed") for s in self._strategies if s.get("active")]
+        self._all_active_strategy_names = names
+        if not names:
+            self._strategy_names_lbl.setText("")
+            return
+        shown = names[:self._MAX_INLINE_STRATEGY_NAMES]
+        text = f"Strategies : {', '.join(html.escape(n) for n in shown)}"
+        if len(names) > self._MAX_INLINE_STRATEGY_NAMES:
+            t = self._controller.theme
+            accent = t.get("accent") if t else "#39d353"
+            text += f", <a href='more' style='color:{accent};'>view more</a>"
+        self._strategy_names_lbl.setText(text)
+
+    def _show_strategy_names_popup(self, _link: str):
+        from screens.live_viewer import _StrategyNamesPopup
+        t = self._controller.theme
+        popup = _StrategyNamesPopup(self._all_active_strategy_names, t, self)
+        pos = self._strategy_names_lbl.mapToGlobal(self._strategy_names_lbl.rect().topRight())
+        popup.adjustSize()
+        popup.move(pos.x() - popup.width(), pos.y() - popup.height())
+        popup.show()
 
     # ── "changed since last View" highlight colors ──────────────────────────
 
