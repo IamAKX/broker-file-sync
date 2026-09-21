@@ -2481,6 +2481,85 @@ def test_edit_column_dialog_receives_sibling_values(qapp, controller):
     assert captured["extra_row_values"] == {"FP_10D": 95.0}
 
 
+# ── issue #48: false "empty cell" error for a chained sibling-column
+# reference whose value depends on historic/day_history data this editor
+# doesn't fetch (e.g. a MIN_DAYS-based column) ───────────────────────────
+
+def test_open_expression_editor_excludes_sibling_columns_from_real_lmv_headers(qapp, controller, monkeypatch):
+    """The actual wiring fix: _open_expression_editor must pass
+    real_lmv_headers WITHOUT this strategy's own sibling column names —
+    they're still offered in *fields* for the picker, but compile_check's
+    placeholder fallback (step 4.5) only ever kicks in for a name NOT in
+    lmv_headers, so leaving siblings in there (the pre-fix bug) meant a
+    sibling whose value came back None here was always treated as
+    strict/known and hard-failed instead of degrading gracefully."""
+    from screens import inception_strategy_builder as isb
+    from PySide6.QtWidgets import QDialog
+
+    captured = {}
+
+    class FakeDialog:
+        def __init__(self, *args, **kwargs):
+            captured["real_lmv_headers"] = kwargs.get("real_lmv_headers")
+
+        def exec(self):
+            return QDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(isb, "ExpressionEditorDialog", FakeDialog)
+
+    isb._open_expression_editor(
+        [], ["LOW", "CLOSE", "Floor 10D"], controller.theme, "value",
+        extra_row_values={"Floor 10D": None},
+    )
+
+    assert captured["real_lmv_headers"] == ["LOW", "CLOSE"]
+
+
+def test_compile_test_degrades_gracefully_for_day_history_dependent_sibling():
+    """The concrete issue #48 regression: Floor 10D = MIN_DAYS([LOW], 10)
+    can't be resolved to a real value in the editor (see
+    _extra_column_values' own "no day_history here" gap), so its
+    compile-test value is None. Before the fix, real_lmv_headers included
+    "Floor 10D" so compile_check treated it as strict and hard-failed with
+    "tried to do math with an empty cell"; excluded (this fix), step 4.5's
+    placeholder fallback degrades gracefully instead."""
+    from services.strategy_engine import compile_check
+    from screens.formula_editor import parse_expression_text
+
+    fields = ["LOW", "CLOSE", "Floor 10D"]
+    # What _extra_column_values produces today for a _DAYS-based sibling —
+    # evaluate() with no day_history= comes back None for it.
+    extra_row_values = {"Floor 10D": None}
+    real_lmv_headers = [f for f in fields if f not in extra_row_values]   # this fix's own computation
+
+    tokens = parse_expression_text("[Floor 10D] * 1.01", known_headers=fields)
+    test_row = {"LOW": 95.0, "CLOSE": 100.0, **extra_row_values}
+    ok, msg = compile_check(tokens, test_row, [test_row], lmv_headers=real_lmv_headers)
+
+    assert ok is True
+    assert "placeholder" in msg
+
+
+def test_compile_test_still_uses_real_sibling_value_when_available():
+    """The already-working case (a plain-arithmetic sibling, e.g. FP_10D
+    = 95.0) must stay exactly as before: excluding it from
+    real_lmv_headers must NOT force a placeholder when its value actually
+    resolved — step 4.5 only substitutes when the value is still None."""
+    from services.strategy_engine import compile_check
+    from screens.formula_editor import parse_expression_text
+
+    fields = ["LOW", "CLOSE", "FP_10D"]
+    extra_row_values = {"FP_10D": 95.0}
+    real_lmv_headers = [f for f in fields if f not in extra_row_values]
+
+    tokens = parse_expression_text("[FP_10D] * (1+(1/100))", known_headers=fields)
+    test_row = {"LOW": 95.0, "CLOSE": 100.0, **extra_row_values}
+    ok, msg = compile_check(tokens, test_row, [test_row], lmv_headers=real_lmv_headers)
+
+    assert ok is True
+    assert msg == "95.95"
+
+
 def test_column_editor_always_shows_editable_formula(qapp, controller):
     from screens.inception_strategy_builder import _InceptionColumnEditorDialog
 

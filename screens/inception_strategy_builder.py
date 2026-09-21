@@ -249,9 +249,23 @@ def _open_expression_editor(tokens: list, fields: list, theme, mode: str,
     else:
         row = _dummy_row(fields)
         all_data = [row]
+    # real_lmv_headers must exclude this strategy's own sibling columns
+    # (issue #48) — they're already offered in *fields* for the picker,
+    # but compile_check treats lmv_headers as "genuinely loaded, strict"
+    # columns; a sibling whose value depends on historic/day_history data
+    # this editor doesn't fetch (see _extra_column_values, e.g. a MIN_DAYS-
+    # based column) always computes None here, and being wrongly counted
+    # as "strict" turned that into a hard "empty cell" failure instead of
+    # compile_check's own graceful placeholder fallback (step 4.5) — the
+    # exact fallback LMV's own real_lmv_headers=list(self._lmv_first_row.
+    # keys()) (screens.strategy_builder) already gets right by excluding
+    # sibling columns the same way. A sibling whose value DID resolve
+    # (e.g. plain arithmetic) is unaffected either way — step 4.5 only
+    # substitutes when the value is still None.
+    real_lmv_headers = [f for f in fields if f not in (extra_row_values or {})]
     dlg = ExpressionEditorDialog(
         tokens, fields, [], row, all_lmv_data=all_data, theme=theme, mode=mode,
-        self_value=self_value, extra_row_values=extra_row_values, real_lmv_headers=fields,
+        self_value=self_value, extra_row_values=extra_row_values, real_lmv_headers=real_lmv_headers,
         sections=INCEPTION_SECTIONS, variable_store=var_store,
         historic_value_catalogue=INCEPTION_HISTORIC_VALUE_CATALOGUE,
         row_symbol_col=INCEPTION_ROW_SYMBOL_COL,
