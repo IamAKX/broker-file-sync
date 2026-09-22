@@ -2147,6 +2147,81 @@ def test_strategy_builder_screen_constructs_with_empty_data(qapp, controller, mo
     assert inception_strategy_store.all_categories() == ["Daily", "Weekly", "Monthly", "Common"]
 
 
+def test_show_event_refreshes_strategy_list_with_newly_created_strategies(qapp, controller, monkeypatch, bars_db):
+    """issue #51 — the strategy list used to load once, at construction,
+    and never again: a strategy created/imported elsewhere (View by Date,
+    another device, Import All Data) after that stayed invisible in
+    Strategy Builder for the rest of the process' life ("106 in View by
+    Date's picker, only 15 in Strategy Builder"). Now refreshed every
+    time this screen becomes visible."""
+    from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
+    from PySide6.QtGui import QShowEvent
+
+    monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
+
+    screen = InceptionStrategyBuilderScreen(controller)
+    screen._reload_all()
+    assert screen._strategies == []
+
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": [
+        {"id": "1", "name": "New Strategy", "active": True, "category": "Daily", "columns": [], "row_filter": []},
+    ]})
+
+    screen.showEvent(QShowEvent())
+
+    assert [s["name"] for s in screen._strategies] == ["New Strategy"]
+
+
+def test_show_event_does_not_disturb_an_open_editor(qapp, controller, monkeypatch, bars_db):
+    """_refresh_list only rebuilds the left-hand card list — a tab switch
+    and back must not lose an in-progress edit."""
+    from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
+    from PySide6.QtGui import QShowEvent
+
+    monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
+
+    screen = InceptionStrategyBuilderScreen(controller)
+    screen._reload_all()
+    screen._new_strategy()
+    editor = screen._active_editor
+    assert editor is not None
+
+    screen.showEvent(QShowEvent())
+
+    assert screen._active_editor is editor   # same instance, untouched
+    assert screen._editor_container.isHidden() is False
+
+
+def test_reload_strategies_closes_open_editor_and_refreshes_list(qapp, controller, monkeypatch, bars_db):
+    """reload_strategies (wired into app_window.reload_per_user_data for a
+    user switch, and into Import All Data) is a full account-context
+    change — unlike showEvent above, closing whatever editor happens to
+    be open is correct here, mirroring screens.strategy_builder.
+    StrategyBuilderScreen.reload_strategies (LMV's own) exactly."""
+    from screens.inception_strategy_builder import InceptionStrategyBuilderScreen
+
+    monkeypatch.setattr(inception_api, "list_variables", lambda: {"variables": []})
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": []})
+
+    screen = InceptionStrategyBuilderScreen(controller)
+    screen._reload_all()
+    screen._new_strategy()
+    assert screen._active_editor is not None
+
+    monkeypatch.setattr(inception_api, "list_strategies", lambda: {"strategies": [
+        {"id": "1", "name": "Other User Strategy", "active": True, "category": "Daily", "columns": [], "row_filter": []},
+    ]})
+
+    screen.reload_strategies()
+
+    assert screen._active_editor is None
+    assert screen._editor_container.isHidden() is True
+    assert screen._placeholder.isHidden() is False
+    assert [s["name"] for s in screen._strategies] == ["Other User Strategy"]
+
+
 def test_strategy_builder_fields_come_from_local_catalogue_no_network(qapp, controller, monkeypatch):
     """Confirms the Fields list no longer needs GET /inception/columns —
     Group A/B's catalogue moved entirely client-side (services.

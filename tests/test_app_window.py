@@ -47,6 +47,7 @@ def test_reload_per_user_data_refreshes_strategy_notifications_and_formula_scree
 
     w = MainWindow(controller)
     w._screens["strategy_builder"].reload_strategies = MagicMock()
+    w._screens["inception_strategy_builder"].reload_strategies = MagicMock()
     w._screens["notifications"].reload_configs = MagicMock()
     w._screens["formula_builder"].reload_formulas = MagicMock()
     w._screens["formula_stats"].reload_strategies = MagicMock()
@@ -54,6 +55,10 @@ def test_reload_per_user_data_refreshes_strategy_notifications_and_formula_scree
     w.reload_per_user_data()
 
     w._screens["strategy_builder"].reload_strategies.assert_called_once()
+    # issue #51 — a second user logging in on the same device/process must
+    # not keep seeing the first user's Inception strategies either, same
+    # reasoning as LMV's own strategy_builder above.
+    w._screens["inception_strategy_builder"].reload_strategies.assert_called_once()
     w._screens["notifications"].reload_configs.assert_called_once()
     w._screens["formula_builder"].reload_formulas.assert_called_once()
     w._screens["formula_stats"].reload_strategies.assert_called_once()
@@ -330,6 +335,37 @@ def test_import_all_data_pushes_every_present_section_to_the_server(controller, 
     assert calls["formula_variables"] == bundle["formula_variables"]
     assert calls["inception_formula_variables"] == bundle["inception_formula_variables"]
     assert calls["settings"] == bundle["settings"]
+
+
+def test_import_all_data_reloads_both_strategy_builder_screens(controller, monkeypatch, tmp_path):
+    """issue #51 — inception_strategies is imported above, but nothing ever
+    told Inception's own Strategy Builder screen to pick it up; it used to
+    stay stuck showing whatever it had loaded once at app construction."""
+    from app_window import MainWindow
+    from PySide6.QtWidgets import QFileDialog
+    from services import formula_variable_store, inception_formula_variable_store, inception_strategy_store, strategy_store
+    from unittest.mock import MagicMock
+
+    _mock_all_message_boxes(monkeypatch)
+    monkeypatch.setattr(strategy_store, "import_all", lambda items: (0, 0))
+    monkeypatch.setattr(inception_strategy_store, "import_all", lambda items: (0, 0))
+    monkeypatch.setattr(formula_variable_store, "import_all", lambda items: (0, 0))
+    monkeypatch.setattr(inception_formula_variable_store, "import_all", lambda items: (0, 0))
+
+    import json
+    bundle = {"strategies": [{"id": "1", "name": "S1"}], "inception_strategies": [{"id": "2", "name": "IS1"}]}
+    in_path = tmp_path / "import.json"
+    in_path.write_text(json.dumps(bundle))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(lambda *a, **k: (str(in_path), "")))
+
+    w = MainWindow(controller)
+    w._screens["strategy_builder"].reload_strategies = MagicMock()
+    w._screens["inception_strategy_builder"].reload_strategies = MagicMock()
+
+    w._import_all_data()
+
+    w._screens["strategy_builder"].reload_strategies.assert_called_once()
+    w._screens["inception_strategy_builder"].reload_strategies.assert_called_once()
 
 
 def test_import_all_data_accepts_the_old_bare_list_strategies_only_format(controller, monkeypatch, tmp_path):

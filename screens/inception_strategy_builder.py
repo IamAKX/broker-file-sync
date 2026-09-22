@@ -839,8 +839,22 @@ class InceptionStrategyBuilderScreen(QWidget):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # issue #51 — the strategy list used to load once, at construction
+        # (the QTimer.singleShot(0, self._reload_all) call in __init__),
+        # and never again: a strategy created/imported via View by Date
+        # (or another device) after that stayed permanently invisible here
+        # for the rest of the process' life, with no way to edit/clone it
+        # short of restarting the app — reported as "106 in View by
+        # Date's picker, only 15 in Strategy Builder." Refreshed every
+        # time this screen becomes visible instead, same store.load_all()
+        # View by Date's own picker already calls on every open — cheap,
+        # and safe to call unconditionally (unlike _start_sample_load
+        # below): _refresh_list only rebuilds the left-hand card list, it
+        # never touches _active_editor/_editor_container, so an editor
+        # left open mid-edit is undisturbed by a tab switch and back.
+        self._reload_all()
         # See this module's "Real sample data" docstring section for why
-        # this is triggered here (once, guarded) rather than from __init__.
+        # THIS is triggered here (once, guarded) rather than from __init__.
         if not self._sample_load_started:
             self._sample_load_started = True
             self._start_sample_load()
@@ -991,6 +1005,25 @@ class InceptionStrategyBuilderScreen(QWidget):
             self._fields.append("Avg Rate")
         self._strategies = store.load_all()
         self._refresh_list()
+
+    def reload_strategies(self):
+        """Re-read all strategies from the server and refresh the list,
+        also closing any open editor — mirrors screens.strategy_builder.
+        StrategyBuilderScreen.reload_strategies() (LMV's own) exactly,
+        wired the same way into app_window.reload_per_user_data(): a
+        second user logging in on the same device/process must not keep
+        seeing the first user's Inception strategies, or an editor left
+        open on one of them. showEvent above already covers the more
+        common "just switched tabs" staleness case without closing the
+        editor; a login is a full account-context change, so closing it
+        here is correct."""
+        if self._active_editor is not None:
+            self._editor_slot.removeWidget(self._active_editor)
+            self._active_editor.deleteLater()
+        self._active_editor = None
+        self._editor_container.hide()
+        self._placeholder.show()
+        self._reload_all()
 
     # ── real sample data (background load) ──────────────────────────────────
 

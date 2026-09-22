@@ -378,6 +378,16 @@ class MainWindow(QMainWindow):
         strategy_builder = self._screens.get("strategy_builder")
         if strategy_builder is not None:
             strategy_builder.reload_strategies()
+        # issue #51 — inception_strategies is one of *importers* above, but
+        # nothing ever told Inception's own Strategy Builder screen to
+        # reload; its screen's showEvent now refreshes reactively on the
+        # next visit either way, but reloading it here immediately (same
+        # as LMV's own strategy_builder, right above) means an import
+        # completed while Strategy Builder happens to already be the
+        # visible screen shows up without needing to switch away and back.
+        inception_strategy_builder = self._screens.get("inception_strategy_builder")
+        if inception_strategy_builder is not None:
+            inception_strategy_builder.reload_strategies()
         formula_builder = self._screens.get("formula_builder")
         if formula_builder is not None:
             formula_builder.reload_formulas()
@@ -517,6 +527,10 @@ class MainWindow(QMainWindow):
         strategy_builder = self._screens.get("strategy_builder")
         if strategy_builder is not None:
             strategy_builder.reload_strategies()
+
+        inception_strategy_builder = self._screens.get("inception_strategy_builder")
+        if inception_strategy_builder is not None:
+            inception_strategy_builder.reload_strategies()
 
         from services.strategy_alerts import alert_schedule
         from services.strategy_alerts import config_store as alerts_config_store
