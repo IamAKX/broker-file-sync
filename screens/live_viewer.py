@@ -7,6 +7,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from components.column_filter_popup import ColumnFilterPopup
+from components.popup_position import clamp_to_screen
 from services.master_generator import _build_script_name_lookup, _strip_rolling_suffix
 
 from PySide6.QtWidgets import (
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import (
     QDialog, QListWidget, QListWidgetItem, QProgressBar
 )
 from PySide6.QtCore import (
-    Qt, QTimer, QFileSystemWatcher, Signal, QObject, QThread, QEvent, QByteArray, QSize
+    Qt, QTimer, QFileSystemWatcher, Signal, QObject, QThread, QEvent, QByteArray, QSize, QPoint
 )
 from PySide6.QtGui import QColor, QBrush, QIcon, QPixmap, QPainter
 from PySide6.QtSvg import QSvgRenderer
@@ -2877,7 +2878,7 @@ class LiveViewerWindow(QWidget):
         popup.applied.connect(self._on_strategies_applied)
         btn_pos = self._strat_btn.mapToGlobal(self._strat_btn.rect().bottomLeft())
         popup.adjustSize()
-        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.move(clamp_to_screen(popup, QPoint(btn_pos.x(), btn_pos.y() + 4)))
         popup.show()
 
     def _on_strategies_applied(self, updated: list):
@@ -2950,7 +2951,7 @@ class LiveViewerWindow(QWidget):
         popup = _StrategyNamesPopup(self._all_active_strategy_names, self._theme, self)
         pos = self._strategy_names_lbl.mapToGlobal(self._strategy_names_lbl.rect().topRight())
         popup.adjustSize()
-        popup.move(pos.x() - popup.width(), pos.y() - popup.height())
+        popup.move(clamp_to_screen(popup, QPoint(pos.x() - popup.width(), pos.y() - popup.height())))
         popup.show()
 
     # ── Filter panel ──────────────────────────────────────────────────────────
@@ -2984,7 +2985,7 @@ class LiveViewerWindow(QWidget):
         popup.cleared.connect(self._clear_all_filters)
         btn_pos = self._filter_btn.mapToGlobal(self._filter_btn.rect().bottomLeft())
         popup.adjustSize()
-        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.move(clamp_to_screen(popup, QPoint(btn_pos.x(), btn_pos.y() + 4)))
         popup.show()
 
     def _clear_all_filters(self):
@@ -3117,7 +3118,7 @@ class LiveViewerWindow(QWidget):
         popup.columns_changed.connect(self._apply_col_filter)
         btn_pos = self._filter_btn.mapToGlobal(self._filter_btn.rect().bottomLeft())
         popup.adjustSize()
-        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.move(clamp_to_screen(popup, QPoint(btn_pos.x(), btn_pos.y() + 4)))
         popup.show()
 
     def _apply_col_filter(self, visible: set):

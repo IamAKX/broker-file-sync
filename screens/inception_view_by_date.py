@@ -38,12 +38,13 @@ import html
 from datetime import date
 
 from PySide6.QtWidgets import QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QProgressBar
-from PySide6.QtCore import Qt, QTimer, QThread, Signal
+from PySide6.QtCore import Qt, QPoint, QTimer, QThread, Signal
 
 from api import inception_api
 from api.exceptions import ApiError, NetworkError
 from components.availability_calendar import AvailabilityCalendar, themed_calendar_stylesheet
 from components.error_popup import show_api_error
+from components.popup_position import clamp_to_screen
 from screens.historic_viewer import HistoricDataViewer
 from services import (
     inception_bars_store, inception_change_highlight, inception_compute_service,
@@ -441,7 +442,7 @@ class InceptionViewByDateScreen(QWidget):
         popup.applied.connect(self._on_strategies_applied)
         btn_pos = self._strat_btn.mapToGlobal(self._strat_btn.rect().bottomLeft())
         popup.adjustSize()
-        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.move(clamp_to_screen(popup, QPoint(btn_pos.x(), btn_pos.y() + 4)))
         popup.show()
 
     def _on_strategies_applied(self, updated: list):
@@ -489,7 +490,7 @@ class InceptionViewByDateScreen(QWidget):
         popup = _StrategyNamesPopup(self._all_active_strategy_names, t, self)
         pos = self._strategy_names_lbl.mapToGlobal(self._strategy_names_lbl.rect().topRight())
         popup.adjustSize()
-        popup.move(pos.x() - popup.width(), pos.y() - popup.height())
+        popup.move(clamp_to_screen(popup, QPoint(pos.x() - popup.width(), pos.y() - popup.height())))
         popup.show()
 
     # ── "changed since last View" highlight colors ──────────────────────────

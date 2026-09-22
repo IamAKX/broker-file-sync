@@ -70,12 +70,13 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QDateEdit,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QProgressBar,
 )
-from PySide6.QtCore import Qt, QDate, QThread, Signal
+from PySide6.QtCore import Qt, QDate, QPoint, QThread, Signal
 from PySide6.QtGui import QBrush, QColor
 
 from api.exceptions import ApiError, NetworkError
 from components.column_filter_popup import ColumnFilterPopup
 from components.frozen_table_columns import FrozenColumns
+from components.popup_position import clamp_to_screen
 from screens.inception_view_by_date import _display_symbol, _remap_to_display_symbols
 from services import (
     inception_bars_store, inception_change_highlight, inception_compute_service,
@@ -589,7 +590,7 @@ class InceptionHmvScreen(QWidget):
         popup.applied.connect(self._on_strategies_applied)
         btn_pos = self._strat_btn.mapToGlobal(self._strat_btn.rect().bottomLeft())
         popup.adjustSize()
-        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.move(clamp_to_screen(popup, QPoint(btn_pos.x(), btn_pos.y() + 4)))
         popup.show()
 
     def _on_strategies_applied(self, updated: list):
@@ -772,7 +773,7 @@ class InceptionHmvScreen(QWidget):
         popup.columns_changed.connect(self._apply_col_filter)
         btn_pos = self._filter_btn.mapToGlobal(self._filter_btn.rect().bottomLeft())
         popup.adjustSize()
-        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.move(clamp_to_screen(popup, QPoint(btn_pos.x(), btn_pos.y() + 4)))
         popup.show()
 
     def _apply_col_filter(self, visible: set):

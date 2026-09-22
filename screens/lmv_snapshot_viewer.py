@@ -13,10 +13,11 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QFrame,
     QComboBox,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QColor, QBrush
 
 from components.column_filter_popup import ColumnFilterPopup
+from components.popup_position import clamp_to_screen
 from screens.live_viewer import FilterPanelPopup, StrategyPickerPopup
 from services import strategy_store
 from services.strategy_engine import apply_strategies, get_row_fmt_colors
@@ -285,7 +286,7 @@ class LmvSnapshotViewer(QWidget):
         popup.applied.connect(self._on_strategies_applied)
         btn_pos = self._strat_btn.mapToGlobal(self._strat_btn.rect().bottomLeft())
         popup.adjustSize()
-        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.move(clamp_to_screen(popup, QPoint(btn_pos.x(), btn_pos.y() + 4)))
         popup.show()
 
     def _on_strategies_applied(self, updated: list):
@@ -328,7 +329,7 @@ class LmvSnapshotViewer(QWidget):
         popup.cleared.connect(self._clear_all_filters)
         btn_pos = self._filter_btn.mapToGlobal(self._filter_btn.rect().bottomLeft())
         popup.adjustSize()
-        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.move(clamp_to_screen(popup, QPoint(btn_pos.x(), btn_pos.y() + 4)))
         popup.show()
 
     def _clear_all_filters(self):
@@ -347,7 +348,7 @@ class LmvSnapshotViewer(QWidget):
         popup.columns_changed.connect(self._apply_col_filter)
         btn_pos = self._filter_btn.mapToGlobal(self._filter_btn.rect().bottomLeft())
         popup.adjustSize()
-        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.move(clamp_to_screen(popup, QPoint(btn_pos.x(), btn_pos.y() + 4)))
         popup.show()
 
     def _apply_col_filter(self, visible: set):

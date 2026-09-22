@@ -3,11 +3,12 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QHeaderView, QAbstractItemView, QPushButton, QLineEdit, QComboBox
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QBrush, QColor
 
 from components.column_filter_popup import ColumnFilterPopup
 from components.frozen_table_columns import FrozenColumns
+from components.popup_position import clamp_to_screen
 
 _CATEGORIES = ["All", "Daily", "Weekly", "Monthly", "Common"]
 
@@ -238,7 +239,7 @@ class HistoricDataViewer(QWidget):
         popup.columns_changed.connect(self._apply_col_filter)
         btn_pos = self._filter_btn.mapToGlobal(self._filter_btn.rect().bottomLeft())
         popup.adjustSize()
-        popup.move(btn_pos.x(), btn_pos.y() + 4)
+        popup.move(clamp_to_screen(popup, QPoint(btn_pos.x(), btn_pos.y() + 4)))
         popup.show()
 
     def _apply_col_filter(self, visible: set):
