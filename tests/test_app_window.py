@@ -143,6 +143,62 @@ def test_second_login_on_same_process_reloads_per_user_data(controller, monkeypa
     fake_window.refresh_user.assert_called_once()
 
 
+# ── AppController._ensure_inception_sync_on_launch ─────────────────────────
+
+def test_ensure_inception_sync_on_launch_runs_once_per_process(controller, monkeypatch):
+    from services import scheduled_jobs
+
+    calls = []
+    monkeypatch.setattr(scheduled_jobs, "run_inception_local_sync", lambda c, n: calls.append((c, n)))
+    controller._notifier = object()   # just needs to be non-None
+
+    controller._ensure_inception_sync_on_launch()
+    controller._ensure_inception_sync_on_launch()   # a second call this same process (e.g. a re-login)
+
+    assert len(calls) == 1
+    assert calls[0] == (controller, controller._notifier)
+    assert controller._inception_sync_launched is True
+
+
+def test_ensure_inception_sync_on_launch_noop_without_notifier(controller, monkeypatch):
+    """Mirrors _ensure_scheduler's own "no tray yet" no-op guard — must not
+    crash or mark itself launched before a notifier actually exists (e.g.
+    under test, or a minimized/no-tray launch)."""
+    from services import scheduled_jobs
+
+    calls = []
+    monkeypatch.setattr(scheduled_jobs, "run_inception_local_sync", lambda c, n: calls.append(1))
+    controller._notifier = None
+
+    controller._ensure_inception_sync_on_launch()
+
+    assert calls == []
+    assert controller._inception_sync_launched is False
+
+
+def test_ensure_inception_sync_on_launch_respects_disabled_trigger(controller, monkeypatch):
+    """Disabling the "Inception Local Sync" trigger in the Notifications
+    screen's trigger table must disable BOTH automated paths — the daily
+    scheduled tick AND this launch-time trigger — not just the former."""
+    from datetime import time as dtime
+    from services import scheduled_jobs, trigger_config
+
+    calls = []
+    monkeypatch.setattr(scheduled_jobs, "run_inception_local_sync", lambda c, n: calls.append(1))
+    monkeypatch.setattr(trigger_config, "load_trigger_configs", lambda: [
+        trigger_config.TriggerConfig(
+            id="inception_sync", name="Inception Local Sync", subtitle="",
+            time=dtime(18, 30), system_enabled=False, slack_enabled=False, email_enabled=True,
+        ),
+    ])
+    controller._notifier = object()
+
+    controller._ensure_inception_sync_on_launch()
+
+    assert calls == []
+    assert controller._inception_sync_launched is True   # guard consumed either way — no retry this process
+
+
 def test_close_event_closes_child_windows_when_really_quitting(controller):
     from app_window import MainWindow
     from PySide6.QtGui import QCloseEvent

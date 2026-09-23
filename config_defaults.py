@@ -515,5 +515,9 @@ SCHEDULER_TRIGGER_DEFAULTS = [
      "View for the trading day's opening window (market open 09:15 to this "
      "time — 09:30 default = first 15 minutes).",
      "09:30"),
+    ("inception_sync", "Inception Local Sync",
+     "Pulls new Inception data down to this device from the shared central "
+     "dataset. Also runs once automatically whenever the app launches.",
+     "18:30"),
 ]
 

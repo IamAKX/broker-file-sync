@@ -589,6 +589,82 @@ def test_opening_range_capture_uploads_and_notifies_success(monkeypatch):
     assert level == NotificationLevel.SUCCESS
 
 
+# ── run_inception_local_sync ──────────────────────────────────────────────
+# Local counterpart to the backend's automated vendor-fetch cron — pulls new
+# Inception data down to this device. Deliberately not trading-day-gated.
+
+def test_inception_local_sync_notifies_on_success(monkeypatch):
+    from services import inception_sync_service
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", lambda: 42)
+
+    controller = _FakeController()
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_inception_local_sync(controller, notifier)
+
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Inception Data Synced"
+    assert "42" in message
+    assert level == NotificationLevel.SUCCESS
+
+
+def test_inception_local_sync_no_notification_when_nothing_new(monkeypatch):
+    """A no-op sync (already up to date) shouldn't announce anything —
+    this runs daily AND on every app launch, so a "0 rows synced" message
+    every single time would just be noise."""
+    from services import inception_sync_service
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", lambda: 0)
+
+    controller = _FakeController()
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_inception_local_sync(controller, notifier)
+
+    assert notifier.notifications == []
+
+
+def test_inception_local_sync_notifies_on_failure(monkeypatch):
+    from services import inception_sync_service
+
+    def _boom():
+        raise inception_sync_service.SyncError("network blip")
+
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", _boom)
+
+    controller = _FakeController()
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_inception_local_sync(controller, notifier)
+
+    assert len(notifier.notifications) == 1
+    title, message, action, level = notifier.notifications[0]
+    assert title == "Inception Sync Failed"
+    assert level == NotificationLevel.FAILURE
+    action()
+    assert controller.navigated_to == ["inception_settings"]
+
+
+def test_inception_local_sync_ignores_trading_day_gate(monkeypatch):
+    """Unlike every LMV job above, this must still run (and sync) even on
+    a non-trading day — it's a plain catch-up pull, not something that
+    depends on today's market session having happened."""
+    from services import inception_sync_service
+
+    called = []
+
+    def fake_incremental_sync():
+        called.append(1)
+        return 5
+
+    monkeypatch.setattr(inception_sync_service, "incremental_sync", fake_incremental_sync)
+    monkeypatch.setattr(scheduled_jobs, "_is_today_trading_day", lambda: False)
+
+    controller = _FakeController()
+    notifier = _FakeNotifier()
+    scheduled_jobs.run_inception_local_sync(controller, notifier)
+
+    assert called == [1]
+    assert len(notifier.notifications) == 1
+
+
 def test_opening_range_capture_notifies_on_api_error(monkeypatch):
     from api.exceptions import ApiError
 

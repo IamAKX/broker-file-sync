@@ -15,6 +15,7 @@ class AppController:
         self._tray = None
         self._scheduler = None
         self._notifier = None
+        self._inception_sync_launched = False
         from services.watcher import FileWatcher
         self.watcher = FileWatcher()
         api_client.set_session_expired_callback(self.show_login)
@@ -61,6 +62,7 @@ class AppController:
         self._main_window.show()
         self._main_window.check_holiday_gate(initial=True)
         self._ensure_scheduler()
+        self._ensure_inception_sync_on_launch()
 
     def _ensure_scheduler(self):
         """Lazily build the background scheduler the first time a main window
@@ -79,8 +81,31 @@ class AppController:
             "availability_check": lambda: scheduled_jobs.run_availability_check(self, self._notifier),
             scheduled_jobs.OPENING_RANGE_TRIGGER_ID:
                 lambda: scheduled_jobs.run_opening_range_capture(self, self._notifier),
+            "inception_sync":     lambda: scheduled_jobs.run_inception_local_sync(self, self._notifier),
         })
         self._scheduler.start()
+
+    def _ensure_inception_sync_on_launch(self):
+        """Runs services.scheduled_jobs.run_inception_local_sync once per
+        process launch (not on every internal re-login — Inception's
+        dataset is shared/non-user-specific, unlike reload_per_user_data's
+        per-user stores, so re-syncing on a same-process user switch would
+        just be redundant network traffic). Guarded by the SAME
+        "inception_sync" trigger's system_enabled flag the daily scheduled
+        tick above also respects (see screens.notifications' trigger
+        table), so disabling the job there disables both automated paths,
+        not just the scheduled one. Must run after _ensure_scheduler so
+        self._notifier already exists; no-ops (same as _ensure_scheduler
+        itself) when there's no tray/notifier yet (e.g. under test)."""
+        if self._inception_sync_launched or self._notifier is None:
+            return
+        self._inception_sync_launched = True
+        from services import scheduled_jobs, trigger_config
+
+        cfg = next((c for c in trigger_config.load_trigger_configs() if c.id == "inception_sync"), None)
+        if cfg is not None and not cfg.system_enabled:
+            return
+        scheduled_jobs.run_inception_local_sync(self, self._notifier)
 
     def get_lmv_snapshot(self):
         """Return (headers, data) from the currently open Live Master View,

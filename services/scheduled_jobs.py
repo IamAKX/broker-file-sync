@@ -378,6 +378,53 @@ def run_opening_range_capture(controller, notifier) -> None:
     )
 
 
+def run_inception_local_sync(controller, notifier) -> None:
+    """Local counterpart to the backend's own automated vendor fetch
+    (broker-sync-api's scripts/vendor_fetch_cron.py, a systemd timer —
+    "Fetch from Equal Solution" run automatically server-side) — pulls
+    whatever that made newly available in the shared central dataset down
+    into THIS device's own local cache (services.inception_bars_store),
+    same as the manual "Sync Now" button in Inception > Data & Settings
+    (screens.inception_settings._SyncWorker).
+
+    Deliberately NOT gated by _trading_day_gate (unlike every job above):
+    this is a plain catch-up pull, harmless and cheap to run on a
+    non-trading day too — incremental_sync() below no-ops fast (returns 0,
+    no network call at all) when there's nothing new since last sync.
+
+    Runs synchronously on the calling (GUI) thread, same as every job
+    above when fired by the Scheduler's QTimer callback (see
+    services.scheduler.Scheduler._tick — none of these jobs run on a
+    background thread of their own). services.inception_sync_service's
+    own "run on a background QThread" guidance is aimed at the
+    INTERACTIVE button-click path (screens.inception_settings._SyncWorker),
+    where responsiveness matters more; a background scheduled tick briefly
+    blocking the GUI for what's normally a "handful of days" catch-up
+    (same size/duration class as the vendor-fetch it mirrors) is the same
+    tradeoff every other job in this module already makes. Also fired
+    directly (bypassing the Scheduler entirely) once per app launch — see
+    app.py::AppController._ensure_inception_sync_on_launch.
+    """
+    from services import inception_sync_service
+    try:
+        total = inception_sync_service.incremental_sync()
+    except inception_sync_service.SyncError as exc:
+        notifier.notify(
+            "Inception Sync Failed",
+            f"Couldn't sync Inception data to this device. Error: {exc}",
+            action=lambda: controller.show_and_navigate("inception_settings"),
+            level=NotificationLevel.FAILURE,
+        )
+        return
+    if total == 0:
+        return   # already up to date — no need to announce a no-op
+    notifier.notify(
+        "Inception Data Synced",
+        f"{total} row(s) synced to this device.",
+        level=NotificationLevel.SUCCESS,
+    )
+
+
 def run_availability_check(controller, notifier) -> None:
     today = date.today()
     try:

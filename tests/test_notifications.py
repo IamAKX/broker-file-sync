@@ -61,8 +61,10 @@ def test_system_row_has_no_configure_button(screen):
     assert screen._system_card.findChildren(QToolButton) == []
 
 
-def test_trigger_table_has_four_rows(screen):
-    assert screen._table.rowCount() == 4
+def test_trigger_table_has_five_rows(screen):
+    # lmv_check, historic_save, availability_check, opening_range_capture,
+    # inception_sync — see config_defaults.SCHEDULER_TRIGGER_DEFAULTS.
+    assert screen._table.rowCount() == 5
 
 
 def test_system_and_email_default_checked_slack_default_unchecked(screen):
