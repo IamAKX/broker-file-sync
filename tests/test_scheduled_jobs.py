@@ -57,9 +57,10 @@ SHAREKHAN_HEADERS = [
 
 def _sharekhan_row(scrip="INFY", pct=1.5, current=1800, open_=1790, high=1810,
                     low=1780, close=1795, avg=1798, phigh=1815, plow=1775,
-                    qty=1000, pqty=900):
+                    qty=1000, pqty=900, lot_size=1):
     row = [None] * len(SHAREKHAN_HEADERS)
     row[SHAREKHAN_HEADERS.index("Scrip Name")] = scrip
+    row[SHAREKHAN_HEADERS.index("Lot Size")] = lot_size
     row[SHAREKHAN_HEADERS.index("% Change")] = pct
     row[SHAREKHAN_HEADERS.index("Current")] = current
     row[SHAREKHAN_HEADERS.index("Open")] = open_
@@ -139,6 +140,34 @@ def test_build_lmv_snapshot_payload_resolves_symbol_via_script_name_map():
     rows = scheduled_jobs._build_lmv_snapshot_payload(LMV_HEADERS, data, script_name_data)
     assert rows[0]["symbol"] == "INFY"
     assert rows[0]["display_name"] == "Infosys Limited"
+
+
+def test_build_lmv_snapshot_payload_omits_none_cells_instead_of_sending_null():
+    """issue #52: a live-overlay column (CWTO and friends — see screens.
+    strategy_builder._LIVE_OVERLAY_COLUMNS) that hasn't had a live tick
+    with enough input to compute it yet this session is None in the grid
+    — must be OMITTED from the upload payload, not sent as an explicit
+    null, or a later upload for the same trade_date would silently
+    overwrite an earlier upload's real value with null (see services.
+    live_formula.apply_live_overlay's own "omitted, never set to None...
+    callers must leave any omitted code's existing value untouched"
+    convention — this closes the same gap at the upload boundary)."""
+    row = _lmv_row(day_to=None)   # DAY TO not yet computed this session
+    rows = scheduled_jobs._build_lmv_snapshot_payload(LMV_HEADERS, [row], script_name_data=[])
+    metrics = rows[0]["metrics"]
+    assert "DAY TO" not in metrics
+    assert metrics == {"Lot Size": 1, "% Change": 1.5, "Current": 1800, "PATP": 1780}
+
+
+def test_build_lmv_snapshot_payload_keeps_other_columns_when_one_is_none():
+    """A None cell for one column must not affect any other column in the
+    same row."""
+    row = _lmv_row(patp=None)
+    rows = scheduled_jobs._build_lmv_snapshot_payload(LMV_HEADERS, [row], script_name_data=[])
+    metrics = rows[0]["metrics"]
+    assert "PATP" not in metrics
+    assert metrics["DAY TO"] == 12.3
+    assert metrics["Current"] == 1800
 
 
 # ── _trading_day_gate ─────────────────────────────────────────────────────────

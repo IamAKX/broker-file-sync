@@ -88,6 +88,24 @@ def _build_lmv_snapshot_payload(headers: list, data: list, script_name_data: lis
     computed column, excluding _LMV_SNAPSHOT_EXCLUDED_HEADERS. Feeds the
     separate LmvDailySnapshot archive (see api/lmv_snapshot_api.py), not the
     HistoricalStockValue table used for formula recomputation.
+
+    A cell that's still None (e.g. a services.live_formula.apply_live_
+    overlay column — CWTO and friends, see screens.strategy_builder.
+    _LIVE_OVERLAY_COLUMNS — that hasn't had a live tick with enough input
+    to compute it yet this session) is OMITTED from that row's metrics
+    entirely, not sent as an explicit null (issue #52) — apply_live_
+    overlay's own docstring already establishes "omitted, never set to
+    None... callers must leave any omitted code's existing value
+    untouched" for the live grid itself; this closes the same gap at the
+    upload boundary. Before this, an upload sent while a live-overlay
+    column happened to still be None this session (e.g. right after an
+    app restart, before enough ticks had arrived, followed by a manual
+    re-save) would send an explicit null for it — and the backend
+    faithfully stored that null, silently overwriting whatever
+    good value had been saved for that column on an earlier upload for
+    the SAME trade_date, which is how VALUE_AT_MAX_DAYS/VALUE_AT_MAX_DATES
+    against CWTO could go from a real value to empty with no code change
+    and no bad data entered anywhere.
     """
     name_to_symbol = _build_script_name_lookup(script_name_data)
     scrip_idx = headers.index("Scrip Name")
@@ -101,7 +119,10 @@ def _build_lmv_snapshot_payload(headers: list, data: list, script_name_data: lis
         display_name = _strip_rolling_suffix(raw_name) or raw_name
         symbol = name_to_symbol.get(display_name.lower()) or display_name
 
-        metrics = {headers[i]: row[i] for i in value_indices if i < len(row)}
+        metrics = {
+            headers[i]: row[i] for i in value_indices
+            if i < len(row) and row[i] is not None
+        }
 
         rows.append({"symbol": symbol, "display_name": display_name or None, "metrics": metrics})
     return rows
