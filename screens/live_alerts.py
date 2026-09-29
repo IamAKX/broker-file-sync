@@ -149,6 +149,7 @@ def _signal_from_api_item(item: dict) -> dict:
         "entry_time": item.get("entry_time"),
         "entry_price": item.get("entry_price"),
         "resolved_at": item.get("resolved_at"),
+        "exit_price": item.get("exit_price"),
         "running_high": item.get("running_high"),
         "running_low": item.get("running_low"),
         "score": item.get("score"),

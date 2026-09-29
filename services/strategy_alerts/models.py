@@ -59,12 +59,18 @@ Open-signal shape (see services/strategy_alerts/state_store.py):
                                        # of repeat_condition fires a repeat.
     "last_repeat_at": iso str | None, # issue #43: when the last repeat fired,
                                        # for repeat_min_gap_minutes.
-    "exit_price": float | None,       # issue #43: set only on an "intraday_closed"
-                                       # resolution — the Current price at the
-                                       # moment the alert window closed. Local-
-                                       # only, never synced to the backend (see
-                                       # backend_sync.py — resolved_at + status
-                                       # already capture "this closed, and when").
+    "exit_price": float | None,       # the live tick price at the moment this
+                                       # signal resolved — issue #43 originally
+                                       # set this only for "intraday_closed"
+                                       # (the Current price when the alert
+                                       # window closed); now also set for
+                                       # "stopped_out"/"all_targets_achieved"
+                                       # (see engine.py's _update_open_signal),
+                                       # for the Reports feature's directional
+                                       # % yield calc. None for "trade_cancelled"
+                                       # (never actually traded) and for any
+                                       # resolution recorded before this field
+                                       # existed — callers must tolerate that.
   }
 """
 

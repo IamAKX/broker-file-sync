@@ -141,6 +141,9 @@ def test_target_hit_emits_event_and_stays_open_until_resolved():
     history = state_store.get_alert_history()
     assert len(history) == 1
     assert history[0]["resolution"] == "all_targets_achieved"
+    # Reports needs a real exit price for directional % yield — this tick's
+    # own price (the one that crossed the target) is the fill.
+    assert history[0]["exit_price"] == 111
 
 
 def test_stop_loss_hit_resolves_as_stopped_out():
@@ -159,6 +162,9 @@ def test_stop_loss_hit_resolves_as_stopped_out():
     assert state_store.get_open_signals() == {}
     history = state_store.get_alert_history()
     assert history[0]["resolution"] == "stopped_out"
+    # Reports needs a real exit price for directional % yield — this tick's
+    # own price (the one that crossed the stop loss) is the fill.
+    assert history[0]["exit_price"] == 94
 
 
 def test_sell_direction_inverts_target_and_stop_loss_crossings():

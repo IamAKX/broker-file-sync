@@ -484,6 +484,14 @@ def _update_open_signal(
     if stopped_out or all_targets_hit:
         signal["resolved_at"] = now.isoformat()
         signal["resolution"] = "stopped_out" if stopped_out else "all_targets_achieved"
+        # Reports needs a real exit price to compute directional % yield —
+        # this tick's own price IS the fill this signal resolved on (the
+        # target-hit/stop-out checks above compared this same `price`
+        # against each metric's threshold). Mirrors close_intraday_signals'
+        # own "Current price as the exit" below. None only if this tick's
+        # row had no parseable price at all (see `price = _to_float(...)`
+        # above) — reports fall back to the target/SL threshold value then.
+        signal["exit_price"] = price
         state_store.append_alert_history(signal)
         state_store.clear_open_signal(key)
         # Don't let this symbol/strategy re-arm into a brand new signal

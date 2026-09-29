@@ -65,6 +65,7 @@ def _to_payload(signal: dict) -> dict:
         "entry_time": signal.get("entry_time"),
         "entry_price": signal.get("entry_price"),
         "resolved_at": signal.get("resolved_at"),
+        "exit_price": signal.get("exit_price"),
         "running_high": signal.get("running_high"),
         "running_low": signal.get("running_low"),
         "score": signal.get("score"),

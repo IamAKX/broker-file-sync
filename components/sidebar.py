@@ -28,6 +28,7 @@ NAV_ITEMS = [
     ("strategy_builder", "Strategy Builder","strategy_builder.svg"),
     ("notifications",    "Notifications",   "notification.svg"),
     ("live_alerts",      "Live Alerts",     "database.svg"),
+    ("reports",          "Reports",         "reports.svg"),
     ("profile",          "My Profile",      "profile.svg"),
 ]
 

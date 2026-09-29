@@ -39,6 +39,12 @@ def test_sync_event_pushes_mapped_payload(monkeypatch):
     assert payload["strategy_id"] == "strat-1"
     assert payload["symbol"] == "INFY"
     assert payload["status"] == "open"   # no resolution set -> still open
+    assert payload["exit_price"] is None   # still open -> no exit yet
+
+
+def test_to_payload_forwards_exit_price():
+    payload = backend_sync._to_payload(_signal(exit_price=1420.5))
+    assert payload["exit_price"] == 1420.5
 
 
 def test_sync_event_maps_resolution_to_status():

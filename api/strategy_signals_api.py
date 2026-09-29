@@ -16,7 +16,8 @@ def upsert_signal(signal_id: str, payload: dict) -> dict:
     strategy_name, symbol, sector, direction, status ("open" |
     "stopped_out" | "all_targets_achieved" — "pending" is never synced, see
     services/strategy_alerts/backend_sync.py), entry_time, entry_price,
-    resolved_at, running_high, running_low, score, risk_reward, metrics."""
+    resolved_at, exit_price, running_high, running_low, score, risk_reward,
+    metrics."""
     return api_client.put(f"{STRATEGY_SIGNALS}/{signal_id}", json_body=payload)
 
 

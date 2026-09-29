@@ -72,6 +72,7 @@ class MainWindow(QMainWindow):
         from screens.inception_formula_stats import InceptionFormulaStatsScreen
         from screens.inception_settings import InceptionSettingsScreen
         from screens.inception_admin_sync import InceptionAdminSyncScreen
+        from screens.reports import ReportsScreen
 
         dashboard        = DashboardScreen(self._controller)
         data_import      = DataImportScreen(self._controller)
@@ -131,6 +132,7 @@ class MainWindow(QMainWindow):
             ("inception_formula_stats",    InceptionFormulaStatsScreen(self._controller)),
             ("inception_settings",         InceptionSettingsScreen(self._controller)),
             ("inception_admin_sync",       InceptionAdminSyncScreen(self._controller)),
+            ("reports",                    ReportsScreen(self._controller)),
         ]
         for name, widget in screens:
             self._screens[name] = widget
@@ -611,7 +613,7 @@ class MainWindow(QMainWindow):
         if formula_stats is not None:
             formula_stats.refresh_theme()
         for key in ("inception_view_by_date", "inception_strategy_builder", "inception_hmv",
-                    "inception_formula_stats"):
+                    "inception_formula_stats", "reports"):
             screen = self._screens.get(key)
             if screen is not None:
                 screen.refresh_theme()
