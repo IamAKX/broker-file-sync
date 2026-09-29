@@ -28,6 +28,7 @@ HOLIDAYS = "/holidays"
 
 NOTIFICATIONS_EMAIL_SEND = "/notifications/email/send"
 NOTIFICATIONS_EMAIL_TEST = "/notifications/email/test"
+NOTIFICATIONS_EMAIL_SEND_REPORT = "/notifications/email/send-report"
 
 STRATEGIES = "/strategies"
 STRATEGIES_IMPORT = "/strategies/import"

@@ -28,6 +28,30 @@ def test_redact_body_passes_through_non_dict():
     assert redact_body([1, 2, 3]) == [1, 2, 3]
 
 
+def test_post_multipart_sends_files_and_data_not_json(monkeypatch):
+    from api.client import ApiClient
+
+    client = ApiClient()
+    captured = {}
+
+    def fake_request(method, url, **kwargs):
+        captured.update(kwargs)
+        return _FakeResponse(204, content=b"")
+
+    monkeypatch.setattr(client._session, "request", fake_request)
+
+    client.post_multipart(
+        "/notifications/email/send-report",
+        data={"recipients": "a@example.com", "subject": "Report"},
+        files={"attachment": ("report.pdf", b"%PDF-1.4", "application/pdf")},
+        auth=False,
+    )
+
+    assert captured["json"] is None
+    assert captured["data"] == {"recipients": "a@example.com", "subject": "Report"}
+    assert captured["files"]["attachment"][0] == "report.pdf"
+
+
 class _FakeResponse:
     def __init__(self, status_code=200, json_data=None, content=b"{}"):
         self.status_code = status_code

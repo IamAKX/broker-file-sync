@@ -55,6 +55,14 @@ class ApiClient:
              timeout: int | None = None) -> dict:
         return self._request("POST", path, json_body=json_body, auth=auth, timeout=timeout)
 
+    def post_multipart(self, path: str, data: dict | None = None, files: dict | None = None,
+                        auth: bool = True, timeout: int | None = None) -> dict:
+        """POST as multipart/form-data (Form fields + a file upload) rather
+        than a JSON body — used by api.reports_api.send_report_email to
+        upload a generated PDF. *files*: {field_name: (filename, bytes,
+        content_type)}, the same tuple shape `requests` itself expects."""
+        return self._request("POST", path, data=data, files=files, auth=auth, timeout=timeout)
+
     def patch(self, path: str, json_body: dict | None = None, auth: bool = True) -> dict:
         return self._request("PATCH", path, json_body=json_body, auth=auth)
 
@@ -70,6 +78,8 @@ class ApiClient:
         path: str,
         params: dict | None = None,
         json_body: dict | None = None,
+        data: dict | None = None,
+        files: dict | None = None,
         auth: bool = True,
         timeout: int | None = None,
         _retried: bool = False,
@@ -87,8 +97,8 @@ class ApiClient:
                 headers["Authorization"] = f"Bearer {token}"
 
         api_logger.debug(
-            "-> %s %s params=%s body=%s has_token=%s",
-            method, path, params, redact_body(json_body), bool(headers.get("Authorization")),
+            "-> %s %s params=%s body=%s has_token=%s files=%s",
+            method, path, params, redact_body(json_body), bool(headers.get("Authorization")), bool(files),
         )
         start = time.monotonic()
         try:
@@ -96,7 +106,13 @@ class ApiClient:
                 method,
                 BASE_URL + path,
                 params=params,
-                json=json_body,
+                # `files` set (multipart upload) means *data* carries the
+                # plain Form fields alongside it; `json=` is mutually
+                # exclusive with `files=`/`data=` in requests, so it's only
+                # ever passed for the normal (non-upload) JSON-body case.
+                json=json_body if files is None else None,
+                data=data,
+                files=files,
                 headers=headers,
                 timeout=request_timeout,
             )
@@ -113,7 +129,7 @@ class ApiClient:
             if self._refresh():
                 return self._request(
                     method, path, params=params, json_body=json_body,
-                    auth=auth, timeout=timeout, _retried=True,
+                    data=data, files=files, auth=auth, timeout=timeout, _retried=True,
                 )
 
         if not response.ok:

@@ -1283,6 +1283,86 @@ def evaluate_condition(tokens: list, row_data: dict, all_data: list,
     return bool(result)
 
 
+def split_top_level_and(tokens: list) -> list:
+    """Splits *tokens* at every top-level "and" op-token (paren depth 0) —
+    the boolean-combinator convention this module's whole expression
+    grammar already uses (see _build_compiled: an "op" token's value is
+    inserted VERBATIM into a real Python expression string, so "and"/"or"/
+    "not" are literal lowercase-Python-keyword op tokens, screens.
+    formula_editor._WORD_OPS matches this exact casing). A top-level "or"
+    is NOT split on — "any one of these" can't be rendered as an
+    independent per-clause checklist the way "all of these" can, so a
+    condition containing one is left as a single clause (see
+    explain_condition's own docstring)."""
+    clauses = []
+    current: list = []
+    depth = 0
+    for tok in tokens:
+        if tok.get("type") == "paren":
+            depth += 1 if tok.get("value") == "(" else -1
+            current.append(tok)
+            continue
+        if depth == 0 and tok.get("type") == "op" and str(tok.get("value", "")).strip().lower() == "and":
+            clauses.append(current)
+            current = []
+            continue
+        current.append(tok)
+    clauses.append(current)
+    return [c for c in clauses if c]
+
+
+def _token_label(tok: dict) -> str:
+    t = tok.get("type")
+    if t == "col":
+        of_sym = tok.get("of")
+        return f"[{tok.get('value', '')} of {of_sym}]" if of_sym else f"[{tok.get('value', '')}]"
+    if t == "self":
+        return "THIS"
+    if t == "var":
+        return f"{{{tok.get('value', '')}}}"
+    if t == "func":
+        return str(tok.get("value", "")).upper()
+    return str(tok.get("value", ""))
+
+
+def clause_label(tokens: list) -> str:
+    """Best-effort human-readable text for one clause's tokens — e.g.
+    "[Close] > [Day Top]". Covers the common case (comparisons/simple
+    arithmetic over columns, numbers and THIS) well; a clause using an
+    aggregate/day-history function still renders (via _token_label's func
+    branch) but without that function's own argument list spelled out —
+    good enough for a trigger-explanation label, not a full formula-editor-
+    grade pretty-printer (screens.formula_editor._tokens_to_text already
+    exists for that, but stays screens-layer since it's tied to this app's
+    editable-preview-box round trip)."""
+    return " ".join(_token_label(tok) for tok in tokens).strip()
+
+
+def explain_condition(tokens: list, row_data: dict, all_data: list,
+                      self_value=None, agg_cache: dict | None = None,
+                      sym_index: dict | None = None,
+                      day_history: dict | None = None,
+                      variable_store=None) -> list:
+    """Decomposes *tokens* at top-level "and" boundaries (see
+    split_top_level_and) and evaluates each clause independently, so a
+    caller can render a "Why This Signal Triggered" checklist — ✓/✕ per
+    sub-condition — instead of one collapsed boolean (Fuku Live report
+    spec section 10: "WHY THIS SIGNAL TRIGGERED"). Returns
+    [{"label": str, "satisfied": bool}, ...], one entry per clause (a
+    single entry, the whole expression, for a condition with no top-level
+    "and" to split on, e.g. one containing only "or" or a bare comparison).
+    """
+    clauses = split_top_level_and(tokens)
+    results = []
+    for clause in clauses:
+        satisfied = evaluate_condition(
+            clause, row_data, all_data, self_value, agg_cache, sym_index,
+            day_history, variable_store=variable_store,
+        )
+        results.append({"label": clause_label(clause), "satisfied": satisfied})
+    return results
+
+
 def apply_strategies(strategies: list, headers: list, data: list[list],
                      day_history: dict | None = None,
                      include_streak_columns: bool = True,
