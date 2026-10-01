@@ -15,7 +15,7 @@ it contributes no yield and isn't part of win/loss counts.
 
 from datetime import date, datetime, timedelta
 
-from services import report_metrics, strategy_store
+from services import report_columns, report_metrics, strategy_store
 from services.report_engine import charts, templates
 from services.strategy_alerts import state_store
 
@@ -182,6 +182,7 @@ def compute_strategy_summary(strategy_id: str, date_from: date | None, date_to: 
             "status_label": label,
             "status_kind": kind,
             "days_true": _days_true_label(t),
+            "trade": t,
         })
 
     return {
@@ -263,7 +264,7 @@ def _fmt_ratio(value) -> str:
     return f"{value:.2f}" if value is not None else "—"
 
 
-def build_report_pages(data: dict) -> list:
+def build_report_pages(data: dict, columns: list | None = None) -> list:
     """Builds the report's physical pages (see services.report_engine.
     templates' docstring for why pagination is decided here, in Python, not
     left to the browser). Page 1: header/KPIs/target-achievement donut/
@@ -322,20 +323,19 @@ def build_report_pages(data: dict) -> list:
         + templates.section("Comparative Performance Curve" if comparing else "Performance Curve", curve_html)
     )
 
+    all_trades = summary_a["trades"] + (summary_b["trades"] if comparing else [])
+    available = report_columns.lmv_catalog(report_columns.lmv_metric_names(all_trades))
+    columns = report_columns.resolve_columns(columns, available, report_columns.LMV_DEFAULT_COLUMNS)
+
     def _table_rows(summary):
         return [
-            [
-                summary["name"], r["symbol"], r["direction"], _fmt_price(r["entry"]),
-                _fmt_price(r["exit"]), _fmt_pct(r["yield"]), r["days_true"],
-                templates.status_pill(r["status_label"], r["status_kind"]),
-            ]
+            [report_columns.lmv_cell(c, summary["name"], r, _fmt_pct) for c in columns]
             for r in summary["rows"]
         ]
 
     all_rows = _table_rows(summary_a) + (_table_rows(summary_b) if comparing else [])
     table_html = templates.data_table(
-        ["Strategy", "Ticker", "Direction", "Entry", "Exit", "Yield", "Days True", "Status"],
-        all_rows, column_html={"Status"},
+        columns, all_rows, column_html={"Status"},
     ) if all_rows else '<p style="color:#64748b;font-size:11px;">No closed trades in the selected period.</p>'
 
     ratio_cards = (
@@ -368,5 +368,5 @@ def build_report_pages(data: dict) -> list:
     return [page1, page2]
 
 
-def build_report_html(data: dict, doc_title: str = "LMV EOD Report") -> str:
-    return templates.render_report(build_report_pages(data), doc_title=doc_title)
+def build_report_html(data: dict, doc_title: str = "LMV EOD Report", columns: list | None = None) -> str:
+    return templates.render_report(build_report_pages(data, columns), doc_title=doc_title)

@@ -29,10 +29,12 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
+from screens.report_column_picker import ColumnPickerWidget
 from services import (
-    emv_report_data, fuku_live_report_data, lmv_report_data, report_metrics,
-    report_recipients, report_store, strategy_store,
+    emv_report_data, fuku_live_report_data, lmv_report_data, report_columns,
+    report_metrics, report_recipients, report_store, strategy_store,
 )
+from services.strategy_alerts import config_store as alerts_config_store
 from services import inception_historical_field_series as hfs
 from services.report_engine import pdf_export, templates
 
@@ -112,7 +114,9 @@ def _build_lmv_html(report: dict) -> str:
         # services.lmv_report_data.build_report_data's own docstring.
         include_backend=(mode == report_metrics.TIMEFRAME_CUSTOM),
     )
-    return lmv_report_data.build_report_html(data, doc_title=report.get("name", "LMV EOD Report"))
+    return lmv_report_data.build_report_html(
+        data, doc_title=report.get("name", "LMV EOD Report"), columns=report.get("columns")
+    )
 
 
 def _build_emv_html(report: dict) -> str:
@@ -123,7 +127,8 @@ def _build_emv_html(report: dict) -> str:
         as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else date.today()
         classification = emv_report_data.classify_strategy(subject.get("strategy_id"), as_of)
         return emv_report_data.build_strategy_report_html(
-            classification, doc_title=report.get("name", "EMV EOD Report")
+            classification, doc_title=report.get("name", "EMV EOD Report"),
+            columns=report.get("columns"),
         )
 
     symbol = emv_report_data.resolve_symbol(subject.get("symbol", ""))
@@ -408,6 +413,15 @@ class ReportsScreen(QWidget):
         self._investment_edit = QLineEdit(str(int(lmv_report_data.DEFAULT_INVESTMENT_AMOUNT)))
         layout.addWidget(self._investment_edit)
 
+        layout.addWidget(self._field_label(
+            "Trade table columns (leave Selected empty for the default set)"
+        ))
+        metric_names = []
+        for cfg in alerts_config_store.load_configs().values():
+            metric_names += [m.get("name") for m in cfg.get("metrics", [])]
+        self._lmv_column_picker = ColumnPickerWidget(report_columns.lmv_catalog(metric_names))
+        layout.addWidget(self._lmv_column_picker)
+
         if not strategies:
             note = self._field_label("No strategies configured yet — create one in Strategy Builder first.")
             layout.addWidget(note)
@@ -471,6 +485,11 @@ class ReportsScreen(QWidget):
         self._emv_as_of_date.setDisplayFormat("dd-MMM-yyyy")
         self._emv_as_of_date.setDate(QDate.currentDate())
         strat_lay.addWidget(self._emv_as_of_date)
+        strat_lay.addWidget(self._field_label(
+            "Table columns (leave Selected empty for Stock / Sector / Fuku Score)"
+        ))
+        self._emv_column_picker = ColumnPickerWidget(report_columns.emv_catalog(hfs.available_fields()))
+        strat_lay.addWidget(self._emv_column_picker)
         if not strategies:
             strat_lay.addWidget(self._field_label(
                 "No Inception strategies configured yet — create one in Inception > Strategy Builder."
@@ -564,6 +583,7 @@ class ReportsScreen(QWidget):
                 "from": self._from_date.date().toPython().isoformat(),
                 "to": self._to_date.date().toPython().isoformat(),
             }
+            self._active_report["columns"] = self._lmv_column_picker.columns()
         elif self._active_report["type"] == report_store.REPORT_TYPE_EMV:
             subtype = self._emv_subtype_combo.currentData()
             if subtype == "strategy":
@@ -578,6 +598,7 @@ class ReportsScreen(QWidget):
                     "strategy_id": self._emv_strategy_combo.currentData(),
                     "as_of_date": self._emv_as_of_date.date().toPython().isoformat(),
                 }
+                self._active_report["columns"] = self._emv_column_picker.columns()
             else:
                 symbol = self._emv_symbol_edit.text().strip()
                 if not symbol:

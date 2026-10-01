@@ -30,7 +30,7 @@ follow-on once that exists, not duplicated here.
 
 from datetime import date, datetime
 
-from services import fuku_score, inception_sector
+from services import fuku_score, inception_sector, report_columns
 from services import inception_historical_field_series as hfs
 from services.inception_formula_builder_columns import compute_for_bars
 from services.report_engine import charts, templates
@@ -218,7 +218,7 @@ def classify_strategy(strategy_id: str, as_of_date: date) -> dict:
 _SECTOR_PALETTE = ["#2979FF", "#16a34a", "#D97706", "#dc2626", "#8250df", "#0969da", "#bf3989", "#65a30d"]
 
 
-def build_strategy_report_pages(classification: dict) -> list:
+def build_strategy_report_pages(classification: dict, columns: list | None = None) -> list:
     strategy, rows = classification["strategy"], classification["rows"]
 
     sector_counts: dict = {}
@@ -249,11 +249,10 @@ def build_strategy_report_pages(classification: dict) -> list:
     )
 
     if rows:
-        table_rows = [
-            [r["symbol"], r["sector"], f'{r["score"]["score"]:.0f} / {r["score"]["max_score"]:.0f}']
-            for r in rows
-        ]
-        table = templates.data_table(["Stock", "Sector", "Fuku Score"], table_rows)
+        available = report_columns.emv_catalog(list(classification.get("headers", [])))
+        cols = report_columns.resolve_columns(columns, available, report_columns.EMV_DEFAULT_COLUMNS)
+        table_rows = [[report_columns.emv_cell(c, r) for c in cols] for r in rows]
+        table = templates.data_table(cols, table_rows)
     else:
         table = '<p style="color:#64748b;font-size:11px;">No stocks currently qualify for this strategy.</p>'
 
@@ -262,5 +261,6 @@ def build_strategy_report_pages(classification: dict) -> list:
     return [page1, page2]
 
 
-def build_strategy_report_html(classification: dict, doc_title: str = "EMV EOD Report") -> str:
-    return templates.render_report(build_strategy_report_pages(classification), doc_title=doc_title)
+def build_strategy_report_html(classification: dict, doc_title: str = "EMV EOD Report",
+                                columns: list | None = None) -> str:
+    return templates.render_report(build_strategy_report_pages(classification, columns), doc_title=doc_title)
