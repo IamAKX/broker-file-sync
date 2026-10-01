@@ -172,6 +172,12 @@ class AppController:
         if self._main_window is not None:
             self._main_window.navigate(screen_name)
 
+    def get_screen(self, screen_name: str):
+        """The registered screen widget for *screen_name*, or None."""
+        if self._main_window is None:
+            return None
+        return self._main_window._screens.get(screen_name)
+
     def refresh_user_display(self):
         if self._main_window is not None:
             self._main_window.refresh_user()

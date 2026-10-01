@@ -92,3 +92,44 @@ def test_delete_config_removes_by_id():
     remaining = fuku_score.load_all()
     assert len(remaining) == 1
     assert remaining[0]["id"] == b["id"]
+
+
+def test_config_for_strategy_matches_bound_config():
+    bound = fuku_score.new_config("Bound", strategy_id="strat-9")
+    fuku_score.save_config(bound)
+    fuku_score.save_config(fuku_score.new_config("Unbound"))
+
+    assert fuku_score.config_for_strategy("strat-9")["id"] == bound["id"]
+    assert fuku_score.config_for_strategy("other") is None
+    assert fuku_score.config_for_strategy(None) is None
+
+
+def test_score_signal_defaults_to_full_score_without_config():
+    result = fuku_score.score_signal({"strategy_id": "none-configured"})
+
+    assert result["score"] == 100
+    assert result["band"]["label"] == "Strong"
+
+
+def test_score_signal_uses_configured_rules_against_signal_fields():
+    config = fuku_score.new_config("Cfg", max_score=100, strategy_id="s1")
+    config["rules"] = [
+        fuku_score.new_rule("Moved up", _cond("High", ">", 100), points=60),
+        fuku_score.new_rule("Target 1 set", _cond("Target 1", ">", 500), points=40),
+    ]
+    fuku_score.save_config(config)
+    signal = {"strategy_id": "s1", "running_high": 105.0,
+              "metrics": {"m": {"name": "Target 1", "value": 110.0}}}
+
+    result = fuku_score.score_signal(signal)
+
+    assert result["score"] == 60
+    assert [r["satisfied"] for r in result["rule_results"]] == [True, False]
+
+
+def test_score_signal_uses_preloaded_configs_without_reloading():
+    config = fuku_score.new_config("Cfg", strategy_id="s1")
+    config["rules"] = [fuku_score.new_rule("Never", _cond("High", ">", 1e9), points=100)]
+    result = fuku_score.score_signal({"strategy_id": "s1", "running_high": 1.0}, configs={"s1": config})
+
+    assert result["score"] == 0

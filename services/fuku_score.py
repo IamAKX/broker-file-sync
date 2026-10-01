@@ -58,10 +58,11 @@ def default_bands(max_score: float = 100.0) -> list:
     ]
 
 
-def new_config(name: str, max_score: float = 100.0) -> dict:
+def new_config(name: str, max_score: float = 100.0, strategy_id: str | None = None) -> dict:
     return {
         "id": str(uuid.uuid4()),
         "name": name,
+        "strategy_id": strategy_id,
         "max_score": max_score,
         "rules": [],
         "bands": default_bands(max_score),
@@ -97,6 +98,63 @@ def get_config(config_id: str) -> dict | None:
         if c.get("id") == config_id:
             return c
     return None
+
+
+def config_for_strategy(strategy_id: str | None) -> dict | None:
+    """The user-configured score config bound to *strategy_id*, or None when
+    that strategy has none (callers then fall back to default_config())."""
+    if not strategy_id:
+        return None
+    for c in load_all():
+        if c.get("strategy_id") == strategy_id:
+            return c
+    return None
+
+
+def default_config() -> dict:
+    """Single always-true rule worth the full 100 — what a strategy scores
+    against until the user configures real per-rule weights: a signal
+    existing at all means its trigger condition fired. condition is a
+    literal truthy 1, not [] (empty tokens compile to no expression, which
+    evaluates to None -> False — see services.strategy_engine.evaluate)."""
+    config = new_config("Fuku Score", max_score=100)
+    config["rules"] = [new_rule("Trigger Condition", [{"type": "num", "value": "1"}], points=100)]
+    return config
+
+
+def signal_row_data(signal: dict) -> dict:
+    """Flattens a live-alert signal into the {field: value} row a score
+    rule's condition evaluates against: its price fields plus each
+    target/stop-loss metric by name. Deliberately a SNAPSHOT of what the
+    signal itself carries — LMV columns at entry time aren't stored."""
+    row = {
+        "Entry Price": signal.get("entry_price"),
+        "High": signal.get("running_high"),
+        "Low": signal.get("running_low"),
+        "Exit Price": signal.get("exit_price"),
+        "Score": signal.get("score"),
+    }
+    for m in (signal.get("metrics") or {}).values():
+        if m.get("name"):
+            row[m["name"]] = m.get("value")
+    return {k: v for k, v in row.items() if v is not None}
+
+
+def configs_by_strategy() -> dict:
+    """{strategy_id: config} — one load_all() (a server round trip) for a
+    caller scoring many signals, passed on to score_signal(configs=...)."""
+    return {c["strategy_id"]: c for c in load_all() if c.get("strategy_id")}
+
+
+def score_signal(signal: dict, strategy_id: str | None = None, configs: dict | None = None) -> dict:
+    """compute_score() for one live-alert signal against its strategy's
+    configured score config (or default_config()). *configs* is an optional
+    pre-loaded configs_by_strategy() map so a table of rows doesn't pay a
+    config_store round trip per row."""
+    sid = strategy_id or signal.get("strategy_id")
+    config = (configs.get(sid) if configs is not None else config_for_strategy(sid)) or default_config()
+    row = signal_row_data(signal)
+    return compute_score(config, row, [row])
 
 
 def band_for(value: float, bands: list) -> dict | None:

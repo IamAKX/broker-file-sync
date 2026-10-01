@@ -90,22 +90,14 @@ def trigger_explanation(strategy_id: str) -> list:
     return [{"label": clause_label(c), "satisfied": True} for c in clauses]
 
 
-def compute_score() -> dict:
-    """Default single-rule Fuku Score — 100/100, since a signal existing
-    at all means its trigger condition fired (same principled-default
-    pattern as services.emv_report_data.classify_strategy: every returned
-    result already passed the one rule that gates it). A real per-sub-
-    condition weighted breakdown needs a scoring-rule config UI this
-    codebase doesn't have yet."""
-    # condition=[{"type": "num", "value": "1"}] — a literal truthy 1, not
-    # [] (empty tokens compile to no expression at all, which evaluates to
-    # None -> False, not "always true" — see services.strategy_engine.
-    # evaluate/_build_compiled).
-    score_config = fuku_score.new_config("Fuku Score", max_score=100)
-    score_config["rules"] = [
-        fuku_score.new_rule("Trigger Condition", [{"type": "num", "value": "1"}], points=100)
-    ]
-    return fuku_score.compute_score(score_config, {}, [{}])
+def compute_score(signal: dict | None = None, strategy_id: str | None = None) -> dict:
+    """Fuku Score for *signal* against the strategy's configured score
+    config (screens.fuku_score_config), falling back to services.fuku_score.
+    default_config()'s single always-true rule (100/100) when none exists
+    or no signal is given."""
+    if signal is None:
+        return fuku_score.compute_score(fuku_score.default_config(), {}, [{}])
+    return fuku_score.score_signal(signal, strategy_id)
 
 
 def support_resistance_data(symbol: str, direction: str, current_price: float | None) -> dict:
@@ -123,7 +115,7 @@ def support_resistance_data(symbol: str, direction: str, current_price: float | 
     return {"sources": sources, "levels": levels, "confluence": zones}
 
 
-def _elapsed_label(entry_time_iso: str | None, end_iso: str | None = None) -> str:
+def elapsed_label(entry_time_iso: str | None, end_iso: str | None = None) -> str:
     if not entry_time_iso:
         return "—"
     entry = datetime.fromisoformat(entry_time_iso)
@@ -136,9 +128,11 @@ def _elapsed_label(entry_time_iso: str | None, end_iso: str | None = None) -> st
     return f"{hours}h {minutes}m"
 
 
-def build_report_data(strategy_id: str, symbol: str) -> dict:
+def build_report_data(strategy_id: str, symbol: str, signal: dict | None = None) -> dict:
+    """*signal* lets a caller that already holds the signal (Live Alerts'
+    backend-sourced row) bypass the local state_store lookup."""
     strategies_by_id = {s["id"]: s for s in strategy_store.load_all()}
-    signal = get_signal(strategy_id, symbol)
+    signal = signal or get_signal(strategy_id, symbol)
     if signal is None:
         return {"found": False, "strategy_id": strategy_id, "symbol": symbol}
 
@@ -162,10 +156,10 @@ def build_report_data(strategy_id: str, symbol: str) -> dict:
         "entry_price": entry_price,
         "current_price": current_price,
         "status": status,
-        "score": compute_score(),
+        "score": compute_score(signal, strategy_id),
         "trigger": trigger_explanation(strategy_id),
         "sr": support_resistance_data(symbol, direction, current_price),
-        "elapsed": _elapsed_label(signal.get("entry_time"), signal.get("resolved_at")),
+        "elapsed": elapsed_label(signal.get("entry_time"), signal.get("resolved_at")),
         "metrics": signal.get("metrics", {}),
     }
 
@@ -187,8 +181,12 @@ def build_report_pages(data: dict) -> list:
         else "negative" if data["status"] == "STOPPED OUT"
         else "neutral"
     )
+    band = data["score"].get("band")
+    score_label = f'{data["score"]["score"]:.0f} / {data["score"]["max_score"]:.0f}'
+    if band:
+        score_label += f' — {band["label"]}'
     kpis = (
-        templates.kpi_card("Fuku Score", f'{data["score"]["score"]:.0f} / {data["score"]["max_score"]:.0f}')
+        templates.kpi_card("Fuku Score", score_label)
         + templates.kpi_card("Status", data["status"], kind=status_kind)
         + templates.kpi_card("Entry", _fmt_price(data["entry_price"]))
         + templates.kpi_card("Current", _fmt_price(data["current_price"]))
@@ -244,7 +242,19 @@ def build_report_pages(data: dict) -> list:
             levels_table + confluence_html,
         )
     )
-    page2 = templates.section("Target / Stop-Loss Progress", metrics_table)
+    breakdown_rows = [
+        [r["label"], f'{r["points"]:g}', f'{r["weight"]:g}', "✓" if r["satisfied"] else "✕",
+         f'{r["contribution"]:g}']
+        for r in data["score"].get("rule_results", [])
+    ]
+    breakdown_table = (
+        templates.data_table(["Rule", "Points", "Weight", "Met", "Contribution"], breakdown_rows)
+        if breakdown_rows else '<p style="color:#64748b;font-size:11px;">No score rules configured.</p>'
+    )
+    page2 = (
+        templates.section("Target / Stop-Loss Progress", metrics_table)
+        + templates.section(f'Fuku Score Breakdown — {templates.esc(data["score"].get("config_name", ""))}', breakdown_table)
+    )
 
     return [page1, page2]
 

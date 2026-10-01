@@ -337,3 +337,16 @@ def test_fuku_live_wizard_saves_and_generates_for_an_open_signal(screen, qapp):
     assert screen._stack.currentWidget() is screen._preview_page
     assert "INFY" in screen._last_rendered_html
     assert "Fuku Score" in screen._last_rendered_html
+
+
+def test_open_fuku_live_for_signal_renders_from_the_given_signal(screen):
+    signal = {
+        "strategy_id": "no-local-copy", "strategy_name": "PWHBUY", "symbol": "INFY",
+        "direction": "BUY", "entry_time": "2026-03-01T09:31:00", "entry_price": 100.0,
+        "running_high": 110.0, "running_low": 95.0, "metrics": {},
+    }
+    screen.open_fuku_live_for_signal(signal)
+
+    assert screen._stack.currentWidget() is screen._preview_page
+    assert "Fuku Score" in screen._last_rendered_html
+    assert "no signal found" not in screen._last_rendered_html

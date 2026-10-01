@@ -36,6 +36,7 @@ from PySide6.QtGui import QColor
 from api import strategy_signals_api
 from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
+from services import fuku_live_report_data, fuku_score
 from services.strategy_alerts import state_store
 
 _PAGE_SIZES = (25, 50, 100)
@@ -158,6 +159,21 @@ def _signal_from_api_item(item: dict) -> dict:
     }
 
 
+def _fuku_text(signal: dict, configs: dict | None = None) -> str:
+    """"82 · Strong" — the signal's Fuku Score and its band label."""
+    result = fuku_score.score_signal(signal, configs=configs)
+    band = result.get("band")
+    text = f"{result['score']:.0f}"
+    return f"{text} · {band['label']}" if band else text
+
+
+def _rr_text(signal: dict) -> str:
+    rr = signal.get("risk_reward")
+    if rr and rr.get("ratio") is not None:
+        return f"1:{rr['ratio']:.2f}"
+    return "—"
+
+
 # Status text -> theme token, so the column reads at a glance instead of
 # requiring the word itself to be parsed every row.
 _STATUS_COLOR_TOKEN = {
@@ -188,6 +204,9 @@ class LiveAlertsScreen(QWidget):
         ("High", 90),
         ("Low", 90),
         ("% Move", 85),
+        ("Fuku", 95),
+        ("Age", 80),
+        ("R:R", 70),
     ]
     _COLUMNS = [name for name, _ in _COLUMN_WIDTHS]
 
@@ -724,6 +743,7 @@ class LiveAlertsScreen(QWidget):
         self._total_pages = response.get("total_pages", 0)
         self._page = response.get("page", self._page)
         self._rows = [_signal_from_api_item(item) for item in response.get("items", [])]
+        score_configs = fuku_score.configs_by_strategy()   # one load for the whole page
 
         t = self._controller.theme
         self._table.setRowCount(len(self._rows))
@@ -743,6 +763,9 @@ class LiveAlertsScreen(QWidget):
                 _fmt_price(signal.get("running_high")),
                 _fmt_price(signal.get("running_low")),
                 _pct_move(signal),
+                _fuku_text(signal, score_configs),
+                fuku_live_report_data.elapsed_label(signal.get("entry_time"), signal.get("resolved_at")),
+                _rr_text(signal),
             ]
             for c, value in enumerate(values):
                 item = QTableWidgetItem(str(value))
@@ -842,6 +865,42 @@ class LiveAlertsScreen(QWidget):
         status_lbl.setStyleSheet(f"color: {t.get(color_token) if color_token else txt_s};")
         layout.addWidget(status_lbl)
 
+        score = fuku_score.score_signal(signal)
+        band = score.get("band")
+        score_lbl = QLabel(
+            f"Fuku Score  {score['score']:.0f} / {score['max_score']:.0f}"
+            + (f"  —  {band['label']}" if band else "")
+        )
+        score_lbl.setFont(font_scale.font(font_scale.MEDIUM, True))
+        if band:
+            score_lbl.setStyleSheet(f"color: {band['color']};")
+        layout.addWidget(score_lbl)
+        for r in score["rule_results"]:
+            rule_lbl = QLabel(
+                f"{'✓' if r['satisfied'] else '✕'} {r['label']}  ({r['contribution']:g} / {r['points'] * r['weight']:g})"
+            )
+            rule_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+            rule_lbl.setStyleSheet(f"color: {txt_s};")
+            layout.addWidget(rule_lbl)
+
+        direction = signal.get("direction", "BUY")
+        current = signal.get("running_high") if direction == "BUY" else signal.get("running_low")
+        levels = []
+        try:
+            levels = fuku_live_report_data.support_resistance_data(
+                signal.get("symbol", ""), direction, current or signal.get("entry_price")
+            )["levels"][:3]
+        except Exception:
+            pass   # S/R is best-effort context — never block the popup on it
+        if levels:
+            layout.addWidget(self._dialog_sep(border))
+            lv_title = QLabel("Nearest " + ("resistance" if direction == "BUY" else "support"))
+            lv_title.setFont(font_scale.font(font_scale.SMALL, True))
+            layout.addWidget(lv_title)
+            for lv in levels:
+                dist = f"  ({lv['distance_pct']:+.2f}%)" if lv.get("distance_pct") is not None else ""
+                layout.addWidget(QLabel(f"{lv['label']}  {_fmt_price(lv['price'])}{dist}"))
+
         layout.addWidget(self._dialog_sep(border))
 
         when = _parse_iso(signal.get("entry_time")) or _parse_iso(signal.get("first_true_at"))
@@ -881,6 +940,14 @@ class LiveAlertsScreen(QWidget):
 
         btn_row = QHBoxLayout()
         btn_row.setContentsMargins(20, 12, 20, 16)
+        full_btn = QPushButton("Open Full Live Report")
+        full_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        full_btn.clicked.connect(lambda: (dlg.accept(), self._open_full_report(signal)))
+        btn_row.addWidget(full_btn)
+        cfg_btn = QPushButton("Configure Score")
+        cfg_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cfg_btn.clicked.connect(lambda: (dlg.accept(), self._configure_score(signal)))
+        btn_row.addWidget(cfg_btn)
         btn_row.addStretch()
         close_btn = QPushButton("Close")
         close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -889,6 +956,24 @@ class LiveAlertsScreen(QWidget):
         outer.addLayout(btn_row)
 
         dlg.exec()
+
+    def _open_full_report(self, signal: dict):
+        """Hands the signal to the Reports screen's Fuku Live pipeline."""
+        reports = self._controller.get_screen("reports")
+        if reports is None:
+            QMessageBox.information(self, "Reports", "The Reports screen isn't available.")
+            return
+        self._controller.navigate("reports")
+        reports.open_fuku_live_for_signal(signal)
+
+    def _configure_score(self, signal: dict):
+        from screens.fuku_score_config import FukuScoreConfigDialog
+        dlg = FukuScoreConfigDialog(
+            signal.get("strategy_id"), signal.get("strategy_name", ""),
+            theme=self._controller.theme, parent=self,
+        )
+        if dlg.exec():
+            self._refresh_table()
 
     @staticmethod
     def _detail_field_row(label: str, value, txt_s: str, txt: str) -> QHBoxLayout:

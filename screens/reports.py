@@ -145,7 +145,8 @@ def _build_emv_html(report: dict) -> str:
 def _build_fuku_live_html(report: dict) -> str:
     subject = report.get("subject_config", {})
     data = fuku_live_report_data.build_report_data(
-        subject.get("strategy_id"), subject.get("symbol", "")
+        subject.get("strategy_id"), subject.get("symbol", ""),
+        signal=report.get("_signal"),
     )
     return fuku_live_report_data.build_report_html(data, doc_title=report.get("name", "Fuku Live Report"))
 
@@ -645,6 +646,20 @@ class ReportsScreen(QWidget):
         layout.addWidget(self._preview_view, 1)
 
         return page
+
+    def open_fuku_live_for_signal(self, signal: dict):
+        """Entry point from Live Alerts' Quick View: generates the Full Live
+        Report straight from *signal* (a backend-sourced alert row, which
+        the local state_store lookup wouldn't necessarily find) without the
+        wizard. Not saved to the gallery — the "_signal" key is transient
+        (stripped by report_store when saving a copy is never done here)."""
+        report = report_store.new_report(
+            report_store.REPORT_TYPE_FUKU_LIVE,
+            f'Fuku Live — {signal.get("symbol", "")} ({datetime.now().strftime("%d-%b-%Y")})',
+        )
+        report["subject_config"] = {"strategy_id": signal.get("strategy_id"), "symbol": signal.get("symbol", "")}
+        report["_signal"] = signal
+        self._generate_and_preview(report)
 
     def _generate_and_preview(self, report: dict):
         self._active_report = report

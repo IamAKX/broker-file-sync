@@ -197,6 +197,7 @@ def classify_strategy(strategy_id: str, as_of_date: date) -> dict:
     score_config["rules"] = [
         fuku_score.new_rule(strategy.get("name", "Rule"), strategy.get("row_filter", []), points=100),
     ]
+    score_config = fuku_score.config_for_strategy(strategy_id) or score_config
 
     symbol_idx = new_headers.index("Symbol")
     sector_idx = new_headers.index("Sector") if "Sector" in new_headers else None

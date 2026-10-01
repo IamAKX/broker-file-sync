@@ -766,3 +766,28 @@ def test_double_click_opens_dialog(screen, monkeypatch):
     screen._table.cellDoubleClicked.emit(0, 0)
 
     assert calls == [1]
+
+
+def test_table_shows_fuku_age_and_rr_columns(screen, monkeypatch):
+    item = _api_item(risk_reward={"numerator": 5.0, "denominator": 10.0, "ratio": 2.0})
+    monkeypatch.setattr(strategy_signals_api, "list_signals", _FakeListApi([item]))
+    screen._refresh_table(reset_page=True)
+    col = {name: i for i, name in enumerate(screen._COLUMNS)}
+
+    assert screen._table.item(0, col["Fuku"]).text() == "100 · Strong"
+    assert screen._table.item(0, col["R:R"]).text() == "1:2.00"
+    assert screen._table.item(0, col["Age"]).text() != ""
+
+
+def test_open_full_report_navigates_and_hands_signal_to_reports(screen, monkeypatch):
+    calls = []
+
+    class _FakeReports:
+        def open_fuku_live_for_signal(self, signal):
+            calls.append(signal["symbol"])
+
+    monkeypatch.setattr(screen._controller, "get_screen", lambda name: _FakeReports())
+    monkeypatch.setattr(screen._controller, "navigate", lambda name: calls.append(name))
+    screen._open_full_report({"symbol": "INFY"})
+
+    assert calls == ["reports", "INFY"]
