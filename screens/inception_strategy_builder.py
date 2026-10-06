@@ -121,6 +121,11 @@ INCEPTION_SECTIONS = ["Functions", "Historic Value", "Operators", "Fields", "Row
 # by Date render.
 INCEPTION_ROW_SYMBOL_COL = "Symbol"
 
+# Always-present text columns on every HMV/View by Date/EMV report row (see
+# services.inception_sector.inject_sector_rows) — offered in the builder's
+# field list so a condition/formula can reference them (issue #53).
+INCEPTION_IDENTITY_FIELDS = ["Sector", "Symbol"]
+
 # ExpressionEditorDialog.inception_field_codes — MUST be [] here, not the
 # default (lmv_inception_fields.FIELD_CODES, LMV's own ~65-code set). This
 # screen has no "Inception Field" nav section at all (that section is for
@@ -988,6 +993,13 @@ class InceptionStrategyBuilderScreen(QWidget):
         # services.inception_columns/inception_formula_engine. No network
         # call needed here any more.
         self._fields = [c.code for c in inception_columns.column_catalogue()]
+        # Text identity columns every HMV/View by Date row already carries by
+        # the time a strategy is evaluated (inception_sector.inject_sector_rows
+        # + the "Symbol" column) — LMV's own Fields list offers the equivalent
+        # "Sector"/"Scrip Name", so conditional formatting and formulas here
+        # can key off them too (issue #53).
+        self._fields = list(INCEPTION_IDENTITY_FIELDS) + [
+            f for f in self._fields if f not in INCEPTION_IDENTITY_FIELDS]
         # Plus LMV's ~56 built-in Formula Builder codes (MT, MB, DT, DB,
         # PMH, the camarilla ladders, ...) — services.
         # inception_formula_builder_columns.compute_for_bars is what
@@ -1087,8 +1099,13 @@ class InceptionStrategyBuilderScreen(QWidget):
         # would offer no symbols at all (ROW_CATALOGUE_FROM_DATA finds no
         # "Symbol" key in a bare `values` dict) — see issue #16.
         from screens.inception_view_by_date import _display_symbol
+        from services import inception_sector
+        inception_sector.refresh()
         self._sample_rows = [
-            dict(r["values"], **{INCEPTION_ROW_SYMBOL_COL: _display_symbol(r["symbol"])})
+            dict(r["values"], **{
+                INCEPTION_ROW_SYMBOL_COL: _display_symbol(r["symbol"]),
+                "Sector": inception_sector.sector_for(r["symbol"]),
+            })
             for r in rows if r.get("values")
         ]
         if self._sample_rows:
