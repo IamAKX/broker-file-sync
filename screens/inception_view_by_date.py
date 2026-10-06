@@ -218,12 +218,17 @@ class _SnapshotLoadWorker(QThread):
         if date_from_candidates:
             range_response = inception_compute_service.range_rows(min(date_from_candidates), as_of_date)
 
+        # issue #54 — VALUE_DAYS_AGO/_DAYS-family on one of the strategy's OWN
+        # columns (EMA/MACD-style chains), resolved per symbol from its bars.
+        strat_col_specs = inception_day_history.strategy_column_specs(
+            strategies, inception_formula_variable_store)
+
         day_history: dict = {}
         for row in rows:
             bars = inception_bars_store.bars_for_symbol(row["symbol"], date_to=as_of_date)
             row["values"].update(inception_formula_builder_columns.compute_for_bars(row["symbol"], bars))
             if (specs or extreme_specs or vbc_fb_specs or vbc_n_fb_specs
-                    or derived_fb_specs or extra_raw_pairs or extra_fb_pairs):
+                    or derived_fb_specs or extra_raw_pairs or extra_fb_pairs or strat_col_specs):
                 # Keyed by the DISPLAY symbol (suffix stripped), not
                 # row["symbol"] (the raw "_I" roll-series name) — that's
                 # what ends up in the "Symbol" column apply_strategies'
@@ -232,6 +237,10 @@ class _SnapshotLoadWorker(QThread):
                 # would leave every entry unreachable, day_history
                 # correctly populated but never found.
                 symbol = _display_symbol(row["symbol"])
+                if strat_col_specs:
+                    inception_day_history.merge_into(
+                        day_history, inception_day_history.resolve_strategy_columns(
+                            strat_col_specs, symbol, bars, inception_formula_variable_store))
                 if specs:
                     inception_day_history.merge_into(
                         day_history, inception_day_history.build(specs, symbol, bars))

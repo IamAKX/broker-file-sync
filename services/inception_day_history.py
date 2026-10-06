@@ -659,3 +659,127 @@ def resolve_group_a_b_extreme(pairs, as_of_date: date, range_response: dict = No
             entries[symbol] = {"daily": daily}
         out[(col_name, window)] = entries
     return out
+
+
+# ── A strategy's OWN columns as the target of VALUE_DAYS_AGO/_DAYS (issue #54) ─
+# `EMA 13 = [CLOSE]*[k] + VALUE_DAYS_AGO([12 Day SMA], 1)*(1-[k])`,
+# `SIGNAL LINE = AVG_DAYS([MACD LINE], 9)` — the col_arg names ANOTHER COLUMN
+# OF THE SAME STRATEGY, which isn't a raw field, Formula Builder code or
+# Group A/B column, so none of the resolvers above know it and the whole
+# chain (EMA 13 -> MACD LINE -> SIGNAL LINE -> MACD) rendered blank.
+#
+# Resolved here by evaluating that column's own formula "as of" each earlier
+# bar of this one symbol: value_at(col, i) runs the column's compiled formula
+# with "today" = bars[i] — raw fields read bars[i], references to sibling
+# columns recurse to value_at(sibling, i), and its own day functions
+# (AVG_DAYS/VALUE_DAYS_AGO/...) slice values ending at i, again recursing for
+# sibling targets. Memoized per (column, i), and lazy, so only the bars the
+# final lookups actually need are ever evaluated. Anything that can't be
+# known per historic bar (Group A/B / Formula Builder / "[Col of Sym]"
+# references, VALUE_AT_*/VALUE_BEFORE_CHANGE inside the historic evaluation)
+# evaluates to None for that bar, i.e. the dependent value blanks rather
+# than lying.
+
+_STRAT_SYM = "__strategy_history_symbol__"
+
+
+def _strategy_cols(strategy: dict) -> dict:
+    return {c["name"]: c.get("formula", []) for c in strategy.get("columns", []) if c.get("name")}
+
+
+def strategy_column_specs(strategies: list, variable_store=None) -> list:
+    """[(strategy, [(agg_key, col_name, window), ...]), ...] — strategies
+    whose columns reference one of the strategy's OWN other columns inside a
+    day function. Empty (cheap) for the common case of none."""
+    out = []
+    for strat in strategies:
+        cols = _strategy_cols(strat)
+        if not cols:
+            continue
+        wanted, seen = [], set()
+        for formula in cols.values():
+            compiled = get_compiled(formula, variable_store)
+            if compiled is None:
+                continue
+            for _, agg_key, col_name, window in compiled.day_specs:
+                if col_name not in cols or col_name in RAW_FIELDS:
+                    continue
+                if isinstance(window, tuple) and window and window[0] in _VALUE_BEFORE_CHANGE_TAGS:
+                    continue
+                key = (agg_key, col_name, window)
+                if key not in seen:
+                    seen.add(key)
+                    wanted.append(key)
+        if wanted:
+            out.append((strat, wanted))
+    return out
+
+
+def resolve_strategy_columns(specs: list, symbol: str, bars: list, variable_store=None) -> dict:
+    """day_history chunk ({(col_name, window): {symbol: {agg_key: value}}},
+    same shape build() returns) for *specs* (strategy_column_specs output),
+    as of bars[-1]. See the section comment above for the method."""
+    from services.formula_stats_engine import AGGREGATES
+    from services.strategy_engine import evaluate_compiled
+
+    out: dict = {}
+    if not bars:
+        return out
+    n = len(bars)
+    date_index = {b["trade_date"].isoformat(): i for i, b in enumerate(bars)}
+
+    for strat, wanted in specs:
+        cols = _strategy_cols(strat)
+        compiled = {name: get_compiled(f, variable_store) for name, f in cols.items()}
+        memo: dict = {}
+
+        def value_at(name, i):
+            if i < 0 or i >= n:
+                return None
+            if name in RAW_FIELDS:
+                v = bars[i].get(_BAR_KEY[name])
+                return v if isinstance(v, (int, float)) else None
+            comp = compiled.get(name)
+            if comp is None:
+                return None
+            key = (name, i)
+            if key in memo:
+                return memo[key]
+            memo[key] = None          # cycle guard: a self-reference reads None
+            row = {_STRAT_SYM: _STRAT_SYM}
+            for col_name in comp.col_vars:
+                row[col_name] = value_at(col_name, i) if (col_name in cols or col_name in RAW_FIELDS) else None
+            dh: dict = {}
+            for _, agg_key, col_name, window in comp.day_specs:
+                dh.setdefault((col_name, window), {}).setdefault(_STRAT_SYM, {})[agg_key] = (
+                    agg_value(agg_key, col_name, window, i))
+            try:
+                val = evaluate_compiled(comp, row, [], day_history=dh,
+                                        sym_index={}, symbol_col=_STRAT_SYM)
+            except Exception:
+                val = None
+            memo[key] = val
+            return val
+
+        def agg_value(agg_key, col_name, window, i):
+            if isinstance(window, tuple):
+                if window and window[0] in _VALUE_BEFORE_CHANGE_TAGS:
+                    return None
+                j = date_index.get(window[0])
+                return value_at(col_name, j) if j is not None else None
+            if window <= 0 or i + 1 < window:
+                return None
+            vals = [value_at(col_name, j) for j in range(i - window + 1, i + 1)]
+            if agg_key == "First":
+                return vals[0]
+            numeric = [v for v in vals if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            agg_fn = AGGREGATES.get(agg_key)
+            return agg_fn(numeric) if agg_fn and numeric else None
+
+        for agg_key, col_name, window in wanted:
+            try:
+                value = agg_value(agg_key, col_name, window, n - 1)
+            except RecursionError:
+                value = None
+            out.setdefault((col_name, window), {}).setdefault(symbol, {})[agg_key] = value
+    return out

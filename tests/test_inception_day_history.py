@@ -602,3 +602,92 @@ def test_mixed_kind_extreme_resolves_end_to_end_via_evaluate_compiled():
     # CWTO peaks (40) on the last bar (2025-01-04) -> CLOSE on that same
     # date is 90.
     assert result == 90
+
+
+# ── issue #54: day functions targeting a strategy's OWN columns (MACD) ──────
+
+def _col(v):
+    return {"type": "col", "value": v}
+
+
+def _op(v):
+    return {"type": "op", "value": v}
+
+
+def _num(v):
+    return {"type": "num", "value": v}
+
+
+def _paren(v):
+    return {"type": "paren", "value": v}
+
+
+def _macd_strategy():
+    return {
+        "id": "macd", "name": "MACD", "active": True, "row_filter": [],
+        "columns": [
+            {"name": "k12", "formula": [_num("2"), _op("/"), _paren("("), _num("12"), _op("+"), _num("1"), _paren(")")]},
+            {"name": "k26", "formula": [_num("2"), _op("/"), _paren("("), _num("26"), _op("+"), _num("1"), _paren(")")]},
+            {"name": "SMA12", "formula": [tok_days("AVG_DAYS", "CLOSE", 12)]},
+            {"name": "SMA26", "formula": [tok_days("AVG_DAYS", "CLOSE", 26)]},
+            {"name": "EMA13", "formula": [
+                _paren("("), _col("CLOSE"), _op("*"), _col("k12"), _paren(")"), _op("+"),
+                tok_days("VALUE_DAYS_AGO", "SMA12", 1), _op("*"),
+                _paren("("), _num("1"), _op("-"), _col("k12"), _paren(")")]},
+            {"name": "EMA26", "formula": [
+                _paren("("), _col("CLOSE"), _op("*"), _col("k26"), _paren(")"), _op("+"),
+                tok_days("VALUE_DAYS_AGO", "SMA26", 1), _op("*"),
+                _paren("("), _num("1"), _op("-"), _col("k26"), _paren(")")]},
+            {"name": "MACD LINE", "formula": [_col("EMA13"), _op("-"), _col("EMA26")]},
+            {"name": "SIGNAL", "formula": [tok_days("AVG_DAYS", "MACD LINE", 9)]},
+            {"name": "MACD", "formula": [_col("MACD LINE"), _op("-"), _col("SIGNAL")]},
+        ],
+    }
+
+
+def test_macd_chain_on_strategy_own_columns_resolves_end_to_end():
+    from services.strategy_engine import apply_strategies
+
+    closes = [100 + (i * 7 % 13) + i * 0.5 for i in range(80)]
+    bars = _bars(closes)
+    strat = _macd_strategy()
+
+    specs = idh.strategy_column_specs([strat])
+    assert specs, "the sibling-column day functions must be detected"
+    dh = idh.resolve_strategy_columns(specs, "ABC", bars)
+
+    headers = ["Symbol", "CLOSE"]
+    out_headers, out_rows = apply_strategies(
+        [strat], headers, [["ABC", closes[-1]]], day_history=dh,
+        include_streak_columns=False, symbol_col="Symbol")
+    row = dict(zip(out_headers, out_rows[0]))
+
+    def sma(i, n):
+        return sum(closes[i - n + 1:i + 1]) / n
+
+    def ema(i, n):
+        k = 2 / (n + 1)
+        return closes[i] * k + sma(i - 1, n) * (1 - k)
+
+    i = len(closes) - 1
+    exp_line = (closes[i] * (2 / 13) + sma(i - 1, 12) * (1 - 2 / 13)) - (closes[i] * (2 / 27) + sma(i - 1, 26) * (1 - 2 / 27))
+    sig = sum(
+        (closes[j] * (2 / 13) + sma(j - 1, 12) * (1 - 2 / 13)) - (closes[j] * (2 / 27) + sma(j - 1, 26) * (1 - 2 / 27))
+        for j in range(i - 8, i + 1)) / 9
+
+    for name in ("EMA13", "EMA26", "MACD LINE", "SIGNAL", "MACD"):
+        assert row[name] is not None, f"{name} is blank"
+    assert abs(row["MACD LINE"] - exp_line) < 1e-9
+    assert abs(row["SIGNAL"] - sig) < 1e-9
+    assert abs(row["MACD"] - (exp_line - sig)) < 1e-9
+
+
+def test_strategy_column_history_blank_when_not_enough_bars():
+    bars = _bars([100 + i for i in range(10)])    # < 26-day SMA window
+    specs = idh.strategy_column_specs([_macd_strategy()])
+    dh = idh.resolve_strategy_columns(specs, "ABC", bars)
+    assert dh[("SMA26", 2)]["ABC"]["First"] is None
+
+
+def test_strategy_column_specs_empty_for_raw_only_strategies():
+    assert idh.strategy_column_specs([_strategy([tok_days("AVG_DAYS", "CLOSE", 5)])]) == []
