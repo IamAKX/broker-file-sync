@@ -87,7 +87,7 @@ from PySide6.QtWidgets import (
 
 from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
-from services import formula_engine, inception_bars_store, inception_columns
+from services import formula_engine, inception_bars_store, inception_columns, indicator_library
 from services import inception_strategy_store as store
 from services import inception_formula_variable_store as var_store
 from screens.strategy_builder import (
@@ -827,6 +827,7 @@ class InceptionStrategyBuilderScreen(QWidget):
         self._theme = controller.theme
         self._strategies: list = []
         self._fields: list = []
+        self._indicator_field_codes: list = []
         self._sample_rows: list = []
         self._sample_as_of = None
         self._sample_worker = None
@@ -883,11 +884,17 @@ class InceptionStrategyBuilderScreen(QWidget):
         vars_btn = _btn("Variables", theme=t)
         vars_btn.clicked.connect(self._open_variables_manager)
 
+        ind_btn = _btn("Indicators", theme=t)
+        ind_btn.setToolTip("Indicator Library — configure RSI/MACD/SMA/... for use as strategy fields")
+        ind_btn.clicked.connect(self._open_indicator_library)
+
         new_btn = _btn("+ New Strategy", accent=True, theme=t)
         new_btn.clicked.connect(self._new_strategy)
 
         top_lay.addWidget(title)
         top_lay.addStretch()
+        top_lay.addWidget(ind_btn)
+        top_lay.addSpacing(8)
         top_lay.addWidget(vars_btn)
         top_lay.addSpacing(8)
         top_lay.addWidget(new_btn)
@@ -1003,6 +1010,10 @@ class InceptionStrategyBuilderScreen(QWidget):
         # LMV's own (unrelated) Formula Builder field list.
         if "Avg Rate" not in self._fields:
             self._fields.append("Avg Rate")
+        # Configured Indicator Library entries (RSI(14), ...) — computed per
+        # row by compute_for_bars alongside the built-ins above.
+        self._indicator_field_codes = indicator_library.field_codes()
+        self._fields += [c for c in self._indicator_field_codes if c not in self._fields]
         self._strategies = store.load_all()
         self._refresh_list()
 
@@ -1239,6 +1250,14 @@ class InceptionStrategyBuilderScreen(QWidget):
             strategy["active"] = not active   # revert on failure
             show_api_error(t, self, exc)
             self._refresh_list()
+
+    def _open_indicator_library(self):
+        from screens.indicator_library_dialog import IndicatorLibraryDialog
+        IndicatorLibraryDialog(parent=self).exec()
+        # Configured indicators appear as fields — pick up any added/removed.
+        self._fields = [f for f in self._fields if f not in self._indicator_field_codes]
+        self._indicator_field_codes = indicator_library.field_codes()
+        self._fields += [c for c in self._indicator_field_codes if c not in self._fields]
 
     def _open_variables_manager(self):
         if self._sample_rows:

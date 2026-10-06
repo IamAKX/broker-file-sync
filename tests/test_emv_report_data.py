@@ -43,13 +43,13 @@ def test_build_stock_report_data_has_series_and_stats():
     assert data["stats"]["current_state"] in ("above", "below", None)
 
 
-def test_build_stock_report_pages_renders_two_pages():
+def test_build_stock_report_pages_flows_short_series_onto_one_page():
     _seed("DIVISLAB_I", date(2026, 1, 1), 30)
     data = emv_report_data.build_stock_report_data(
         "DIVISLAB_I", "CLOSE", date(2026, 1, 20), date(2026, 1, 30)
     )
     pages = emv_report_data.build_stock_report_pages(data)
-    assert len(pages) == 2
+    assert len(pages) == 1
     assert "DIVISLAB_I" in pages[0]
 
 
@@ -60,7 +60,7 @@ def test_build_stock_report_html_is_a_full_document():
     )
     html = emv_report_data.build_stock_report_html(data)
     assert "<!DOCTYPE html>" in html
-    assert "Page 1 of 2" in html
+    assert "Page 1 of 1" in html
 
 
 def test_build_stock_report_handles_unsynced_symbol_gracefully():
@@ -146,8 +146,9 @@ def test_build_strategy_report_pages_renders_sector_distribution(monkeypatch):
     classification = emv_report_data.classify_strategy("strat-1", date(2026, 1, 12))
     pages = emv_report_data.build_strategy_report_pages(classification)
 
-    assert len(pages) == 2
-    assert "ABB" in pages[1]
+    # Small result: everything now flows onto one page (no forced page break).
+    assert len(pages) == 1
+    assert "ABB" in pages[0]
     assert "Above 150" in pages[0]
 
 
@@ -167,3 +168,19 @@ def test_build_strategy_report_html_handles_no_qualifying_stocks(monkeypatch):
 
     assert "No stocks currently qualify" in html
     assert "<!DOCTYPE html>" in html
+
+
+def test_flow_pages_splits_long_table_with_continued_titles():
+    rows = [[f"r{i}", "1", "2", "x"] for i in range(300)]
+    pages = emv_report_data._flow_pages("<p>first</p>", 400, [], "Hist", ["A", "B", "C", "D"], rows, set())
+    assert len(pages) > 2
+    assert "Hist (continued)" in pages[1] and "Hist (continued)" not in pages[0]
+    assert sum(p.count("<tr>") for p in pages) == 300 + len(pages)  # rows + one header row per page
+    # last page is not a tiny orphan
+    assert pages[-1].count("<tr>") - 1 >= 3
+
+
+def test_flow_pages_moves_block_that_does_not_fit_to_next_page():
+    blocks = [("<b>one</b>", 400), ("<b>two</b>", 400), ("<b>three</b>", 400)]
+    pages = emv_report_data._flow_pages("", 0, blocks, "T", ["A"], [], set(), table_empty=True)
+    assert len(pages) == 2 and "three" in pages[1]

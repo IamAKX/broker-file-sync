@@ -538,6 +538,8 @@ class MainWindow(QMainWindow):
         from services.strategy_alerts import config_store as alerts_config_store
         from services.strategy_alerts import state_store as alerts_state_store
         alerts_config_store.reload_cache()
+        from services import indicator_library
+        indicator_library.reload_cache()
         alert_schedule.reload_cache()
         alerts_state_store.reset_for_user_switch()
 

@@ -41,7 +41,7 @@ inception_settings) since both go stale the same way.
 
 from datetime import timedelta
 
-from services import formula_engine
+from services import formula_engine, indicator_library
 
 _cache: dict[tuple, dict] = {}
 
@@ -136,5 +136,9 @@ def compute_for_bars(symbol: str, bars: list[dict]) -> dict:
     values["Avg Rate"] = bars[-1].get("avg_rate")
     for code, bar_key in _LMV_SYNCED_NEW_FIELD_MAP.items():
         values[code] = bars[-1].get(bar_key)
+    # Configured Indicator Library entries (RSI(14), SMA(20), ...) as fields
+    # strategies/columns can reference. peek_instances() is network-free —
+    # empty until the library has been loaded/edited this session.
+    values.update(indicator_library.latest_values(bars, indicator_library.peek_instances()))
     _cache[cache_key] = values
     return dict(values)

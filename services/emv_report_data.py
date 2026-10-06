@@ -67,7 +67,20 @@ def _fmt(value, decimals=2) -> str:
 
 # ── Stock-based report ───────────────────────────────────────────────────
 
-def build_stock_report_data(symbol: str, field: str, date_from: date, date_to: date) -> dict:
+def indicator_sections_for(symbol: str, series: list, instance_ids: list | None) -> list:
+    """[(title, svg)] for the saved Indicator Library entries whose ids are
+    in *instance_ids*, over the dates in *series* (see services.
+    indicator_charts)."""
+    if not instance_ids:
+        return []
+    from services import indicator_charts, indicator_library, inception_bars_store
+    chosen = [i for i in indicator_library.load_instances() if i.get("id") in set(instance_ids)]
+    bars = inception_bars_store.bars_for_symbol(symbol)
+    return indicator_charts.build_indicator_sections(bars, [e["date"] for e in series], chosen)
+
+
+def build_stock_report_data(symbol: str, field: str, date_from: date, date_to: date,
+                             indicator_ids: list | None = None) -> dict:
     series = hfs.historical_field_series(symbol, field, date_from, date_to)
     stats = hfs.condition_stats(series)
     current_value = next((e["value"] for e in reversed(series) if e["value"] is not None), None)
@@ -76,7 +89,69 @@ def build_stock_report_data(symbol: str, field: str, date_from: date, date_to: d
         "symbol": symbol, "field": field, "date_from": date_from, "date_to": date_to,
         "series": series, "stats": stats,
         "current_value": current_value, "current_close": current_close,
+        "indicator_ids": indicator_ids or [],
+        "indicator_sections": indicator_sections_for(symbol, series, indicator_ids),
     }
+
+
+# ── Flow pagination ─────────────────────────────────────────────────────
+# Each .report-page is a fixed A4 block; content past it would be reflowed by
+# the browser onto footer-less overflow pages. So content is packed into pages
+# here using height estimates (px at 96dpi, matching templates.py's CSS).
+_PAGE_BUDGET_PX = 1000      # 297mm - 2*12mm padding, minus footer clearance
+_PAGE1_USED_PX = 74 + 78 + 250   # header + KPI row + first chart section (measured)
+_SECTION_OVERHEAD_PX = 22 + 16   # <h2> + bottom margin
+_STRATEGY_PAGE1_USED_PX = 74 + 78 + 240   # header + KPI row + donut section
+_TABLE_HEAD_PX = 30
+_TABLE_ROW_PX = 26
+
+
+def _section_height(svg_html: str) -> int:
+    import re
+    m = re.search(r'<svg[^>]*\sheight="(\d+(?:\.\d+)?)"', svg_html)
+    return int(float(m.group(1))) + _SECTION_OVERHEAD_PX if m else 120
+
+
+def _flow_pages(first_page: str, used_px: int, blocks: list, table_title: str,
+                headers: list, rows: list, column_html: set, table_empty: bool = False) -> list:
+    """Greedy-pack *blocks* ((html, height_px)) then the table's rows (split
+    across pages with a "(continued)" title) after *first_page*."""
+    pages, cur, used = [], first_page, used_px
+
+    def _new_page():
+        nonlocal cur, used
+        pages.append(cur)
+        cur, used = "", 0
+
+    for html_, h in blocks:
+        if used + h > _PAGE_BUDGET_PX and used > 0:
+            _new_page()
+        cur += html_
+        used += h
+
+    if table_empty:
+        cur += templates.section(table_title,
+            '<p style="color:#64748b;font-size:11px;">No historical data for this symbol/period.</p>')
+        pages.append(cur)
+        return pages
+
+    i, first_chunk = 0, True
+    while i < len(rows):
+        room = _PAGE_BUDGET_PX - used - _SECTION_OVERHEAD_PX - _TABLE_HEAD_PX
+        if room < 3 * _TABLE_ROW_PX:
+            _new_page()
+            continue
+        n = room // _TABLE_ROW_PX
+        chunk = rows[i:i + n]
+        title = table_title if first_chunk else f"{table_title} (continued)"
+        cur += templates.section(title, templates.data_table(headers, chunk, column_html=column_html))
+        used += _SECTION_OVERHEAD_PX + _TABLE_HEAD_PX + len(chunk) * _TABLE_ROW_PX
+        i += n
+        first_chunk = False
+        if i < len(rows):
+            _new_page()
+    pages.append(cur)
+    return pages
 
 
 def build_stock_report_pages(data: dict) -> list:
@@ -105,6 +180,9 @@ def build_stock_report_pages(data: dict) -> list:
         )
         bar = charts.bar_chart(
             [e["date"].strftime("%d-%b") for e in series], [e["value"] for e in series], color="#2979FF",
+            # A PDF page can't scroll: let long series squeeze to the page width
+            # (thin bars) instead of the chart running off the right edge.
+            min_bar_width=1,
         )
     else:
         line = bar = '<p style="color:#64748b;font-size:11px;">No historical data for this symbol/period.</p>'
@@ -129,15 +207,14 @@ def build_stock_report_pages(data: dict) -> list:
         [e["date"].strftime("%d-%b-%Y"), _fmt(e["value"]), _fmt(e["close"]), _state_pill(e)]
         for e in reversed(series)
     ]
-    table = templates.data_table(["Date", data["field"], "Close", "State"], rows, column_html={"State"}) \
-        if rows else '<p style="color:#64748b;font-size:11px;">No historical data for this symbol/period.</p>'
-
-    page2 = (
-        templates.section(f'Historical {data["field"]} — {len(series)} periods', bar)
-        + templates.section("Historical Values", table)
-    )
-
-    return [page1, page2]
+    blocks = [
+        (templates.section(title, svg), _section_height(svg))
+        for title, svg in data.get("indicator_sections", [])
+    ]
+    blocks.append((templates.section(f'Historical {data["field"]} — {len(series)} periods', bar),
+                   _section_height(bar)))
+    return _flow_pages(page1, _PAGE1_USED_PX, blocks, "Historical Values",
+                       ["Date", data["field"], "Close", "State"], rows, {"State"}, table_empty=not rows)
 
 
 def build_stock_report_html(data: dict, doc_title: str = "EMV EOD Report") -> str:
@@ -248,17 +325,14 @@ def build_strategy_report_pages(classification: dict, columns: list | None = Non
         + templates.section("Sector Distribution", f'<div class="chart-row"><div>{donut}</div>{legend}</div>')
     )
 
-    if rows:
-        available = report_columns.emv_catalog(list(classification.get("headers", [])))
-        cols = report_columns.resolve_columns(columns, available, report_columns.EMV_DEFAULT_COLUMNS)
-        table_rows = [[report_columns.emv_cell(c, r) for c in cols] for r in rows]
-        table = templates.data_table(cols, table_rows)
-    else:
-        table = '<p style="color:#64748b;font-size:11px;">No stocks currently qualify for this strategy.</p>'
-
-    page2 = templates.section(f'Qualifying Stocks — {strategy.get("name", "")}', table)
-
-    return [page1, page2]
+    title = f'Qualifying Stocks — {strategy.get("name", "")}'
+    if not rows:
+        return [page1 + templates.section(
+            title, '<p style="color:#64748b;font-size:11px;">No stocks currently qualify for this strategy.</p>')]
+    available = report_columns.emv_catalog(list(classification.get("headers", [])))
+    cols = report_columns.resolve_columns(columns, available, report_columns.EMV_DEFAULT_COLUMNS)
+    table_rows = [[report_columns.emv_cell(c, r) for c in cols] for r in rows]
+    return _flow_pages(page1, _STRATEGY_PAGE1_USED_PX, [], title, cols, table_rows, set())
 
 
 def build_strategy_report_html(classification: dict, doc_title: str = "EMV EOD Report",

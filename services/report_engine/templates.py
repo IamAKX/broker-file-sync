@@ -46,6 +46,7 @@ _BASE_CSS = f"""
   --accent-amber: #D97706;
 }}
 * {{ box-sizing: border-box; }}
+svg {{ max-width: 100%; height: auto; }}
 html, body {{ margin: 0; padding: 0; background: #ffffff; }}
 body {{
   font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
@@ -62,6 +63,11 @@ body {{
   page-break-after: always;
 }}
 .report-page:last-child {{ break-after: auto; page-break-after: auto; }}
+/* A page block exactly as tall as the sheet plus its preview-only bottom margin
+   spills a blank sliver page after every page when printed. */
+@media print {{
+  .report-page {{ margin: 0; min-height: 0; height: {PAGE_HEIGHT_MM - 0.5}mm; overflow: hidden; }}
+}}
 
 .report-header {{
   display: flex; justify-content: space-between; align-items: flex-start;

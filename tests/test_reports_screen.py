@@ -350,3 +350,92 @@ def test_open_fuku_live_for_signal_renders_from_the_given_signal(screen):
     assert screen._stack.currentWidget() is screen._preview_page
     assert "Fuku Score" in screen._last_rendered_html
     assert "no signal found" not in screen._last_rendered_html
+
+
+def test_emv_stock_report_plots_selected_indicators_and_saves_their_ids(screen, qapp):
+    from PySide6.QtCore import Qt
+    from services import indicator_library, report_store
+
+    indicator_library.reload_cache()
+    sma = indicator_library.new_instance("SMA", {"period": 5})
+    rsi = indicator_library.new_instance("RSI", {"period": 5})
+    indicator_library.save_instance(sma)
+    indicator_library.save_instance(rsi)
+    # The report window is anchored to today, so seed bars ending today.
+    _seed_bars("DIVISLAB", date.today() - timedelta(days=70), 40)
+
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    screen._name_edit.setText("With indicators")
+    screen._emv_symbol_edit.setText("DIVISLAB")
+    screen._emv_periods_spin.setValue(10)
+    for i in range(screen._emv_indicator_list.count()):
+        screen._emv_indicator_list.item(i).setCheckState(Qt.CheckState.Checked)
+
+    screen._save_and_generate()
+    qapp.processEvents()
+
+    saved = report_store.load_all()[0]
+    assert set(saved["subject_config"]["indicator_ids"]) == {sma["id"], rsi["id"]}
+    assert "Price with SMA(5)" in screen._last_rendered_html
+    assert "RSI(5) — Relative Strength Index" in screen._last_rendered_html
+    indicator_library.reload_cache()
+
+
+def test_edit_reopens_wizard_with_saved_settings_and_updates_in_place(screen, qapp):
+    from services import report_recipients, report_store, strategy_store
+
+    strategy_store.save_strategy(strategy_store.new_strategy("Alpha"))
+    strategy_store.save_strategy(strategy_store.new_strategy("Beta"))
+    screen._start_new_report(report_store.REPORT_TYPE_LMV)
+    screen._name_edit.setText("Original")
+    screen._recipients_edit.setText("a@example.com")
+    screen._investment_edit.setText("250000")
+    screen._save_and_generate()
+    qapp.processEvents()
+    saved = report_store.load_all()[0]
+
+    screen._edit_active_report()
+
+    assert screen._stack.currentWidget() is screen._wizard_page
+    assert screen._name_edit.text() == "Original"
+    assert screen._recipients_edit.text() == "a@example.com"
+    assert screen._investment_edit.text() == "250000"
+    assert screen._strategy_a_combo.currentData() == saved["subject_config"]["strategy_a_id"]
+
+    screen._name_edit.setText("Renamed")
+    screen._save_and_generate()
+    qapp.processEvents()
+
+    after = report_store.load_all()
+    assert len(after) == 1 and after[0]["id"] == saved["id"]
+    assert after[0]["name"] == "Renamed"
+    assert report_recipients.load_recipients(saved["id"]) == ["a@example.com"]
+
+
+def test_clicking_an_indicator_row_toggles_it_and_is_saved(screen, qapp):
+    from services import indicator_library, report_store
+
+    inst = indicator_library.new_instance("SMA", {"period": 20})
+    indicator_library.save_instance(inst)
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    item = screen._emv_indicator_list.item(0)
+
+    screen._emv_indicator_list.itemClicked.emit(item)
+    assert screen._selected_indicator_ids() == [inst["id"]]
+    screen._emv_indicator_list.itemClicked.emit(item)
+    assert screen._selected_indicator_ids() == []
+
+
+def test_select_all_and_deselect_all_indicators(screen):
+    from services import indicator_library, report_store
+
+    for key in ("SMA", "EMA"):
+        indicator_library.save_instance(indicator_library.new_instance(key, {}))
+    ids = [i["id"] for i in indicator_library.load_instances()]
+    assert len(ids) >= 2
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+
+    screen._set_all_indicators(True)
+    assert sorted(screen._selected_indicator_ids()) == sorted(ids)
+    screen._set_all_indicators(False)
+    assert screen._selected_indicator_ids() == []

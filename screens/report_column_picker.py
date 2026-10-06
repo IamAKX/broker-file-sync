@@ -55,6 +55,13 @@ class ColumnPickerWidget(QWidget):
                 self._sel_list.addItem(name)
         self._refresh_available()
 
+    def set_columns(self, names: list):
+        self._sel_list.clear()
+        for name in names:
+            if name in self._available:
+                self._sel_list.addItem(name)
+        self._refresh_available()
+
     def columns(self) -> list:
         return [self._sel_list.item(i).text() for i in range(self._sel_list.count())]
 

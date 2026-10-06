@@ -24,7 +24,7 @@ import font_scale
 from PySide6.QtCore import QDate, Qt
 from PySide6.QtWidgets import (
     QComboBox, QDateEdit, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QMessageBox, QPushButton, QSpinBox, QStackedWidget,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -35,6 +35,7 @@ from services import (
     report_metrics, report_recipients, report_store, strategy_store,
 )
 from services.strategy_alerts import config_store as alerts_config_store
+from services import indicator_library
 from services import inception_historical_field_series as hfs
 from services.report_engine import pdf_export, templates
 
@@ -140,10 +141,15 @@ def _build_emv_html(report: dict) -> str:
     # trimmed back down to exactly n_periods below.
     date_to = date.today()
     date_from = date_to - timedelta(days=int(n_periods * 1.6) + 10)
-    data = emv_report_data.build_stock_report_data(symbol, field, date_from, date_to)
+    indicator_ids = subject.get("indicator_ids") or []
+    data = emv_report_data.build_stock_report_data(symbol, field, date_from, date_to, indicator_ids)
     if len(data["series"]) > n_periods:
         data["series"] = data["series"][-n_periods:]
         data["stats"] = hfs.condition_stats(data["series"])
+        # Re-derive against the trimmed window so plots match the shown periods.
+        data["indicator_sections"] = emv_report_data.indicator_sections_for(
+            symbol, data["series"], indicator_ids
+        )
     return emv_report_data.build_stock_report_html(data, doc_title=report.get("name", "EMV EOD Report"))
 
 
@@ -281,6 +287,11 @@ class ReportsScreen(QWidget):
             gen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             gen_btn.clicked.connect(lambda _, r=report: self._generate_and_preview(r))
             actions_lay.addWidget(gen_btn)
+
+            edit_btn = QPushButton("Edit")
+            edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            edit_btn.clicked.connect(lambda _, r=report: self._edit_report(r))
+            actions_lay.addWidget(edit_btn)
 
             del_btn = QPushButton("Delete")
             del_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -426,6 +437,48 @@ class ReportsScreen(QWidget):
             note = self._field_label("No strategies configured yet — create one in Strategy Builder first.")
             layout.addWidget(note)
 
+    def _refresh_indicator_choices(self):
+        checked = {
+            self._emv_indicator_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._emv_indicator_list.count())
+            if self._emv_indicator_list.item(i).checkState() == Qt.CheckState.Checked
+        }
+        self._emv_indicator_list.clear()
+        for inst in indicator_library.load_instances():
+            item = QListWidgetItem(
+                f'{indicator_library.instance_label(inst["key"], inst["params"])}'
+                f' — {indicator_library.get_definition(inst["key"])["name"]}'
+            )
+            item.setData(Qt.ItemDataRole.UserRole, inst["id"])
+            # Deliberately NOT ItemIsUserCheckable: itemClicked toggles the
+            # state itself, and the native toggle would double-flip it.
+            item.setCheckState(Qt.CheckState.Checked if inst["id"] in checked else Qt.CheckState.Unchecked)
+            self._emv_indicator_list.addItem(item)
+
+    @staticmethod
+    def _toggle_indicator_item(item: QListWidgetItem):
+        item.setCheckState(
+            Qt.CheckState.Unchecked if item.checkState() == Qt.CheckState.Checked
+            else Qt.CheckState.Checked
+        )
+
+    def _set_all_indicators(self, checked: bool):
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        for i in range(self._emv_indicator_list.count()):
+            self._emv_indicator_list.item(i).setCheckState(state)
+
+    def _open_indicator_library(self):
+        from screens.indicator_library_dialog import IndicatorLibraryDialog
+        IndicatorLibraryDialog(parent=self).exec()
+        self._refresh_indicator_choices()
+
+    def _selected_indicator_ids(self) -> list:
+        return [
+            self._emv_indicator_list.item(i).data(Qt.ItemDataRole.UserRole)
+            for i in range(self._emv_indicator_list.count())
+            if self._emv_indicator_list.item(i).checkState() == Qt.CheckState.Checked
+        ]
+
     def _on_emv_subtype_changed(self):
         is_strategy = self._emv_subtype_combo.currentData() == "strategy"
         self._emv_stock_frame.setVisible(not is_strategy)
@@ -466,6 +519,35 @@ class ReportsScreen(QWidget):
         self._emv_periods_spin.setRange(2, 500)
         self._emv_periods_spin.setValue(20)
         stock_lay.addWidget(self._emv_periods_spin)
+        stock_lay.addWidget(self._field_label("Indicators to plot (from the Indicator Library)"))
+        self._emv_indicator_list = QListWidget()
+        self._emv_indicator_list.setMaximumHeight(160)
+        # Clicking anywhere on a row toggles its checkbox (the native box is
+        # near-invisible on the dark theme, so users clicked the text, which
+        # only highlighted the row and left the indicator unselected), and
+        # the box gets an explicit border + accent fill when checked.
+        t = self._controller.theme
+        self._emv_indicator_list.setStyleSheet(
+            f"QListWidget::indicator {{ width: 14px; height: 14px; border: 1px solid "
+            f"{t.get('text_secondary')}; border-radius: 3px; background: transparent; }}"
+            f"QListWidget::indicator:checked {{ background: {t.get('accent')}; "
+            f"border-color: {t.get('accent')}; }}"
+        )
+        self._emv_indicator_list.itemClicked.connect(self._toggle_indicator_item)
+        self._refresh_indicator_choices()
+        stock_lay.addWidget(self._emv_indicator_list)
+        select_row = QHBoxLayout()
+        select_all_btn = QPushButton("Select All")
+        select_all_btn.clicked.connect(lambda: self._set_all_indicators(True))
+        select_row.addWidget(select_all_btn)
+        clear_all_btn = QPushButton("Deselect All")
+        clear_all_btn.clicked.connect(lambda: self._set_all_indicators(False))
+        select_row.addWidget(clear_all_btn)
+        select_row.addStretch()
+        stock_lay.addLayout(select_row)
+        manage_btn = QPushButton("Manage Indicator Library…")
+        manage_btn.clicked.connect(self._open_indicator_library)
+        stock_lay.addWidget(manage_btn)
         layout.addWidget(self._emv_stock_frame)
 
         # Strategy subtype fields
@@ -525,12 +607,37 @@ class ReportsScreen(QWidget):
         self._type_fields_layout.addWidget(note)
 
     def _start_new_report(self, report_type: str):
-        self._active_report = report_store.new_report(
+        report = report_store.new_report(
             report_type, f"{_REPORT_TYPE_LABELS[report_type]} — {datetime.now().strftime('%d-%b-%Y')}"
         )
-        self._wizard_title.setText(f"New {_REPORT_TYPE_LABELS[report_type]}")
-        self._name_edit.setText(self._active_report["name"])
-        self._recipients_edit.setText("")
+        self._open_wizard(report, f"New {_REPORT_TYPE_LABELS[report_type]}")
+
+    def _edit_active_report(self):
+        if self._active_report is None:
+            return
+        if "_signal" in self._active_report:
+            QMessageBox.information(
+                self, "Not Editable",
+                "This one-off report was generated from a live alert and has no saved settings.",
+            )
+            return
+        self._edit_report(self._active_report)
+
+    def _edit_report(self, report: dict):
+        """Reopen the wizard prefilled with a saved report's settings.
+        Saving keeps the report id, so it updates in place."""
+        self._open_wizard(
+            report, f"Edit {_REPORT_TYPE_LABELS.get(report['type'], 'Report')}", prefill=True
+        )
+
+    def _open_wizard(self, report: dict, title: str, prefill: bool = False):
+        report_type = report["type"]
+        self._active_report = report
+        self._wizard_title.setText(title)
+        self._name_edit.setText(report.get("name", ""))
+        self._recipients_edit.setText(
+            "; ".join(report_recipients.load_recipients(report["id"])) if prefill else ""
+        )
 
         _clear_layout(self._type_fields_layout)
         if report_type == report_store.REPORT_TYPE_LMV:
@@ -541,8 +648,55 @@ class ReportsScreen(QWidget):
             self._populate_fuku_live_fields()
         else:
             self._populate_placeholder_fields(_REPORT_TYPE_LABELS[report_type])
+        if prefill:
+            self._prefill_fields(report)
 
         self._stack.setCurrentWidget(self._wizard_page)
+
+    @staticmethod
+    def _select_data(combo: QComboBox, value):
+        idx = combo.findData(value)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
+    def _prefill_fields(self, report: dict):
+        cfg = report.get("subject_config") or {}
+        rtype = report["type"]
+        if rtype == report_store.REPORT_TYPE_LMV:
+            self._select_data(self._strategy_a_combo, cfg.get("strategy_a_id"))
+            self._select_data(self._strategy_b_combo, cfg.get("strategy_b_id"))
+            tf = report.get("timeframe") or {}
+            self._select_data(self._timeframe_combo, tf.get("mode"))
+            for edit, key in ((self._from_date, "from"), (self._to_date, "to")):
+                d = QDate.fromString(str(tf.get(key) or ""), Qt.DateFormat.ISODate)
+                if d.isValid():
+                    edit.setDate(d)
+            if cfg.get("investment_amount") is not None:
+                self._investment_edit.setText(str(int(cfg["investment_amount"])))
+            self._lmv_column_picker.set_columns(report.get("columns") or [])
+        elif rtype == report_store.REPORT_TYPE_EMV:
+            subtype = cfg.get("subtype", "stock")
+            self._select_data(self._emv_subtype_combo, subtype)
+            if subtype == "strategy":
+                self._select_data(self._emv_strategy_combo, cfg.get("strategy_id"))
+                d = QDate.fromString(str(cfg.get("as_of_date") or ""), Qt.DateFormat.ISODate)
+                if d.isValid():
+                    self._emv_as_of_date.setDate(d)
+                self._emv_column_picker.set_columns(report.get("columns") or [])
+            else:
+                self._emv_symbol_edit.setText(cfg.get("symbol", ""))
+                self._select_data(self._emv_field_combo, cfg.get("field"))
+                if cfg.get("n_periods"):
+                    self._emv_periods_spin.setValue(int(cfg["n_periods"]))
+                chosen = set(cfg.get("indicator_ids") or [])
+                for i in range(self._emv_indicator_list.count()):
+                    item = self._emv_indicator_list.item(i)
+                    if item.data(Qt.ItemDataRole.UserRole) in chosen:
+                        item.setCheckState(Qt.CheckState.Checked)
+        elif rtype == report_store.REPORT_TYPE_FUKU_LIVE:
+            self._select_data(
+                self._fuku_signal_combo, (cfg.get("strategy_id"), cfg.get("symbol"))
+            )
 
     def _save_and_generate(self):
         if self._active_report is None:
@@ -609,6 +763,7 @@ class ReportsScreen(QWidget):
                     "symbol": symbol,
                     "field": self._emv_field_combo.currentData(),
                     "n_periods": self._emv_periods_spin.value(),
+                    "indicator_ids": self._selected_indicator_ids(),
                 }
         elif self._active_report["type"] == report_store.REPORT_TYPE_FUKU_LIVE:
             if self._fuku_signal_combo.count() == 0:
@@ -646,6 +801,12 @@ class ReportsScreen(QWidget):
         back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         back_btn.clicked.connect(lambda: self._stack.setCurrentWidget(self._gallery_page))
         header_row.addWidget(back_btn)
+
+        self._edit_btn = QPushButton("Edit")
+        self._edit_btn.setToolTip("Change this report's settings")
+        self._edit_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._edit_btn.clicked.connect(self._edit_active_report)
+        header_row.addWidget(self._edit_btn)
 
         self._download_btn = QPushButton("Download PDF")
         self._download_btn.setCursor(Qt.CursorShape.PointingHandCursor)
