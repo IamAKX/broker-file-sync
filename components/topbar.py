@@ -59,6 +59,9 @@ class TopBar(QWidget):
     manage_categories_requested = Signal()
     manage_variables_requested = Signal()
     clear_cache_requested = Signal()
+    debug_log_toggled = Signal(bool)
+    debug_log_folder_requested = Signal()
+    debug_log_open_requested = Signal()
 
     def __init__(self, theme: ThemeManager, parent=None):
         super().__init__(parent)
@@ -75,6 +78,10 @@ class TopBar(QWidget):
         menus = [
             ("File", [
                 ("Clear Cache",  lambda: self.clear_cache_requested.emit()),
+                ("---",          None),
+                ("Enable Debug Logging", lambda checked=False: self.debug_log_toggled.emit(checked), "checkable"),
+                ("Set Debug Log Folder…", lambda: self.debug_log_folder_requested.emit()),
+                ("Open Debug Log Folder", lambda: self.debug_log_open_requested.emit()),
                 ("---",          None),
                 ("Export All Data…", lambda: self.export_strategies_requested.emit()),
                 ("Import All Data…", lambda: self.import_strategies_requested.emit()),
@@ -147,8 +154,11 @@ class TopBar(QWidget):
                 if item[0] == "---":
                     menu.addSeparator()
                 else:
-                    label, callback = item
+                    label, callback = item[0], item[1]
                     action = QAction(label, self)
+                    if len(item) > 2 and item[2] == "checkable":
+                        action.setCheckable(True)
+                        self._debug_log_action = action
                     if callback:
                         action.triggered.connect(callback)
                     menu.addAction(action)
@@ -180,6 +190,14 @@ class TopBar(QWidget):
         self._toggle_btn.setIcon(self._toggle_icon())
         self._toggle_btn.clicked.connect(self._on_toggle)
         layout.addWidget(self._toggle_btn)
+
+    def set_debug_log_checked(self, on: bool) -> None:
+        """Syncs File > Enable Debug Logging's tick without re-emitting."""
+        action = getattr(self, "_debug_log_action", None)
+        if action is not None:
+            action.blockSignals(True)
+            action.setChecked(on)
+            action.blockSignals(False)
 
     def refresh_user(self):
         """Shows/hides the "Admin Controls" menu for the CURRENT user —

@@ -1949,7 +1949,12 @@ class LiveViewerWindow(QWidget):
                                  precomputed_disp=(disp_headers, disp_data))
             self._apply_sector_filter()
             self._update_filter_btn_label()
-            self._status_lbl.setText(f"Updated: {datetime.now().strftime('%H:%M:%S')}")
+            status = f"Updated: {datetime.now().strftime('%H:%M:%S')}"
+            warning = getattr(self._reader, "sharekhan_warning", "")
+            if warning:
+                status += "  ⚠ Live Excel feed not readable — showing last saved prices (stale)"
+            self._status_lbl.setToolTip(warning)
+            self._status_lbl.setText(status)
             self._adapt_poll_rate(getattr(self, "_last_change_count", 0))
             self.data_updated.emit(self._headers, self._data)
         except Exception as exc:

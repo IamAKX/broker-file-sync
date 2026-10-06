@@ -54,6 +54,8 @@ def _apply_app_icon(app: QApplication):
 def main():
     from services.error_logging import install_excepthook
     install_excepthook()
+    from services import debug_log
+    debug_log.start_from_saved()   # resumes File > Enable Debug Logging if left on
 
     os.environ.setdefault("QT_AUTO_SCREEN_SCALE_FACTOR", "1")
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")

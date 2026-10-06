@@ -28,7 +28,7 @@ _LOG_FILE = os.path.join(_LOG_DIR, "error.log")
 
 def _build_logger() -> logging.Logger:
     logger = logging.getLogger("broker_sync.errors")
-    logger.setLevel(logging.ERROR)
+    logger.setLevel(logging.WARNING)
     if not logger.handlers:
         fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
 

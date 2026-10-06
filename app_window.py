@@ -1,3 +1,4 @@
+import os
 from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QStackedWidget, QApplication
 from PySide6.QtCore import Qt
 from components.sidebar import Sidebar
@@ -34,6 +35,11 @@ class MainWindow(QMainWindow):
         self._topbar.manage_categories_requested.connect(self._open_manage_categories)
         self._topbar.manage_variables_requested.connect(self._open_manage_variables)
         self._topbar.clear_cache_requested.connect(self._clear_cache)
+        self._topbar.debug_log_toggled.connect(self._on_debug_log_toggled)
+        self._topbar.debug_log_folder_requested.connect(self._choose_debug_log_folder)
+        self._topbar.debug_log_open_requested.connect(self._open_debug_log_folder)
+        from services import debug_log
+        self._topbar.set_debug_log_checked(debug_log.is_active())
         root.addWidget(self._topbar)
 
         body = QHBoxLayout()
@@ -446,6 +452,59 @@ class MainWindow(QMainWindow):
             theme=self._controller.theme, parent=self,
         )
         dlg.exec()
+
+    def _choose_debug_log_folder(self) -> bool:
+        """File > Set Debug Log Folder…: picks where the debug log is written
+        (and switches the live capture there if it's already on)."""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from services import debug_log
+        start = debug_log.load_settings()["folder"] or os.path.expanduser("~")
+        folder = QFileDialog.getExistingDirectory(self, "Select Debug Log Folder", start)
+        if not folder:
+            return False
+        enabled = debug_log.is_active()
+        try:
+            if enabled:
+                debug_log.enable(folder)
+        except OSError as exc:
+            QMessageBox.warning(self, "Debug Log", f"Can't write to that folder:\n{exc}")
+            return False
+        debug_log.save_settings(enabled, folder)
+        return True
+
+    def _on_debug_log_toggled(self, checked: bool):
+        """File > Enable Debug Logging."""
+        from PySide6.QtWidgets import QMessageBox
+        from services import debug_log
+        if not checked:
+            debug_log.disable()
+            debug_log.save_settings(False, debug_log.load_settings()["folder"])
+            return
+        folder = debug_log.load_settings()["folder"]
+        if not folder or not os.path.isdir(folder):
+            if not self._choose_debug_log_folder():
+                self._topbar.set_debug_log_checked(False)
+                return
+            folder = debug_log.load_settings()["folder"]
+        try:
+            path = debug_log.enable(folder)
+        except OSError as exc:
+            QMessageBox.warning(self, "Debug Log", f"Can't write to that folder:\n{exc}")
+            self._topbar.set_debug_log_checked(False)
+            return
+        debug_log.save_settings(True, folder)
+        QMessageBox.information(self, "Debug Log", f"Debug logging is on.\n\nWriting to:\n{path}")
+
+    def _open_debug_log_folder(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtGui import QDesktopServices
+        from PySide6.QtWidgets import QMessageBox
+        from services import debug_log
+        folder = debug_log.load_settings()["folder"]
+        if not folder or not os.path.isdir(folder):
+            QMessageBox.information(self, "Debug Log", "No debug log folder set yet. Use File > Set Debug Log Folder…")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
 
     def _clear_cache(self):
         """File > Clear Cache: deletes the local read-cache files that

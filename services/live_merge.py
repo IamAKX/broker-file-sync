@@ -190,6 +190,12 @@ class LiveDataReader:
         # Cached COM reader (created lazily on the worker thread).
         self._excel = None
 
+        # Non-empty while use_com is on but the Sharekhan read had to fall back
+        # to the on-disk file — whose DDE prices are never flushed, i.e. stale.
+        # Read by the UI thread for the status bar (plain str: atomic swap).
+        self.sharekhan_warning = ""
+        self._warned_reason = None
+
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self) -> None:
@@ -216,8 +222,29 @@ class LiveDataReader:
                 self._sharekhan_path, _SHAREKHAN_HEADERS, _SHAREKHAN_HEADER_ROW
             )
             if result is not None:
+                self.sharekhan_warning = ""
+                self._warned_reason = None
                 return result
+            self._note_com_fallback(self._excel.last_failure)
+        elif self._use_com:
+            self._note_com_fallback("COM reader not started")
         return read_sharekhan(self._sharekhan_path)
+
+    def _note_com_fallback(self, reason: str) -> None:
+        """The live Excel read failed and the stale on-disk copy is about to
+        be used — surface that instead of silently showing frozen prices.
+        Logged once per distinct reason (not per ~200ms tick)."""
+        reason = reason or "unknown reason"
+        self.sharekhan_warning = reason
+        if reason != self._warned_reason:
+            self._warned_reason = reason
+            try:
+                from services.error_logging import error_logger
+                error_logger.warning(
+                    "LMV: live Excel (COM) read of the Sharekhan workbook failed, "
+                    "falling back to the saved file (prices will be stale): %s", reason)
+            except Exception:
+                pass
 
     def _db_trade_date(self):
         if self._db_trade_date_cache is None:

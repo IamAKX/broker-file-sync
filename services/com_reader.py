@@ -10,6 +10,7 @@ Windows only. On macOS/Linux returns None gracefully.
 
 import os
 import platform
+import time
 
 _WIN32COM_AVAILABLE = False
 
@@ -26,6 +27,13 @@ if platform.system() == "Windows":
 _SNAP_SHEET = "Streaming_Stock_Watch"
 # Partial workbook name match
 _SNAP_WB    = "Snap"
+
+
+def _norm_header(h) -> str:
+    """Header-cell text normalised for matching: collapses runs of whitespace
+    (incl. NBSP/newlines that DDE-fed header cells sometimes carry) and
+    ignores case, so a cosmetically different header still resolves."""
+    return " ".join(str(h).replace("\xa0", " ").split()).lower() if h is not None else ""
 
 
 def is_available() -> bool:
@@ -65,6 +73,10 @@ class ExcelLiveReader:
         self._excel = None
         self._wb_cache: dict[str, object] = {}   # basename(lower) → Workbook COM obj
         self._com_inited = False
+        # Why the most recent read_workbook_sheet() returned None ("" after a
+        # success). Callers silently fall back to the stale on-disk file on
+        # None, so this is the only trail explaining a "prices frozen" report.
+        self.last_failure = ""
 
     # ── Thread lifecycle ────────────────────────────────────────────────────
 
@@ -120,12 +132,20 @@ class ExcelLiveReader:
         if excel is None:
             return None
         try:
+            open_names = []
             for w in excel.Workbooks:
-                if os.path.basename(w.FullName).lower() == target_name:
+                name = os.path.basename(w.FullName).lower()
+                if name == target_name:
                     self._wb_cache[target_name] = w
                     return w
-        except Exception:
+                open_names.append(name)
+            self.last_failure = (
+                f"workbook '{target_name}' is not open in the Excel instance this app "
+                f"attached to (open there: {', '.join(open_names) or 'none'})"
+            )
+        except Exception as exc:
             # Stale Excel handle — drop everything and let the next call retry.
+            self.last_failure = f"Excel Workbooks enumeration failed: {exc!r}"
             self._invalidate()
         return None
 
@@ -141,64 +161,87 @@ class ExcelLiveReader:
         """
         if not _WIN32COM_AVAILABLE:
             return None
+        self.last_failure = ""
         target_name = os.path.basename(workbook_path).lower()
         wb = self._get_workbook(target_name)
         if wb is None:
+            if self._excel is None and not self.last_failure:
+                self.last_failure = "no running Excel instance found (GetActiveObject failed)"
             return None
         try:
             sheet = wb.Sheets(1)
-        except Exception:
+        except Exception as exc:
             # Workbook handle went stale between lookup and use.
+            self.last_failure = f"could not open sheet 1: {exc!r}"
             self._wb_cache.pop(target_name, None)
             self._excel = None
             return None
-        try:
-            return _read_sheet_cells(sheet, col_names, header_row_idx)
-        except Exception:
-            self._invalidate()
-            return None
+        # Excel rejects COM calls while a cell is being edited or a dialog is
+        # open — transient, so retry once before dropping to the stale disk copy.
+        for attempt in (1, 2):
+            try:
+                result, reason = _read_sheet_cells_ex(sheet, col_names, header_row_idx)
+            except Exception as exc:
+                result, reason = None, f"COM read raised {exc!r}"
+                self._invalidate()
+                if attempt == 1:
+                    time.sleep(0.05)
+                    continue
+            if result is None:
+                self.last_failure = reason
+            return result
+        return None
 
 
-def _read_sheet_cells(sheet, col_names: list,
-                      header_row_idx: int) -> tuple[list, list[list]] | None:
+def _read_sheet_cells_ex(sheet, col_names: list,
+                         header_row_idx: int) -> tuple[tuple | None, str]:
     """
     Read a worksheet via COM, then locate each of *col_names* by matching
     it against the sheet's own header row (row header_row_idx) — same
     by-name resolution services.file_reader.read_sharekhan uses for the
     on-disk fallback, and for the identical reason: TradeTiger's live Snap
     to Excel feed doesn't guarantee the same column ORDER across accounts,
-    only the header text, so a fixed column-letter read (this function's
-    own behavior before this) can silently read the wrong column's live
-    numbers under the right header on a differently-laid-out account.
+    only the header text, so a fixed column-letter read can silently read
+    the wrong column's live numbers under the right header.
 
     Reads from cell A1 so header_row_idx is the same 0-based row used when
-    reading from disk. Returns None (same as any other COM failure here)
-    if a header in *col_names* can't be found in the live sheet — callers
-    already treat None as "fall back to the on-disk reader".
+    reading from disk. Returns (result, "") on success, or (None, reason)
+    when a header in *col_names* can't be found in the live sheet etc. —
+    callers treat None as "fall back to the on-disk reader" and surface
+    *reason* so that fallback is never silent. Raises on a COM error.
     """
+    used = sheet.UsedRange
+    last_row = used.Row + used.Rows.Count - 1
+    last_col = used.Column + used.Columns.Count - 1
+    rng  = sheet.Range(sheet.Cells(1, 1), sheet.Cells(last_row, last_col))
+    raw  = rng.Value
+    if not raw:
+        return None, "live sheet returned no cells"
+    # COM returns a tuple-of-tuples; normalise to list-of-lists.
+    if not isinstance(raw[0], (tuple, list)):
+        raw = (raw,)
+    rows = [list(r) for r in raw]
+    if len(rows) <= header_row_idx:
+        return None, f"live sheet has {len(rows)} rows, header expected on row {header_row_idx + 1}"
+    header_row = [_norm_header(h) for h in rows[header_row_idx]]
+    missing = [n for n in col_names if _norm_header(n) not in header_row]
+    if missing:
+        return None, (f"header(s) {missing} not found on row {header_row_idx + 1} of the live sheet "
+                      f"(found: {[h for h in header_row if h]})")
+    indices = [header_row.index(_norm_header(name)) for name in col_names]
+    data = [
+        [row[i] if i < len(row) else None for i in indices]
+        for row in rows[header_row_idx + 1:]
+    ]
+    return (list(col_names), data), ""
+
+
+def _read_sheet_cells(sheet, col_names: list,
+                      header_row_idx: int) -> tuple[list, list[list]] | None:
+    """Result-only wrapper over :func:`_read_sheet_cells_ex` (swallows COM
+    errors as None, like every other failure here)."""
     try:
-        used = sheet.UsedRange
-        last_row = used.Row + used.Rows.Count - 1
-        last_col = used.Column + used.Columns.Count - 1
-        rng  = sheet.Range(sheet.Cells(1, 1), sheet.Cells(last_row, last_col))
-        raw  = rng.Value
-        if not raw:
-            return None
-        # COM returns a tuple-of-tuples; normalise to list-of-lists.
-        if not isinstance(raw[0], (tuple, list)):
-            raw = (raw,)
-        rows = [list(r) for r in raw]
-        if len(rows) <= header_row_idx:
-            return None
-        header_row = [str(h).strip() if h is not None else "" for h in rows[header_row_idx]]
-        if any(name not in header_row for name in col_names):
-            return None
-        indices = [header_row.index(name) for name in col_names]
-        data = [
-            [row[i] if i < len(row) else None for i in indices]
-            for row in rows[header_row_idx + 1:]
-        ]
-        return list(col_names), data
+        return _read_sheet_cells_ex(sheet, col_names, header_row_idx)[0]
     except Exception:
         return None
 

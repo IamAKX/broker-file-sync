@@ -80,3 +80,41 @@ def test_returns_none_when_an_expected_header_is_missing():
 
 def test_returns_none_when_sheet_is_empty():
     assert _read_sheet_cells(_FakeSheet([]), ["Scrip Name"], 0) is None
+
+
+def test_header_match_ignores_case_nbsp_and_extra_whitespace():
+    grid = [["Scrip  Name", "CURRENT\xa0", "open "], ["ABB", 7001, 6990]]
+    headers, rows = _read_sheet_cells(_FakeSheet(grid), ["Scrip Name", "Current", "Open"], 0)
+    assert headers == ["Scrip Name", "Current", "Open"]
+    assert rows == [["ABB", 7001, 6990]]
+
+
+def test_missing_header_reports_which_one_and_what_was_found():
+    from services.com_reader import _read_sheet_cells_ex
+    grid = [["Scrip Name", "LTP"], ["ABB", 1]]
+    result, reason = _read_sheet_cells_ex(_FakeSheet(grid), ["Scrip Name", "Current"], 0)
+    assert result is None
+    assert "Current" in reason and "ltp" in reason
+
+
+def test_live_reader_exposes_stale_disk_fallback_warning(monkeypatch, tmp_path):
+    from services import file_reader, live_merge
+
+    reader = live_merge.LiveDataReader("Sharekhan.xlsx", "r", [], [], use_com=True)
+
+    class _FailingExcel:
+        last_failure = "workbook 'sharekhan.xlsx' is not open (open there: book1.xlsx)"
+        def read_workbook_sheet(self, *a): return None
+
+    reader._excel = _FailingExcel()
+    monkeypatch.setattr(file_reader, "read_sharekhan", lambda p: (["h"], [["stale"]]))
+    assert reader._read_sharekhan() == (["h"], [["stale"]])
+    assert "not open" in reader.sharekhan_warning
+
+    class _OkExcel:
+        last_failure = ""
+        def read_workbook_sheet(self, *a): return (["h"], [["live"]])
+
+    reader._excel = _OkExcel()
+    assert reader._read_sharekhan() == (["h"], [["live"]])
+    assert reader.sharekhan_warning == ""
