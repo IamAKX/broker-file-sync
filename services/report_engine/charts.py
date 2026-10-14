@@ -298,3 +298,141 @@ def progress_bar(fraction: float, color: str = "#16a34a", label: str = "") -> st
         f'<div class="progress-fill" style="width:{pct:.1f}%;background:{_esc(color)}"></div>'
         f'</div>{label_html}'
     )
+
+
+def price_ladder(levels: list, ref_price: float | None, width: int = 620) -> str:
+    """Support/resistance-style level map: one row per level, highest price
+    on top. *levels*: [{"label", "price", "color", "emphasis": bool}, ...].
+    Each row shows the label, the price over its line, and the % distance
+    from *ref_price* (the current price) on the right. Rows are evenly
+    spaced in price order — readable even when levels cluster, which a
+    proportional price axis isn't (the ladder is a map of order and
+    distance, not a scaled chart)."""
+    rows = [l for l in levels if l.get("price") is not None]
+    if not rows:
+        return _no_data_svg(width, 80, "No levels")
+    rows.sort(key=lambda l: -l["price"])
+    gap = 30
+    pad_top, pad_bottom = 8, 8
+    height = pad_top + pad_bottom + gap * len(rows)
+    line_x1, line_x2 = 150, width - 70
+    parts = []
+    for i, lvl in enumerate(rows):
+        y = pad_top + gap * i + gap / 2 + 6
+        color = _esc(lvl.get("color", "#64748b"))
+        weight = 700 if lvl.get("emphasis") else 600
+        stroke_w = 2.5 if lvl.get("emphasis") else 1.5
+        parts.append(
+            f'<text x="4" y="{y + 4:.1f}" font-family="sans-serif" font-size="10" '
+            f'font-weight="{weight}" fill="{color}">{_esc(lvl.get("label", ""))}</text>'
+        )
+        if lvl.get("sub"):
+            parts.append(
+                f'<text x="4" y="{y + 14:.1f}" font-family="sans-serif" font-size="8" '
+                f'fill="#94a3b8">{_esc(lvl["sub"])}</text>'
+            )
+        parts.append(
+            f'<text x="{line_x1}" y="{y - 7:.1f}" font-family="sans-serif" font-size="12" '
+            f'font-weight="700" fill="#0f172a">{lvl["price"]:,.2f}</text>'
+        )
+        parts.append(
+            f'<line x1="{line_x1}" y1="{y:.1f}" x2="{line_x2}" y2="{y:.1f}" '
+            f'stroke="{color}" stroke-width="{stroke_w}" stroke-linecap="round"/>'
+        )
+        if ref_price:
+            pct = (lvl["price"] - ref_price) / ref_price * 100
+            parts.append(
+                f'<text x="{width - 4}" y="{y + 4:.1f}" text-anchor="end" font-family="sans-serif" '
+                f'font-size="10" fill="#64748b">{pct:+.2f}%</text>'
+            )
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg">{"".join(parts)}</svg>'
+    )
+
+
+def bubble_chart(points: list, width: int = 680, height: int = 320,
+                 x_label: str = "", y_label: str = "") -> str:
+    """Scatter of bubbles. *points*: [{"label", "x", "y", "size", "color"}].
+    Bubble radius scales with *size* (6-18px); color is caller-chosen (the
+    Fuku report uses green/red by direction-adjusted % move). A zero line is
+    drawn when the y range crosses zero; labels are drawn beside bubbles and
+    thinned when there are many."""
+    pts = [p for p in points if p.get("x") is not None and p.get("y") is not None]
+    if not pts:
+        return _no_data_svg(width, height)
+
+    pad_left, pad_right, pad_top, pad_bottom = 52, 20, 16, 38
+    plot_w, plot_h = width - pad_left - pad_right, height - pad_top - pad_bottom
+    xs, ys = [p["x"] for p in pts], [p["y"] for p in pts]
+    x_lo, x_hi = min(xs), max(xs)
+    y_lo, y_hi = min(min(ys), 0.0), max(max(ys), 0.0)
+    if x_lo == x_hi:
+        x_lo, x_hi = x_lo - 1, x_hi + 1
+    if y_lo == y_hi:
+        y_lo, y_hi = y_lo - 1, y_hi + 1
+    y_span_pad = (y_hi - y_lo) * 0.1
+    y_lo, y_hi = y_lo - y_span_pad, y_hi + y_span_pad
+
+    def sx(v):
+        return pad_left + (v - x_lo) / (x_hi - x_lo) * plot_w * 0.94 + plot_w * 0.03
+
+    def sy(v):
+        return pad_top + plot_h - (v - y_lo) / (y_hi - y_lo) * plot_h
+
+    sizes = [p.get("size") or 0 for p in pts]
+    s_lo, s_hi = min(sizes), max(sizes)
+
+    def radius(size):
+        if s_hi == s_lo:
+            return 10
+        return 6 + (size - s_lo) / (s_hi - s_lo) * 12
+
+    parts = []
+    for i in range(5):
+        gy = pad_top + plot_h * i / 4
+        val = y_hi - (y_hi - y_lo) * i / 4
+        parts.append(f'<line x1="{pad_left}" y1="{gy:.1f}" x2="{pad_left + plot_w}" y2="{gy:.1f}" stroke="#E2E8F0"/>')
+        parts.append(
+            f'<text x="{pad_left - 6}" y="{gy + 3:.1f}" text-anchor="end" font-family="sans-serif" '
+            f'font-size="9" fill="#94a3b8">{val:.1f}</text>'
+        )
+    if y_lo < 0 < y_hi:
+        zy = sy(0)
+        parts.append(f'<line x1="{pad_left}" y1="{zy:.1f}" x2="{pad_left + plot_w}" y2="{zy:.1f}" stroke="#94a3b8" stroke-width="1.5"/>')
+    for i in range(5):
+        gx = pad_left + plot_w * i / 4
+        val = x_lo + (x_hi - x_lo) * i / 4
+        parts.append(
+            f'<text x="{gx:.1f}" y="{height - 20}" text-anchor="middle" font-family="sans-serif" '
+            f'font-size="9" fill="#94a3b8">{val:.0f}</text>'
+        )
+
+    placed_labels: list = []   # (x, y) of labels already drawn — skip any that would collide
+    for p in sorted(pts, key=lambda q: -(q.get("size") or 0)):
+        cx, cy, r = sx(p["x"]), sy(p["y"]), radius(p.get("size") or 0)
+        color = _esc(p.get("color", "#2979FF"))
+        parts.append(
+            f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" fill="{color}" fill-opacity="0.55" '
+            f'stroke="{color}" stroke-width="1"><title>{_esc(p.get("label", ""))}: {p["y"]:+.2f}%</title></circle>'
+        )
+        ly = cy - r - 3
+        if all(abs(cx - ox) > 46 or abs(ly - oy) > 10 for ox, oy in placed_labels):
+            placed_labels.append((cx, ly))
+            parts.append(
+                f'<text x="{cx:.1f}" y="{ly:.1f}" text-anchor="middle" font-family="sans-serif" '
+                f'font-size="8" fill="#334155">{_esc(str(p.get("label", ""))[:12])}</text>'
+            )
+    if x_label:
+        parts.append(
+            f'<text x="{pad_left + plot_w / 2:.1f}" y="{height - 4}" text-anchor="middle" '
+            f'font-family="sans-serif" font-size="10" fill="#64748b">{_esc(x_label)}</text>'
+        )
+    if y_label:
+        parts.append(
+            f'<text x="4" y="{pad_top - 4}" font-family="sans-serif" font-size="10" fill="#64748b">{_esc(y_label)}</text>'
+        )
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg">{"".join(parts)}</svg>'
+    )

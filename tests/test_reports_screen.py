@@ -326,6 +326,7 @@ def test_fuku_live_wizard_saves_and_generates_for_an_open_signal(screen, qapp):
     }, force_flush=True)
 
     screen._start_new_report(report_store.REPORT_TYPE_FUKU_LIVE)
+    screen._select_data(screen._fuku_scope_combo, "single")
     screen._name_edit.setText("INFY Live Report")
 
     screen._save_and_generate()
@@ -439,3 +440,70 @@ def test_select_all_and_deselect_all_indicators(screen):
     assert sorted(screen._selected_indicator_ids()) == sorted(ids)
     screen._set_all_indicators(False)
     assert screen._selected_indicator_ids() == []
+
+
+def _seed_open(state_store, symbol, entry_time="2026-03-01T09:31:00", sid="strat-1", state="open"):
+    state_store.set_open_signal(f"{sid}::{symbol}", {
+        "state": state, "strategy_id": sid, "strategy_name": "PWHBUY",
+        "symbol": symbol, "sector": "IT", "direction": "BUY",
+        "entry_time": entry_time, "entry_price": 100.0, "last_price": 101.0,
+        "metrics": {}, "risk_reward": None, "score": None,
+        "running_high": 110.0, "running_low": 95.0,
+    }, force_flush=True)
+
+
+def test_fuku_strategy_scope_wizard_saves_options_and_starts_refresh_timer(screen, qapp):
+    from services import report_store
+    from services.strategy_alerts import state_store
+
+    _seed_open(state_store, "INFY")
+    _seed_open(state_store, "TCS")
+    screen._start_new_report(report_store.REPORT_TYPE_FUKU_LIVE)
+    assert screen._fuku_scope_combo.currentData() == "strategy"   # new default
+    screen._fuku_inc_cancelled.setChecked(True)
+    screen._fuku_refresh_spin.setValue(3)
+    screen._name_edit.setText("Whole strategy")
+
+    screen._save_and_generate()
+    qapp.processEvents()
+
+    cfg = report_store.load_all()[0]["subject_config"]
+    assert cfg == {
+        "scope": "strategy", "strategy_id": "strat-1", "include_stopped": False,
+        "include_cancelled": True, "include_achieved": False, "refresh_minutes": 3,
+    }
+    assert "INFY" in screen._last_rendered_html and "TCS" in screen._last_rendered_html
+    assert screen._refresh_timer.isActive() and screen._refresh_timer.interval() == 3 * 60_000
+    screen._leave_preview()
+    assert not screen._refresh_timer.isActive()
+
+
+def test_fuku_auto_refresh_adds_newly_matched_stock_and_flags_it(screen, qapp):
+    from datetime import datetime
+    from services import report_store
+    from services.strategy_alerts import state_store
+
+    _seed_open(state_store, "INFY")
+    report = report_store.new_report(report_store.REPORT_TYPE_FUKU_LIVE, "Live")
+    report["subject_config"] = {"scope": "strategy", "strategy_id": "strat-1", "refresh_minutes": 5}
+    screen._generate_and_preview(report)
+    assert "TCS" not in screen._last_rendered_html
+    first_run = screen._last_generated_at
+
+    _seed_open(state_store, "TCS", entry_time=datetime.now().isoformat())   # matched after first run
+    screen._auto_refresh_tick()
+    qapp.processEvents()
+
+    assert "TCS" in screen._last_rendered_html
+    assert "RECENTLY ADDED" in screen._last_rendered_html
+    assert screen._last_generated_at > first_run
+
+
+def test_fuku_auto_refresh_stops_once_preview_is_left(screen):
+    from services import report_store
+    report = report_store.new_report(report_store.REPORT_TYPE_FUKU_LIVE, "Live")
+    report["subject_config"] = {"scope": "strategy", "strategy_id": "strat-1", "refresh_minutes": 5}
+    screen._generate_and_preview(report)
+    screen._stack.setCurrentWidget(screen._gallery_page)
+    screen._auto_refresh_tick()
+    assert not screen._refresh_timer.isActive()

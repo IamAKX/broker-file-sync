@@ -236,6 +236,8 @@ def _fire_entry(
         "metrics": metrics_state,
         "risk_reward": risk_reward,
         "score": config.get("score"),
+        "last_price": entry_price,
+        "last_tick_time": now.isoformat(),
         "running_high": high,
         "running_low": low,
     }
@@ -347,6 +349,11 @@ def _update_open_signal(
     price = _to_float(row.get(_PRICE_COLUMN))
     high = _to_float(row.get(_HIGH_COLUMN))
     low = _to_float(row.get(_LOW_COLUMN))
+    if price is not None:
+        # Latest live price + when it was seen — the Fuku Live Report's
+        # "Current" (a signal otherwise only stores entry/high/low).
+        signal["last_price"] = price
+        signal["last_tick_time"] = now.isoformat()
     if high is not None:
         signal["running_high"] = max(signal.get("running_high"), high) if signal.get("running_high") is not None else high
     if low is not None:

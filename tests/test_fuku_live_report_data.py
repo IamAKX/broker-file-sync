@@ -171,8 +171,127 @@ def test_build_report_pages_shows_target_progress():
         force_flush=True,
     )
 
+    signal = state_store.get_open_signals()[f"{strategy_id}::INFY"]
+    signal["last_price"] = 110.0   # current price drives progress, not the running high
     data = fl.build_report_data(strategy_id, "INFY")
-    pages = fl.build_report_pages(data)
+    html = "".join(fl.build_report_pages(data))
 
-    assert "Target 1" in pages[1]
-    assert "progress-track" in pages[1]
+    assert "Target 1" in html
+    assert "progress-track" in html
+    assert "50%" in html   # (110-100)/(120-100)
+
+
+# ── Strategy-wide report (issue #58) ─────────────────────────────────────
+
+def _resolved(symbol, resolution, strategy_id="s1", entry=100.0, metrics=None):
+    rec = _open_signal(strategy_id=strategy_id, symbol=symbol, entry=entry, metrics=metrics)
+    rec.update({"id": f"{symbol}-{resolution}", "resolution": resolution,
+                "resolved_at": "2026-03-01T11:00:00", "exit_price": 98.0})
+    return rec
+
+
+def test_strategy_signals_only_entered_trades_and_toggles():
+    state_store.set_open_signal("s1::INFY", _open_signal(symbol="INFY"), force_flush=True)
+    pending = _open_signal(symbol="PEND")
+    pending["state"] = "pending"          # trigger true, not entered yet — no price/sector
+    state_store.set_open_signal("s1::PEND", pending, force_flush=True)
+    state_store.set_open_signal("other::ZZZ", _open_signal(strategy_id="other", symbol="ZZZ"), force_flush=True)
+    state_store.append_alert_history(_resolved("SL1", "stopped_out"))
+    state_store.append_alert_history(_resolved("CAN1", "trade_cancelled"))
+    state_store.append_alert_history(_resolved("WIN1", "all_targets_achieved"))
+
+    def symbols(**kw):
+        return sorted(s["symbol"] for s in fl.strategy_signals("s1", **kw))
+
+    assert symbols() == ["INFY"]
+    assert symbols(include_stopped=True) == ["INFY", "SL1"]
+    assert symbols(include_cancelled=True) == ["CAN1", "INFY"]
+    assert symbols(include_stopped=True, include_cancelled=True, include_achieved=True) == \
+        ["CAN1", "INFY", "SL1", "WIN1"]
+
+
+def test_open_symbol_hides_its_older_resolved_record():
+    state_store.set_open_signal("s1::INFY", _open_signal(symbol="INFY"), force_flush=True)
+    state_store.append_alert_history(_resolved("INFY", "stopped_out"))
+    assert [s["symbol"] for s in fl.strategy_signals("s1", include_stopped=True)] == ["INFY"]
+
+
+def test_current_price_prefers_last_tick_never_running_high():
+    sig = _open_signal(entry=100, running_high=150)
+    assert fl.current_price_of(sig) == 100          # no live tick known -> entry, NOT the 150 high
+    sig["last_price"] = 104.0
+    assert fl.current_price_of(sig) == 104.0
+    assert fl.pct_move(sig) == pytest.approx(4.0)
+    sell = _open_signal(direction="SELL", entry=100)
+    sell["last_price"] = 97.0
+    assert fl.pct_move(sell) == pytest.approx(3.0)  # falling is in a SELL's favour
+
+
+def test_targets_flag_wrong_side_of_entry_and_progress():
+    metrics = {
+        "t1": {"name": "Target 1", "role": "target", "value": 110.0, "achieved": False},
+        "t2": {"name": "Target 2", "role": "target", "value": 95.0, "achieved": False},   # below entry for a BUY
+        "t3": {"name": "Target 3", "role": "target", "value": 120.0, "achieved": True, "achieved_at": "2026-03-01T10:00:00"},
+        "sl": {"name": "SL", "role": "informational", "value": 90.0},
+    }
+    sig = _open_signal(entry=100, metrics=metrics)
+    sig["last_price"] = 105.0
+    t = {x["name"]: x for x in fl._targets(sig)}
+    assert t["Target 1"]["progress"] == pytest.approx(0.5) and t["Target 1"]["valid"]
+    assert not t["Target 2"]["valid"] and t["Target 2"]["progress"] == 0.0
+    assert t["Target 3"]["progress"] == 1.0
+    assert fl._stop_loss(sig) == 90.0               # informational metric named SL
+
+
+def test_strategy_report_flags_recently_added_and_groups_by_sector():
+    from datetime import datetime
+    old, new = _open_signal(symbol="OLD"), _open_signal(symbol="NEWB")
+    old["entry_time"] = "2026-03-01T09:00:00"
+    new["entry_time"] = "2026-03-01T10:30:00"
+    new["sector"] = "AUTO"
+    state_store.set_open_signal("s1::OLD", old, force_flush=True)
+    state_store.set_open_signal("s1::NEWB", new, force_flush=True)
+
+    data = fl.build_strategy_report_data("s1", new_since=datetime(2026, 3, 1, 10, 0), refresh_minutes=5)
+    flags = {c["symbol"]: c["is_new"] for c in data["cards"]}
+    assert flags == {"OLD": False, "NEWB": True}
+    assert data["cards"][0]["symbol"] == "NEWB"      # newest first
+
+    html = "".join(fl.build_strategy_report_pages(data))
+    assert "RECENTLY ADDED" in html and "Recently added" in html
+    assert "Sector Distribution" in html and "AUTO" in html and "IT" in html
+    assert html.index("NEWB") < html.index("OLD")    # new stock upfront
+
+
+def test_strategy_report_has_no_page_limit_and_empty_state():
+    for i in range(30):
+        state_store.set_open_signal(f"s1::S{i}", _open_signal(symbol=f"S{i}"), force_flush=True)
+    data = fl.build_strategy_report_data("s1")
+    pages = fl.build_strategy_report_pages(data)
+    assert len(pages) >= 8
+    assert all(f"S{i}" in "".join(pages) for i in range(30))
+
+    empty = fl.build_strategy_report_pages(fl.build_strategy_report_data("nothing-here"))
+    assert len(empty) == 1 and "No active signals" in empty[0]
+
+
+def test_strategy_report_mentions_pending_stocks():
+    p = _open_signal(symbol="PEND")
+    p["state"] = "pending"
+    state_store.set_open_signal("s1::PEND", p, force_flush=True)
+    state_store.set_open_signal("s1::INFY", _open_signal(symbol="INFY"), force_flush=True)
+    html = "".join(fl.build_strategy_report_pages(fl.build_strategy_report_data("s1")))
+    assert "1 more stock currently match" in html or "not been entered yet" in html
+    assert "PEND" not in html.replace("pending", "")
+
+
+def test_timeline_lists_target_achievement_time_and_outcome():
+    metrics = {"t1": {"name": "Target 1", "role": "target", "value": 110.0, "achieved": True,
+                      "achieved_at": "2026-03-01T10:48:00"}}
+    rec = _resolved("INFY", "all_targets_achieved", metrics=metrics)
+    state_store.append_alert_history(rec)
+    data = fl.build_report_data("s1", "INFY")
+    details = [e["detail"] for e in data["timeline"]]
+    assert any("TARGET 1 ACHIEVED" in d for d in details)
+    assert details[-1] == "TARGETS ACHIEVED"
+    assert any(e["title"].endswith("10:48") for e in data["timeline"])

@@ -21,9 +21,9 @@ download) stays real and testable for every type today, not a mock.
 from datetime import date, datetime, timedelta
 
 import font_scale
-from PySide6.QtCore import QDate, Qt
+from PySide6.QtCore import QDate, Qt, QTimer
 from PySide6.QtWidgets import (
-    QComboBox, QDateEdit, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QCheckBox, QComboBox, QDateEdit, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -155,8 +155,23 @@ def _build_emv_html(report: dict) -> str:
     return emv_report_data.build_stock_report_html(data, doc_title=report.get("name", "EMV EOD Report"))
 
 
-def _build_fuku_live_html(report: dict) -> str:
+def _is_fuku_strategy_scope(report: dict) -> bool:
+    return (report.get("type") == report_store.REPORT_TYPE_FUKU_LIVE
+            and (report.get("subject_config") or {}).get("scope") == "strategy")
+
+
+def _build_fuku_live_html(report: dict, new_since: datetime | None = None) -> str:
     subject = report.get("subject_config", {})
+    if subject.get("scope") == "strategy":
+        data = fuku_live_report_data.build_strategy_report_data(
+            subject.get("strategy_id"),
+            include_stopped=bool(subject.get("include_stopped")),
+            include_cancelled=bool(subject.get("include_cancelled")),
+            include_achieved=bool(subject.get("include_achieved")),
+            new_since=new_since, refresh_minutes=int(subject.get("refresh_minutes") or 0),
+        )
+        return fuku_live_report_data.build_strategy_report_html(
+            data, doc_title=report.get("name", "Fuku Live Report"))
     data = fuku_live_report_data.build_report_data(
         subject.get("strategy_id"), subject.get("symbol", ""),
         signal=report.get("_signal"),
@@ -164,14 +179,14 @@ def _build_fuku_live_html(report: dict) -> str:
     return fuku_live_report_data.build_report_html(data, doc_title=report.get("name", "Fuku Live Report"))
 
 
-def _build_report_html(report: dict) -> str:
+def _build_report_html(report: dict, new_since: datetime | None = None) -> str:
     report_type = report.get("type")
     if report_type == report_store.REPORT_TYPE_LMV:
         return _build_lmv_html(report)
     if report_type == report_store.REPORT_TYPE_EMV:
         return _build_emv_html(report)
     if report_type == report_store.REPORT_TYPE_FUKU_LIVE:
-        return _build_fuku_live_html(report)
+        return _build_fuku_live_html(report, new_since)
     return _build_placeholder_html(report)
 
 
@@ -181,6 +196,11 @@ class ReportsScreen(QWidget):
         self._controller = controller
         self._active_report: dict | None = None
         self._last_rendered_html: str | None = None
+        # Fuku Live strategy reports regenerate on this timer while the
+        # preview is showing; _last_generated_at is the "new since" cutoff.
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._auto_refresh_tick)
+        self._last_generated_at: datetime | None = None
         self._build()
         self.refresh_gallery()
 
@@ -359,7 +379,7 @@ class ReportsScreen(QWidget):
         btn_row = QHBoxLayout()
         back_btn = QPushButton("Cancel")
         back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        back_btn.clicked.connect(lambda: self._stack.setCurrentWidget(self._gallery_page))
+        back_btn.clicked.connect(self._leave_preview)
         btn_row.addWidget(back_btn)
         btn_row.addStretch()
 
@@ -598,21 +618,70 @@ class ReportsScreen(QWidget):
 
     def _populate_fuku_live_fields(self):
         layout = self._type_fields_layout
-        layout.addWidget(self._field_label("Alert (Strategy — Symbol)"))
-        self._fuku_signal_combo = QComboBox()
+        layout.addWidget(self._field_label("Report scope"))
+        self._fuku_scope_combo = QComboBox()
+        self._fuku_scope_combo.addItem("Entire strategy — every active stock", "strategy")
+        self._fuku_scope_combo.addItem("Single stock alert", "single")
+        self._fuku_scope_combo.currentIndexChanged.connect(self._on_fuku_scope_changed)
+        layout.addWidget(self._fuku_scope_combo)
+
         signals = fuku_live_report_data.list_available_signals()
-        for s in signals:
-            state_label = "OPEN" if s["state"] == "open" else (s["resolution"] or "RESOLVED").replace("_", " ").upper()
+
+        # Strategy-wide options
+        self._fuku_strategy_frame = QFrame()
+        strat_lay = QVBoxLayout(self._fuku_strategy_frame)
+        strat_lay.setContentsMargins(0, 0, 0, 0)
+        strat_lay.addWidget(self._field_label("Strategy"))
+        self._fuku_strategy_combo = QComboBox()
+        seen = set()
+        for s_ in signals:
+            if s_["strategy_id"] in seen:
+                continue
+            seen.add(s_["strategy_id"])
+            self._fuku_strategy_combo.addItem(s_["strategy_name"] or s_["strategy_id"], s_["strategy_id"])
+        strat_lay.addWidget(self._fuku_strategy_combo)
+        strat_lay.addWidget(self._field_label("Also include (besides open trades)"))
+        self._fuku_inc_stopped = QCheckBox("Stopped-out trades")
+        self._fuku_inc_cancelled = QCheckBox("Cancelled trades (entry already beyond the targets)")
+        self._fuku_inc_achieved = QCheckBox("Trades that achieved all targets")
+        for cb in (self._fuku_inc_stopped, self._fuku_inc_cancelled, self._fuku_inc_achieved):
+            strat_lay.addWidget(cb)
+        strat_lay.addWidget(self._field_label(
+            "Auto-refresh every N minutes while the preview is open (0 = off) — new matches are added "
+            "to the top and highlighted"
+        ))
+        self._fuku_refresh_spin = QSpinBox()
+        self._fuku_refresh_spin.setRange(0, 240)
+        self._fuku_refresh_spin.setValue(5)
+        strat_lay.addWidget(self._fuku_refresh_spin)
+        layout.addWidget(self._fuku_strategy_frame)
+
+        # Single-alert picker (the original behaviour)
+        self._fuku_single_frame = QFrame()
+        single_lay = QVBoxLayout(self._fuku_single_frame)
+        single_lay.setContentsMargins(0, 0, 0, 0)
+        single_lay.addWidget(self._field_label("Alert (Strategy — Symbol)"))
+        self._fuku_signal_combo = QComboBox()
+        for s_ in signals:
+            state_label = "OPEN" if s_["state"] == "open" else (s_["resolution"] or "RESOLVED").replace("_", " ").upper()
             self._fuku_signal_combo.addItem(
-                f'{s["strategy_name"]} — {s["symbol"]} ({state_label})',
-                (s["strategy_id"], s["symbol"]),
+                f'{s_["strategy_name"]} — {s_["symbol"]} ({state_label})',
+                (s_["strategy_id"], s_["symbol"]),
             )
-        layout.addWidget(self._fuku_signal_combo)
+        single_lay.addWidget(self._fuku_signal_combo)
+        layout.addWidget(self._fuku_single_frame)
+        self._on_fuku_scope_changed()
+
         if not signals:
             layout.addWidget(self._field_label(
                 "No open or recent alerts found — this report needs at least one "
                 "Strategy Notifications signal to have fired."
             ))
+
+    def _on_fuku_scope_changed(self):
+        is_strategy = self._fuku_scope_combo.currentData() == "strategy"
+        self._fuku_strategy_frame.setVisible(is_strategy)
+        self._fuku_single_frame.setVisible(not is_strategy)
 
     def _populate_placeholder_fields(self, type_label: str):
         note = self._field_label(
@@ -714,9 +783,18 @@ class ReportsScreen(QWidget):
                     if item.data(Qt.ItemDataRole.UserRole) in chosen:
                         item.setCheckState(Qt.CheckState.Checked)
         elif rtype == report_store.REPORT_TYPE_FUKU_LIVE:
-            self._select_data(
-                self._fuku_signal_combo, (cfg.get("strategy_id"), cfg.get("symbol"))
-            )
+            scope = cfg.get("scope", "single")
+            self._select_data(self._fuku_scope_combo, scope)
+            if scope == "strategy":
+                self._select_data(self._fuku_strategy_combo, cfg.get("strategy_id"))
+                self._fuku_inc_stopped.setChecked(bool(cfg.get("include_stopped")))
+                self._fuku_inc_cancelled.setChecked(bool(cfg.get("include_cancelled")))
+                self._fuku_inc_achieved.setChecked(bool(cfg.get("include_achieved")))
+                self._fuku_refresh_spin.setValue(int(cfg.get("refresh_minutes") or 0))
+            else:
+                self._select_data(
+                    self._fuku_signal_combo, (cfg.get("strategy_id"), cfg.get("symbol"))
+                )
 
     def _save_and_generate(self):
         if self._active_report is None:
@@ -791,14 +869,30 @@ class ReportsScreen(QWidget):
                     "indicator_ids": self._selected_indicator_ids(),
                 }
         elif self._active_report["type"] == report_store.REPORT_TYPE_FUKU_LIVE:
-            if self._fuku_signal_combo.count() == 0:
-                QMessageBox.warning(
-                    self, "No Alerts",
-                    "No open or recent Strategy Notifications alerts found to report on.",
-                )
-                return
-            strategy_id, symbol = self._fuku_signal_combo.currentData()
-            self._active_report["subject_config"] = {"strategy_id": strategy_id, "symbol": symbol}
+            if self._fuku_scope_combo.currentData() == "strategy":
+                if self._fuku_strategy_combo.count() == 0:
+                    QMessageBox.warning(
+                        self, "No Strategies",
+                        "No strategy with Strategy Notifications alerts found to report on.",
+                    )
+                    return
+                self._active_report["subject_config"] = {
+                    "scope": "strategy",
+                    "strategy_id": self._fuku_strategy_combo.currentData(),
+                    "include_stopped": self._fuku_inc_stopped.isChecked(),
+                    "include_cancelled": self._fuku_inc_cancelled.isChecked(),
+                    "include_achieved": self._fuku_inc_achieved.isChecked(),
+                    "refresh_minutes": self._fuku_refresh_spin.value(),
+                }
+            else:
+                if self._fuku_signal_combo.count() == 0:
+                    QMessageBox.warning(
+                        self, "No Alerts",
+                        "No open or recent Strategy Notifications alerts found to report on.",
+                    )
+                    return
+                strategy_id, symbol = self._fuku_signal_combo.currentData()
+                self._active_report["subject_config"] = {"strategy_id": strategy_id, "symbol": symbol}
 
         self._active_report["name"] = name
         report_store.save_report(self._active_report)
@@ -870,15 +964,57 @@ class ReportsScreen(QWidget):
 
     def _generate_and_preview(self, report: dict):
         self._active_report = report
+        refresh = int((report.get("subject_config") or {}).get("refresh_minutes") or 0)
+        started = datetime.now()
+        # First run: stocks entered within one refresh interval count as new.
+        new_since = started - timedelta(minutes=refresh) if (_is_fuku_strategy_scope(report) and refresh) else None
         try:
-            html = _build_report_html(report)
+            html = _build_report_html(report, new_since)
         except Exception as exc:
             QMessageBox.warning(self, "Report Generation Failed", f"Could not generate this report:\n\n{exc}")
             return
         self._last_rendered_html = html
+        self._last_generated_at = started
         self._preview_title.setText(report.get("name", "Report Preview"))
         self._preview_view.setHtml(html)
         self._stack.setCurrentWidget(self._preview_page)
+        self._refresh_timer.stop()
+        if _is_fuku_strategy_scope(report) and refresh:
+            self._refresh_timer.start(refresh * 60_000)
+
+    def _leave_preview(self):
+        self._refresh_timer.stop()
+        self._stack.setCurrentWidget(self._gallery_page)
+
+    def _auto_refresh_tick(self):
+        """Regenerate the active Fuku Live strategy report: existing stocks
+        get their latest status, stocks that matched since the previous
+        generation are added upfront and highlighted. Keeps the reader's
+        scroll position."""
+        report = self._active_report
+        if (report is None or not _is_fuku_strategy_scope(report)
+                or self._stack.currentWidget() is not self._preview_page):
+            self._refresh_timer.stop()
+            return
+        started = datetime.now()
+        try:
+            html = _build_report_html(report, self._last_generated_at)
+        except Exception:
+            return  # keep showing the last good report; try again next tick
+        self._last_rendered_html = html
+        self._last_generated_at = started
+
+        def restore_scroll(y):
+            def _after(ok):
+                try:
+                    self._preview_view.loadFinished.disconnect(_after)
+                except (TypeError, RuntimeError):
+                    pass
+                self._preview_view.page().runJavaScript(f"window.scrollTo(0, {int(y or 0)});")
+            self._preview_view.loadFinished.connect(_after)
+            self._preview_view.setHtml(html)
+
+        self._preview_view.page().runJavaScript("window.scrollY", restore_scroll)
 
     def _download_pdf(self):
         if not self._last_rendered_html or not self._active_report:

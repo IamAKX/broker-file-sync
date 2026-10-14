@@ -126,6 +126,56 @@ table.report-table tr:last-child td {{ border-bottom: none; }}
 
 .chart-row {{ display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }}
 
+
+/* ── Fuku Live report cards ── */
+.fk-card {{ border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 14px; background: #fff; break-inside: avoid; }}
+.fk-card.fk-new {{ border-color: #F59E0B; box-shadow: 0 0 0 2px #FEF3C7; }}
+.fk-card.fk-buy {{ border-left: 5px solid #16a34a; }}
+.fk-card.fk-sell {{ border-left: 5px solid #dc2626; }}
+.fk-head {{ display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; margin-bottom: 8px; }}
+.fk-sym {{ font-size: 17px; font-weight: 800; letter-spacing: .01em; }}
+.fk-sub {{ font-size: 10px; color: var(--text-secondary); margin-top: 2px; }}
+.fk-badges {{ display: flex; gap: 6px; flex-wrap: wrap; align-items: center; justify-content: flex-end; }}
+.fk-badge {{ display: inline-block; padding: 2px 9px; border-radius: 999px; font-size: 10px; font-weight: 800; letter-spacing: .03em; }}
+.fk-badge.buy {{ color: #fff; background: #16a34a; }}
+.fk-badge.sell {{ color: #fff; background: #dc2626; }}
+.fk-badge.open {{ color: #1d4ed8; background: #DBEAFE; border: 1px solid #93C5FD; }}
+.fk-badge.win {{ color: #15803D; background: #DCFCE7; border: 1px solid #86EFAC; }}
+.fk-badge.loss {{ color: #B91C1C; background: #FEE2E2; border: 1px solid #FCA5A5; }}
+.fk-badge.cancel {{ color: #92400E; background: #FEF3C7; border: 1px solid #FCD34D; }}
+.fk-badge.new {{ color: #fff; background: #F59E0B; }}
+.fk-kpis {{ display: flex; gap: 6px; margin-bottom: 10px; }}
+.fk-kpi {{ flex: 1; border: 1px solid var(--border); border-radius: 7px; padding: 5px 8px; background: var(--neutral-bg); min-width: 0; }}
+.fk-kpi .l {{ font-size: 8px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .05em; }}
+.fk-kpi .v {{ font-size: 13px; font-weight: 800; margin-top: 1px; white-space: nowrap; }}
+.fk-kpi.pos .v {{ color: var(--positive-text); }}
+.fk-kpi.neg .v {{ color: var(--negative-text); }}
+.fk-kpi.score .v {{ color: #B45309; }}
+.fk-cols {{ display: flex; gap: 14px; align-items: flex-start; }}
+.fk-col-main {{ flex: 1.5; min-width: 0; }}
+.fk-col-side {{ flex: 1; min-width: 0; }}
+.fk-h {{ font-size: 10px; font-weight: 800; color: var(--header-blue); text-transform: uppercase; letter-spacing: .06em; margin: 0 0 5px 0; }}
+.fk-chips {{ display: flex; flex-direction: column; gap: 3px; margin-bottom: 10px; }}
+.fk-chip {{ font-size: 10px; padding: 2px 8px; border-radius: 6px; font-weight: 600; }}
+.fk-chip.ok {{ color: #166534; background: #DCFCE7; }}
+.fk-chip.no {{ color: #991B1B; background: #FEE2E2; }}
+.fk-tl {{ position: relative; margin-left: 5px; padding-left: 14px; border-left: 2px solid #CBD5E1; }}
+.fk-tl-item {{ position: relative; margin-bottom: 6px; font-size: 10px; }}
+.fk-tl-item::before {{ content: ""; position: absolute; left: -20px; top: 2px; width: 10px; height: 10px; border-radius: 50%; background: #3B82F6; border: 2px solid #fff; box-shadow: 0 0 0 1px #CBD5E1; }}
+.fk-tl-item.good::before {{ background: #16a34a; }}
+.fk-tl-item.bad::before {{ background: #dc2626; }}
+.fk-tl-item.pending::before {{ background: #F59E0B; }}
+.fk-tl-item .t {{ font-weight: 800; }}
+.fk-tl-item .d {{ color: var(--text-secondary); }}
+.fk-prog {{ display: flex; align-items: center; gap: 8px; margin-top: 4px; font-size: 10px; }}
+.fk-prog .n {{ width: 112px; font-weight: 700; white-space: nowrap; }}
+.fk-prog .bar {{ flex: 1; }}
+.fk-prog .p {{ width: 64px; text-align: right; color: var(--text-secondary); white-space: nowrap; }}
+.fk-sector-head {{ display: flex; align-items: center; gap: 8px; margin: 4px 0 8px 0; }}
+.fk-sector-head .name {{ font-size: 14px; font-weight: 800; color: var(--header-blue); }}
+.fk-sector-head .cnt {{ font-size: 10px; font-weight: 700; padding: 1px 8px; border-radius: 999px; background: var(--neutral-bg); color: var(--text-secondary); }}
+.fk-note {{ font-size: 9px; color: var(--text-secondary); margin-top: 4px; }}
+
 .report-footer {{
   position: absolute; bottom: {PAGE_PADDING_MM / 2}mm; left: {PAGE_PADDING_MM}mm;
   right: {PAGE_PADDING_MM}mm; display: flex; justify-content: space-between;

@@ -148,3 +148,25 @@ def test_render_to_pdf_writes_a_real_pdf_file(qapp, tmp_path):
     assert result.get("success") is True, result.get("error")
     assert os.path.exists(output_path)
     assert os.path.getsize(output_path) > 0
+
+
+# ── price_ladder / bubble_chart (Fuku Live report, issue #58) ────────────
+
+def test_price_ladder_orders_levels_and_shows_distance_from_current():
+    svg = charts.price_ladder(
+        [{"label": "ENTRY", "price": 100.0}, {"label": "T1", "price": 110.0, "sub": "x"},
+         {"label": "SL", "price": 95.0}], ref_price=100.0)
+    assert svg.index("T1") < svg.index("ENTRY") < svg.index("SL")     # highest price on top
+    assert "+10.00%" in svg and "-5.00%" in svg and "+0.00%" in svg
+
+
+def test_price_ladder_and_bubble_chart_handle_empty_input():
+    assert "No levels" in charts.price_ladder([], 100.0)
+    assert "No data" in charts.bubble_chart([])
+
+
+def test_bubble_chart_draws_one_bubble_per_point_and_dedupes_colliding_labels():
+    pts = [{"label": f"S{i}", "x": 1.0, "y": 0.0, "size": i + 1, "color": "#16a34a"} for i in range(6)]
+    svg = charts.bubble_chart(pts)
+    assert svg.count("<circle") == 6
+    assert 1 <= svg.count('font-size="8"') < 6   # identical positions -> labels thinned, not stacked
