@@ -271,7 +271,12 @@ def classify_strategy(strategy_id: str, as_of_date: date) -> dict:
     services.strategy_engine.apply_strategies, which drops the rest) plus
     each stock's Fuku Score (see this module's own docstring for why every
     score is currently 100/100)."""
-    from services import inception_formula_variable_store, inception_strategy_store
+    from services import inception_bars_store, inception_formula_variable_store, inception_strategy_store
+
+    # A weekend/holiday (or a day not synced yet) has no bars of its own —
+    # use the latest synced trading day on or before it rather than an empty
+    # universe; the report header shows the date actually used.
+    as_of_date = inception_bars_store.latest_synced_date_on_or_before(as_of_date) or as_of_date
 
     strategy = next(
         (s for s in inception_strategy_store.load_all() if s.get("id") == strategy_id), None
@@ -281,6 +286,12 @@ def classify_strategy(strategy_id: str, as_of_date: date) -> dict:
                 "as_of_date": as_of_date, "headers": [], "rows": []}
 
     headers, data = universe_snapshot(as_of_date)
+    universe_sector_idx = headers.index("Sector") if "Sector" in headers else None
+    sector_totals: dict = {}
+    if universe_sector_idx is not None:
+        for universe_row in data:
+            name = universe_row[universe_sector_idx]
+            sector_totals[name] = sector_totals.get(name, 0) + 1
     new_headers, new_data = apply_strategies(
         [strategy], headers, data, day_history={}, include_streak_columns=False,
         symbol_col="Symbol", variable_store=inception_formula_variable_store,
@@ -305,23 +316,65 @@ def classify_strategy(strategy_id: str, as_of_date: date) -> dict:
             "score": score_result,
         })
 
-    return {"strategy": strategy, "as_of_date": as_of_date, "headers": new_headers, "rows": rows}
+    return {"strategy": strategy, "as_of_date": as_of_date, "headers": new_headers, "rows": rows,
+            "sector_totals": sector_totals}
 
 
-_SECTOR_PALETTE = ["#2979FF", "#16a34a", "#D97706", "#dc2626", "#8250df", "#0969da", "#bf3989", "#65a30d"]
+_SECTOR_PALETTE = ["#2979FF", "#16a34a", "#D97706", "#dc2626", "#8250df", "#0891b2", "#bf3989", "#65a30d",
+                   "#7c2d12", "#475569", "#ca8a04", "#0f766e", "#be123c", "#4f46e5", "#a16207", "#334155"]
 
 
-def build_strategy_report_pages(classification: dict, columns: list | None = None) -> list:
+BUBBLE_METRICS = ["% CHG PDC AND OPEN", "WEEK % CHANGE", "MONTH % CHANGE", "DAY % CHANGE"]
+BUBBLE_DEFAULT_X, BUBBLE_DEFAULT_Y = "WEEK % CHANGE", "% CHG PDC AND OPEN"
+
+
+def sector_breakdown(classification: dict) -> list:
+    """[{"sector","matched","total","pct"}] — how many stocks of each sector
+    matched the strategy and what share of that sector's stocks that is
+    (total = every synced stock in the sector), most-matched first."""
+    totals = classification.get("sector_totals") or {}
+    counts: dict = {}
+    for r in classification["rows"]:
+        counts[r["sector"]] = counts.get(r["sector"], 0) + 1
+    out = []
+    for sector, matched in counts.items():
+        total = totals.get(sector) or 0
+        out.append({"sector": sector, "matched": matched, "total": total,
+                    "pct": (matched / total * 100) if total else None})
+    out.sort(key=lambda d: (-d["matched"], d["sector"]))
+    return out
+
+
+def _bubble_value(row: dict, metric: str):
+    try:
+        return float(row["values"].get(metric))
+    except (TypeError, ValueError):
+        return None
+
+
+def strategy_bubble_svg(classification: dict, x_metric: str, y_metric: str, colors: dict) -> str:
+    """Bubble map of the qualifying stocks: x/y = the two chosen % change
+    metrics, bubble size = Fuku score, colour = sector."""
+    points = []
+    for r in classification["rows"]:
+        x, y = _bubble_value(r, x_metric), _bubble_value(r, y_metric)
+        if x is None or y is None:
+            continue
+        points.append({"label": r["symbol"], "x": x, "y": y,
+                       "size": (r.get("score") or {}).get("score") or 1, "color": colors.get(r["sector"], "#64748b")})
+    return charts.bubble_chart(points, x_label=x_metric, y_label=y_metric, y_is_percent=False)
+
+
+def build_strategy_report_pages(classification: dict, columns: list | None = None,
+                                bubble_x: str | None = None, bubble_y: str | None = None) -> list:
     strategy, rows = classification["strategy"], classification["rows"]
 
-    sector_counts: dict = {}
-    for r in rows:
-        sector_counts[r["sector"]] = sector_counts.get(r["sector"], 0) + 1
-    ranked = sorted(sector_counts.items(), key=lambda kv: -kv[1])
+    breakdown = sector_breakdown(classification)
     segments = [
-        {"label": sector, "value": count, "color": _SECTOR_PALETTE[i % len(_SECTOR_PALETTE)]}
-        for i, (sector, count) in enumerate(ranked)
+        {"label": d["sector"], "value": d["matched"], "color": _SECTOR_PALETTE[i % len(_SECTOR_PALETTE)]}
+        for i, d in enumerate(breakdown)
     ]
+    sector_colors = {s["label"]: s["color"] for s in segments}
     donut = charts.donut_chart(segments, center_label=str(len(rows)), center_sublabel="Qualifying")
     legend = charts.donut_legend(segments)
 
@@ -330,6 +383,12 @@ def build_strategy_report_pages(classification: dict, columns: list | None = Non
         + templates.kpi_card("As Of", classification["as_of_date"].strftime("%d-%b-%Y"))
         + templates.kpi_card("Category", strategy.get("category", "—"))
     )
+
+    sector_table = templates.data_table(
+        ["Sector", "Matched", "In sector", "% matched"],
+        [[d["sector"], str(d["matched"]), str(d["total"]) if d["total"] else "—",
+          f'{d["pct"]:.0f}%' if d["pct"] is not None else "—"] for d in breakdown],
+    ) if breakdown else ""
 
     page1 = (
         templates.report_header(
@@ -345,12 +404,28 @@ def build_strategy_report_pages(classification: dict, columns: list | None = Non
     if not rows:
         return [page1 + templates.section(
             title, '<p style="color:#64748b;font-size:11px;">No stocks currently qualify for this strategy.</p>')]
+
+    x_metric, y_metric = bubble_x or BUBBLE_DEFAULT_X, bubble_y or BUBBLE_DEFAULT_Y
+    bubble = strategy_bubble_svg(classification, x_metric, y_metric, sector_colors)
+    blocks = [
+        (templates.section("Stocks Matched by Sector", sector_table),
+         _SECTION_OVERHEAD_PX + _TABLE_HEAD_PX + len(breakdown) * _TABLE_ROW_PX),
+        (templates.section(f"Stock Map — {x_metric} vs {y_metric}", bubble + (
+            '<p style="font-size:9px;color:#64748b;margin:2px 0 0 0;">Bubble size = Fuku score; colour = sector.</p>')),
+         _section_height(bubble) + 16),
+    ]
+
     available = report_columns.emv_catalog(list(classification.get("headers", [])))
     cols = report_columns.resolve_columns(columns, available, report_columns.EMV_DEFAULT_COLUMNS)
-    table_rows = [[report_columns.emv_cell(c, r) for c in cols] for r in rows]
-    return _flow_pages(page1, _STRATEGY_PAGE1_USED_PX, [], title, cols, table_rows, set())
+    # Stocks grouped by sector, the sector with the most matches first.
+    order = {d["sector"]: i for i, d in enumerate(breakdown)}
+    ordered = sorted(rows, key=lambda r: (order.get(r["sector"], len(order)), str(r["symbol"])))
+    table_rows = [[report_columns.emv_cell(c, r) for c in cols] for r in ordered]
+    return _flow_pages(page1, _STRATEGY_PAGE1_USED_PX, blocks, title, cols, table_rows, set())
 
 
 def build_strategy_report_html(classification: dict, doc_title: str = "EMV EOD Report",
-                                columns: list | None = None) -> str:
-    return templates.render_report(build_strategy_report_pages(classification, columns), doc_title=doc_title)
+                                columns: list | None = None, bubble_x: str | None = None,
+                                bubble_y: str | None = None) -> str:
+    return templates.render_report(
+        build_strategy_report_pages(classification, columns, bubble_x, bubble_y), doc_title=doc_title)

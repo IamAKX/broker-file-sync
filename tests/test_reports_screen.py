@@ -29,7 +29,9 @@ def screen(qapp):
     # config_store to a per-test tmp path.
     from app import AppController
     from screens.reports import ReportsScreen
-    return ReportsScreen(AppController(qapp))
+    screen = ReportsScreen(AppController(qapp))
+    screen._async_generation = False   # most tests assert on the result straight away
+    return screen
 
 
 def _seed_bars(symbol: str, start: date, days: int, start_price: float = 100.0):
@@ -507,3 +509,88 @@ def test_fuku_auto_refresh_stops_once_preview_is_left(screen):
     screen._stack.setCurrentWidget(screen._gallery_page)
     screen._auto_refresh_tick()
     assert not screen._refresh_timer.isActive()
+
+
+# ── Background generation: the window must not hang while a report builds (issue #63) ──
+
+def _wait_for(qapp, predicate, seconds=5):
+    import time
+    end = time.time() + seconds
+    while not predicate() and time.time() < end:
+        qapp.processEvents()
+        time.sleep(0.01)
+    return predicate()
+
+
+def test_generation_runs_off_the_gui_thread_and_shows_progress_then_result(screen, qapp, monkeypatch):
+    import threading
+    from screens import reports
+    from services import report_store
+
+    started, release, thread_names = threading.Event(), threading.Event(), []
+
+    def slow_build(report, new_since=None):
+        thread_names.append(threading.current_thread().name)
+        started.set()
+        release.wait(5)
+        return "<html><body>DONE REPORT</body></html>"
+
+    monkeypatch.setattr(reports, "_build_report_html", slow_build)
+    screen._async_generation = True
+    report = report_store.new_report(report_store.REPORT_TYPE_LMV, "Slow")
+
+    screen._generate_and_preview(report)          # returns immediately — GUI thread not blocked
+    assert started.wait(2)
+    assert screen._stack.currentWidget() is screen._preview_page
+    assert "Generating" in screen._preview_title.text()
+    assert not screen._download_btn.isEnabled() and not screen._email_btn.isEnabled()
+    assert screen._last_rendered_html is None or "DONE REPORT" not in screen._last_rendered_html
+
+    release.set()
+    assert _wait_for(qapp, lambda: screen._last_rendered_html and "DONE REPORT" in screen._last_rendered_html)
+    assert thread_names == ["report-generation"]
+    assert screen._download_btn.isEnabled() and screen._email_btn.isEnabled()
+    assert screen._preview_title.text() == "Slow"
+
+
+def test_failed_background_generation_warns_and_returns_to_gallery(screen, qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from screens import reports
+    from services import report_store
+
+    warnings = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: warnings.append(a[2])))
+
+    def boom(report, new_since=None):
+        raise RuntimeError("snapshot exploded")
+
+    monkeypatch.setattr(reports, "_build_report_html", boom)
+    screen._async_generation = True
+    screen._generate_and_preview(report_store.new_report(report_store.REPORT_TYPE_LMV, "Bad"))
+
+    assert _wait_for(qapp, lambda: bool(warnings))
+    assert "snapshot exploded" in warnings[0]
+    assert screen._stack.currentWidget() is screen._gallery_page
+    assert screen._download_btn.isEnabled()
+
+
+def test_stale_background_result_is_ignored_after_leaving_preview(screen, qapp, monkeypatch):
+    import threading
+    from screens import reports
+    from services import report_store
+
+    release = threading.Event()
+
+    def slow_build(report, new_since=None):
+        release.wait(5)
+        return "<html>STALE</html>"
+
+    monkeypatch.setattr(reports, "_build_report_html", slow_build)
+    screen._async_generation = True
+    screen._generate_and_preview(report_store.new_report(report_store.REPORT_TYPE_LMV, "Abandoned"))
+    screen._leave_preview()                       # user goes back before it finishes
+    release.set()
+    for _ in range(40):
+        qapp.processEvents()
+    assert screen._last_rendered_html is None or "STALE" not in screen._last_rendered_html
+    assert screen._stack.currentWidget() is screen._gallery_page

@@ -146,10 +146,11 @@ def test_build_strategy_report_pages_renders_sector_distribution(monkeypatch):
     classification = emv_report_data.classify_strategy("strat-1", date(2026, 1, 12))
     pages = emv_report_data.build_strategy_report_pages(classification)
 
-    # Small result: everything now flows onto one page (no forced page break).
-    assert len(pages) == 1
-    assert "ABB" in pages[0]
-    assert "Above 150" in pages[0]
+    # Content flows (no forced page break): summary, sector table, stock map, stock table.
+    joined = "".join(pages)
+    assert len(pages) <= 2
+    assert "ABB" in joined and "Above 150" in joined
+    assert "Stocks Matched by Sector" in joined and "Stock Map" in joined
 
 
 def test_build_strategy_report_html_handles_no_qualifying_stocks(monkeypatch):
@@ -208,3 +209,62 @@ def test_stock_report_shows_sector_legend_and_level_change_basis(monkeypatch):
 def test_level_change_basis_is_blank_without_two_values():
     assert emv_report_data._level_change_basis("DT", []) == ""
     assert emv_report_data._level_change_basis("DT", [{"value": 1.0}]) == ""
+
+
+# ── EMV strategy report: sector %, sector ordering, bubble map (issue #63) ──
+
+def _fake_classification():
+    def row(sym, sector, score=100.0, **vals):
+        return {"symbol": sym, "sector": sector, "values": vals, "score": {"score": score, "max_score": 100.0}}
+    return {
+        "strategy": {"name": "S", "category": "Daily"}, "as_of_date": date(2026, 1, 12),
+        "headers": ["Symbol", "Sector"], "sector_totals": {"FINANCE": 20, "IT": 4, "AUTO": 8},
+        "rows": [
+            row("AAA", "IT", **{"WEEK % CHANGE": 2.0, "% CHG PDC AND OPEN": 0.5}),
+            row("BBB", "FINANCE", **{"WEEK % CHANGE": -1.0, "% CHG PDC AND OPEN": 1.5}),
+            row("CCC", "FINANCE", **{"WEEK % CHANGE": 3.0, "% CHG PDC AND OPEN": -0.5}),
+            row("DDD", "AUTO"),
+        ],
+    }
+
+
+def test_sector_breakdown_gives_matched_total_and_percent_most_matched_first():
+    out = emv_report_data.sector_breakdown(_fake_classification())
+    assert [(d["sector"], d["matched"], d["total"]) for d in out] == [
+        ("FINANCE", 2, 20), ("AUTO", 1, 8), ("IT", 1, 4)]
+    assert out[0]["pct"] == 10.0 and out[2]["pct"] == 25.0
+
+
+def test_strategy_report_lists_stocks_grouped_by_largest_sector_first():
+    html = "".join(emv_report_data.build_strategy_report_pages(_fake_classification()))
+    assert "% matched" in html and "10%" in html and "25%" in html
+    body = html[html.rindex("Qualifying Stocks"):]
+    assert body.index("BBB") < body.index("DDD") < body.index("AAA")      # FINANCE, AUTO, IT
+    assert body.index("CCC") < body.index("DDD")
+
+
+def test_strategy_bubble_uses_chosen_axes_and_skips_rows_without_values():
+    colors = {"IT": "#111111", "FINANCE": "#222222"}
+    svg = emv_report_data.strategy_bubble_svg(
+        _fake_classification(), "WEEK % CHANGE", "% CHG PDC AND OPEN", colors)
+    assert svg.count("<circle") == 3                 # DDD has no metric values -> skipped
+    assert "WEEK % CHANGE" in svg and "% CHG PDC AND OPEN" in svg
+    html = "".join(emv_report_data.build_strategy_report_pages(
+        _fake_classification(), bubble_x="MONTH % CHANGE", bubble_y="DAY % CHANGE"))
+    assert "Stock Map — MONTH % CHANGE vs DAY % CHANGE" in html
+
+
+def test_classify_strategy_uses_latest_synced_day_on_or_before_a_weekend_as_of(monkeypatch):
+    from services import inception_strategy_store
+
+    _seed("ABB_I", date(2026, 1, 1), 10, start_price=200)      # trading days only (Mon-Fri)
+    strategy = {"id": "s", "name": "Above 150", "active": True, "category": "Daily",
+                "columns": [], "row_filter": _cond_close_above(150)}
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [strategy])
+
+    saturday = date(2026, 1, 10)
+    assert saturday.weekday() == 5
+    classification = emv_report_data.classify_strategy("s", saturday)
+
+    assert [r["symbol"] for r in classification["rows"]] == ["ABB"]      # not an empty universe
+    assert classification["as_of_date"] < saturday                       # the real trading day used

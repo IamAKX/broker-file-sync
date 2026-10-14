@@ -20,8 +20,10 @@ download) stays real and testable for every type today, not a mock.
 
 from datetime import date, datetime, timedelta
 
+import threading
+
 import font_scale
-from PySide6.QtCore import QDate, Qt, QTimer
+from PySide6.QtCore import QDate, Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDateEdit, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QStackedWidget,
@@ -132,6 +134,7 @@ def _build_emv_html(report: dict) -> str:
         return emv_report_data.build_strategy_report_html(
             classification, doc_title=report.get("name", "EMV EOD Report"),
             columns=report.get("columns"),
+            bubble_x=subject.get("bubble_x"), bubble_y=subject.get("bubble_y"),
         )
 
     symbol = emv_report_data.resolve_symbol(subject.get("symbol", ""))
@@ -191,9 +194,20 @@ def _build_report_html(report: dict, new_since: datetime | None = None) -> str:
 
 
 class ReportsScreen(QWidget):
+    # (generation token, report, html or None, error text or None) — emitted
+    # from the report-building thread, delivered on the GUI thread.
+    _html_ready = Signal(int, object, object, object)
+
     def __init__(self, controller):
         super().__init__()
         self._controller = controller
+        # Building a report (EMV strategy: a whole-universe snapshot) can take
+        # many seconds; it runs on a worker thread so the window stays
+        # responsive. Tests that assert on the result straight after a call
+        # turn this off to build inline.
+        self._async_generation = True
+        self._generation_token = 0
+        self._html_ready.connect(self._on_html_ready)
         self._active_report: dict | None = None
         self._last_rendered_html: str | None = None
         # Fuku Live strategy reports regenerate on this timer while the
@@ -603,6 +617,20 @@ class ReportsScreen(QWidget):
         self._emv_as_of_date.setDisplayFormat("dd-MMM-yyyy")
         self._emv_as_of_date.setDate(QDate.currentDate())
         strat_lay.addWidget(self._emv_as_of_date)
+        strat_lay.addWidget(self._field_label("Stock map (bubble chart) axes"))
+        bubble_row = QHBoxLayout()
+        self._emv_bubble_x = QComboBox()
+        self._emv_bubble_y = QComboBox()
+        for combo in (self._emv_bubble_x, self._emv_bubble_y):
+            for metric in emv_report_data.BUBBLE_METRICS:
+                combo.addItem(metric, metric)
+        self._select_data(self._emv_bubble_x, emv_report_data.BUBBLE_DEFAULT_X)
+        self._select_data(self._emv_bubble_y, emv_report_data.BUBBLE_DEFAULT_Y)
+        bubble_row.addWidget(QLabel("X:"))
+        bubble_row.addWidget(self._emv_bubble_x, 1)
+        bubble_row.addWidget(QLabel("Y:"))
+        bubble_row.addWidget(self._emv_bubble_y, 1)
+        strat_lay.addLayout(bubble_row)
         strat_lay.addWidget(self._field_label(
             "Table columns (leave Selected empty for Stock / Sector / Fuku Score)"
         ))
@@ -771,6 +799,8 @@ class ReportsScreen(QWidget):
                 d = QDate.fromString(str(cfg.get("as_of_date") or ""), Qt.DateFormat.ISODate)
                 if d.isValid():
                     self._emv_as_of_date.setDate(d)
+                self._select_data(self._emv_bubble_x, cfg.get("bubble_x", emv_report_data.BUBBLE_DEFAULT_X))
+                self._select_data(self._emv_bubble_y, cfg.get("bubble_y", emv_report_data.BUBBLE_DEFAULT_Y))
                 self._emv_column_picker.set_columns(report.get("columns") or [])
             else:
                 self._emv_symbol_edit.setText(cfg.get("symbol", ""))
@@ -854,6 +884,8 @@ class ReportsScreen(QWidget):
                     "subtype": "strategy",
                     "strategy_id": self._emv_strategy_combo.currentData(),
                     "as_of_date": self._emv_as_of_date.date().toPython().isoformat(),
+                    "bubble_x": self._emv_bubble_x.currentData(),
+                    "bubble_y": self._emv_bubble_y.currentData(),
                 }
                 self._active_report["columns"] = self._emv_column_picker.columns()
             else:
@@ -968,22 +1000,68 @@ class ReportsScreen(QWidget):
         started = datetime.now()
         # First run: stocks entered within one refresh interval count as new.
         new_since = started - timedelta(minutes=refresh) if (_is_fuku_strategy_scope(report) and refresh) else None
-        try:
-            html = _build_report_html(report, new_since)
-        except Exception as exc:
-            QMessageBox.warning(self, "Report Generation Failed", f"Could not generate this report:\n\n{exc}")
+        self._refresh_timer.stop()
+        self._generation_token += 1
+        token = self._generation_token
+
+        if not self._async_generation:
+            try:
+                html = _build_report_html(report, new_since)
+            except Exception as exc:
+                QMessageBox.warning(self, "Report Generation Failed", f"Could not generate this report:\n\n{exc}")
+                return
+            self._finish_generation(report, html, started)
             return
+
+        self._set_generating(report)
+
+        def work():
+            try:
+                html, error = _build_report_html(report, new_since), None
+            except Exception as exc:  # shown to the user on the GUI thread
+                html, error = None, str(exc)
+            try:
+                self._html_ready.emit(token, report, html, error)
+            except RuntimeError:
+                pass  # the screen was destroyed while this was building
+
+        threading.Thread(target=work, name="report-generation", daemon=True).start()
+
+    def _set_generating(self, report: dict):
+        self._preview_title.setText(f'Generating "{report.get("name", "report")}"…')
+        self._preview_view.setHtml(
+            '<html><body style="font-family:sans-serif;color:#64748b;display:flex;align-items:center;'
+            'justify-content:center;height:90vh;font-size:16px;">Generating report — this can take a '
+            "moment for large strategies…</body></html>"
+        )
+        for btn in (self._download_btn, self._email_btn, self._edit_btn):
+            btn.setEnabled(False)
+        self._stack.setCurrentWidget(self._preview_page)
+
+    def _on_html_ready(self, token: int, report: dict, html, error):
+        if token != self._generation_token:
+            return  # a newer generation superseded this one
+        for btn in (self._download_btn, self._email_btn, self._edit_btn):
+            btn.setEnabled(True)
+        if error is not None:
+            QMessageBox.warning(self, "Report Generation Failed", f"Could not generate this report:\n\n{error}")
+            self._stack.setCurrentWidget(self._gallery_page)
+            return
+        self._finish_generation(report, html, datetime.now())
+
+    def _finish_generation(self, report: dict, html: str, started: datetime):
         self._last_rendered_html = html
         self._last_generated_at = started
         self._preview_title.setText(report.get("name", "Report Preview"))
         self._preview_view.setHtml(html)
         self._stack.setCurrentWidget(self._preview_page)
-        self._refresh_timer.stop()
+        refresh = int((report.get("subject_config") or {}).get("refresh_minutes") or 0)
         if _is_fuku_strategy_scope(report) and refresh:
             self._refresh_timer.start(refresh * 60_000)
 
     def _leave_preview(self):
         self._refresh_timer.stop()
+        self._generation_token += 1   # drop any generation still in flight
         self._stack.setCurrentWidget(self._gallery_page)
 
     def _auto_refresh_tick(self):

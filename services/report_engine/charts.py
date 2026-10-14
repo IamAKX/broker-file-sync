@@ -385,7 +385,7 @@ def price_ladder(levels: list, ref_price: float | None, width: int = 620) -> str
 
 
 def bubble_chart(points: list, width: int = 680, height: int = 320,
-                 x_label: str = "", y_label: str = "") -> str:
+                 x_label: str = "", y_label: str = "", y_is_percent: bool = True) -> str:
     """Scatter of bubbles. *points*: [{"label", "x", "y", "size", "color"}].
     Bubble radius scales with *size* (6-18px); color is caller-chosen (the
     Fuku report uses green/red by direction-adjusted % move). A zero line is
@@ -395,7 +395,7 @@ def bubble_chart(points: list, width: int = 680, height: int = 320,
     if not pts:
         return _no_data_svg(width, height)
 
-    pad_left, pad_right, pad_top, pad_bottom = 52, 20, 16, 38
+    pad_left, pad_right, pad_top, pad_bottom = 52, 20, 26, 38
     plot_w, plot_h = width - pad_left - pad_right, height - pad_top - pad_bottom
     xs, ys = [p["x"] for p in pts], [p["y"] for p in pts]
     x_lo, x_hi = min(xs), max(xs)
@@ -447,7 +447,7 @@ def bubble_chart(points: list, width: int = 680, height: int = 320,
         color = _esc(p.get("color", "#2979FF"))
         parts.append(
             f'<circle cx="{cx:.1f}" cy="{cy:.1f}" r="{r:.1f}" fill="{color}" fill-opacity="0.55" '
-            f'stroke="{color}" stroke-width="1"><title>{_esc(p.get("label", ""))}: {p["y"]:+.2f}%</title></circle>'
+            f'stroke="{color}" stroke-width="1"><title>{_esc(p.get("label", ""))}: {p["y"]:+.2f}{"%" if y_is_percent else ""}</title></circle>'
         )
         ly = cy - r - 3
         if all(abs(cx - ox) > 46 or abs(ly - oy) > 10 for ox, oy in placed_labels):
@@ -463,7 +463,7 @@ def bubble_chart(points: list, width: int = 680, height: int = 320,
         )
     if y_label:
         parts.append(
-            f'<text x="4" y="{pad_top - 4}" font-family="sans-serif" font-size="10" fill="#64748b">{_esc(y_label)}</text>'
+            f'<text x="4" y="10" font-family="sans-serif" font-size="10" fill="#64748b">{_esc(y_label)}</text>'
         )
     return (
         f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
