@@ -687,3 +687,114 @@ def test_emv_stock_wizard_edit_prefills_extra_columns_and_colour(screen):
     assert screen._emv_field_color == "#abcdef"
     assert screen._emv_extra_fields == [{"field": "WT", "color": "#654321"}]
     assert screen._emv_extra_list.count() == 1
+
+
+# ── EMV Trend-category report: wizard + category manager (issue #64) ─────
+
+def _trend_env(monkeypatch):
+    from services import config_store, inception_strategy_store
+    strategies = [
+        {"id": "s100", "name": "Above 100", "active": True, "category": "Daily", "columns": [],
+         "row_filter": [{"type": "col", "value": "CLOSE"}, {"type": "op", "value": ">"}, {"type": "num", "value": "100"}]},
+        {"id": "s999", "name": "Above 999", "active": True, "category": "Weekly", "columns": [],
+         "row_filter": [{"type": "col", "value": "CLOSE"}, {"type": "op", "value": ">"}, {"type": "num", "value": "999"}]},
+    ]
+    saved = {}
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: strategies)
+    monkeypatch.setattr(config_store, "load_json", lambda key, default=None: saved.get(key, default))
+    monkeypatch.setattr(config_store, "save_json", lambda key, value: saved.__setitem__(key, value))
+    return strategies, saved
+
+
+def test_category_manager_edits_save_rules_colour_and_new_categories(qapp, monkeypatch):
+    from screens.trend_category_dialog import TrendCategoryDialog
+    from services import trend_categories
+    from PySide6.QtCore import Qt
+
+    _, saved = _trend_env(monkeypatch)
+    dlg = TrendCategoryDialog()
+    assert dlg._category_list.count() == 9                       # spec's default set
+    dlg._category_list.setCurrentRow(0)                          # Bullish
+    dlg._name_edit.setText("Strong Bullish")
+    dlg._desc_edit.setText("monthly breakout")
+    dlg._color = "#112233"
+    dlg._active_check.setChecked(True)
+    monthly = dlg._tf_lists["Monthly"]
+    monthly.item(0).setCheckState(Qt.CheckState.Checked)         # Above 100
+    monthly.item(1).setCheckState(Qt.CheckState.Checked)         # Above 999
+
+    dlg._add_category()                                          # a 10th, custom category
+    assert dlg._category_list.count() == 10 and dlg._name_edit.text() == "New category"
+    dlg._name_edit.setText("Breakout")
+    dlg._move_category(-1)                                       # becomes 9th
+    dlg._save()
+
+    cats = trend_categories.load_all()
+    assert cats[0]["name"] == "Strong Bullish" and cats[0]["color"] == "#112233"
+    assert cats[0]["rules"]["Monthly"] == ["s100", "s999"] and cats[0]["rules"]["Daily"] == []
+    assert [c["name"] for c in cats][-2:] == ["Breakout", "Sideways"]
+
+
+def test_category_manager_rejects_duplicate_names(qapp, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from screens.trend_category_dialog import TrendCategoryDialog
+    from services import trend_categories
+
+    _, saved = _trend_env(monkeypatch)
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a[2])))
+    dlg = TrendCategoryDialog()
+    dlg._category_list.setCurrentRow(1)
+    dlg._name_edit.setText("bullish")                            # clashes with the first (case-insensitive)
+    dlg._save()
+    assert warned and "different name" in warned[0]
+    assert trend_categories._KEY not in saved                    # nothing was saved
+
+
+def test_emv_trend_wizard_saves_config_generates_report_and_prefills_on_edit(screen, qapp, monkeypatch):
+    from services import report_store, trend_categories
+    strategies, saved = _trend_env(monkeypatch)
+    _seed_bars("ABB_I", date.today() - timedelta(days=70), 45, start_price=200)
+    cats = trend_categories.load_all()
+    cats[0]["rules"]["Daily"] = ["s100"]
+    trend_categories.save_all(cats)
+
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    screen._select_data(screen._emv_subtype_combo, "trend")
+    assert not screen._emv_trend_frame.isHidden() and screen._emv_stock_frame.isHidden() and screen._emv_strategy_frame.isHidden()
+    assert screen._emv_trend_category.itemText(0) == "All categories"
+    assert [screen._emv_trend_timeframe.itemText(i) for i in range(4)] == ["Daily", "Weekly", "Monthly", "Quarterly"]
+    screen._select_data(screen._emv_trend_category, "bullish")
+    screen._select_data(screen._emv_trend_timeframe, "Daily")
+    screen._emv_trend_multi.setChecked(True)
+    screen._name_edit.setText("Trend")
+    screen._save_and_generate()
+    qapp.processEvents()
+
+    report = report_store.load_all()[0]
+    assert report["subject_config"]["subtype"] == "trend"
+    assert report["subject_config"]["category_id"] == "bullish" and report["subject_config"]["multi_timeframe"] is True
+    html = screen._last_rendered_html
+    assert "Trend — Bullish — Daily" in html and "ABB" in html
+    assert "<th>Weekly</th>" in html and "<th>Days True</th>" in html
+
+    screen._edit_report(report)
+    assert screen._emv_subtype_combo.currentData() == "trend"
+    assert screen._emv_trend_category.currentData() == "bullish" and screen._emv_trend_multi.isChecked()
+
+
+def test_category_manager_delete_and_reorder_never_overwrite_other_categories(qapp, monkeypatch):
+    from screens.trend_category_dialog import TrendCategoryDialog
+    from services import trend_categories
+
+    _trend_env(monkeypatch)
+    dlg = TrendCategoryDialog()
+    before = [c["name"] for c in dlg._cats]
+    dlg._category_list.setCurrentRow(2)
+    dlg._delete_category()                                       # remove "Bearish"
+    assert [c["name"] for c in dlg._cats] == before[:2] + before[3:]
+    dlg._category_list.setCurrentRow(0)
+    dlg._move_category(1)                                        # swap first two
+    assert [c["name"] for c in dlg._cats][:2] == [before[1], before[0]]
+    dlg._save()
+    assert [c["name"] for c in trend_categories.load_all()] == [before[1], before[0]] + before[3:]

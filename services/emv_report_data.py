@@ -463,3 +463,247 @@ def build_strategy_report_html(classification: dict, doc_title: str = "EMV EOD R
                                 bubble_y: str | None = None) -> str:
     return templates.render_report(
         build_strategy_report_pages(classification, columns, bubble_x, bubble_y), doc_title=doc_title)
+
+
+
+# ── Trend-category report (issue #64; spec sections 5-7) ───────────────────
+
+DAYS_TRUE_LOOKBACK = 30   # trading days checked backwards for the "Days True" streak
+
+
+def _passing_rows(strategy: dict, headers: list, data: list) -> tuple:
+    """(new_headers, {symbol: row_dict}) for the rows of *data* that pass
+    *strategy*'s row_filter (apply_strategies drops the rest)."""
+    from services import inception_formula_variable_store
+
+    new_headers, new_data = apply_strategies(
+        [dict(strategy, active=True)], headers, data, day_history={}, include_streak_columns=False,
+        symbol_col="Symbol", variable_store=inception_formula_variable_store,
+    )
+    sym_idx = new_headers.index("Symbol")
+    return new_headers, {row[sym_idx]: dict(zip(new_headers, row)) for row in new_data}
+
+
+def _recent_rows(display_symbol: str, as_of_date: date, lookback: int, cache: dict | None) -> tuple:
+    """(window_bars, headers, rows) — the stock's last *lookback* trading days
+    rebuilt the way the universe snapshot builds a row (Group A/B + Formula
+    Builder values). Memoized in *cache* per stock: several strategies for the
+    same stock then share one forward pass over its history."""
+    from services import inception_bars_store, inception_compute_service, inception_settings
+
+    if cache is not None and display_symbol in cache:
+        return cache[display_symbol]
+    raw = resolve_symbol(display_symbol)
+    bars = inception_bars_store.bars_for_symbol(raw, date_to=as_of_date)
+    if not bars:
+        result = ([], ["Symbol"], [])
+    else:
+        window = bars[-lookback:]
+        derived = inception_compute_service._compute_rows_for_days(bars, inception_settings.load(), window)
+        index_of = {b["trade_date"]: i for i, b in enumerate(bars)}
+        rows = []
+        for bar in window:
+            values = dict(derived.get(bar["trade_date"], {}))
+            i = index_of[bar["trade_date"]]
+            values.update(compute_for_bars(raw, bars[max(0, i - 300): i + 1]))
+            values["Symbol"] = display_symbol
+            values["__date__"] = bar["trade_date"].isoformat()
+            rows.append(values)
+        headers = sorted({k for r in rows for k in r} - {"Symbol"})
+        result = (window, ["Symbol"] + headers, rows)
+    if cache is not None:
+        cache[display_symbol] = result
+    return result
+
+
+def trailing_days_true(display_symbol: str, strategy: dict, as_of_date: date,
+                       lookback: int = DAYS_TRUE_LOOKBACK, cache: dict | None = None) -> int:
+    """How many consecutive trading days, ending at *as_of_date*, *strategy*'s
+    row_filter has been true for this stock (capped at *lookback*). Each of
+    the last *lookback* days is run through the strategy; a filter that
+    depends on other stocks (an _ALL aggregate) or on live day-history reads
+    blank here, exactly as it does for the snapshot. Pass a shared *cache*
+    dict when checking several strategies for the same stock."""
+    from services import inception_formula_variable_store
+
+    window, headers, rows = _recent_rows(display_symbol, as_of_date, lookback, cache)
+    if not window:
+        return 0
+    new_headers, new_data = apply_strategies(
+        [dict(strategy, active=True)], headers, [[r.get(h) for h in headers] for r in rows],
+        day_history={}, include_streak_columns=False, symbol_col="Symbol",
+        variable_store=inception_formula_variable_store,
+    )
+    date_idx = new_headers.index("__date__")
+    true_dates = {row[date_idx] for row in new_data}
+    streak = 0
+    for bar in reversed(window):
+        if bar["trade_date"].isoformat() in true_dates:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+def classify_trend(category_id: str | None, timeframe: str, as_of_date: date,
+                   multi_timeframe: bool = False, with_days_true: bool = True) -> dict:
+    """Stocks in trend category *category_id* (None = every active category)
+    for *timeframe*: those passing ANY of that cell's Inception strategies.
+    One universe snapshot serves every strategy involved; *multi_timeframe*
+    additionally labels each stock with its categories on all four
+    timeframes (never assuming one timeframe overrides another).
+
+    Returns {"as_of_date", "timeframe", "categories" (the selected ones),
+    "all_categories", "rows": [{"symbol","sector","values","categories",
+    "tf_labels","days_true"}], "headers", "sector_totals", "missing"
+    (strategy ids that no longer exist)}."""
+    from services import inception_bars_store, inception_strategy_store, trend_categories
+
+    as_of_date = inception_bars_store.latest_synced_date_on_or_before(as_of_date) or as_of_date
+    all_cats = trend_categories.active_categories()
+    selected = [c for c in all_cats if category_id in (None, "", c["id"])]
+    strategies = {s.get("id"): s for s in inception_strategy_store.load_all()}
+
+    needed = set(trend_categories.all_strategy_ids(selected, [timeframe]))
+    if multi_timeframe:
+        needed |= set(trend_categories.all_strategy_ids(all_cats))
+    missing = sorted(sid for sid in needed if sid not in strategies)
+    needed = [sid for sid in needed if sid in strategies]
+
+    result = {"as_of_date": as_of_date, "timeframe": timeframe, "categories": selected,
+              "all_categories": all_cats, "rows": [], "headers": [], "sector_totals": {}, "missing": missing}
+    if not needed:
+        return result
+
+    headers, data = universe_snapshot(as_of_date)
+    sector_idx = headers.index("Sector") if "Sector" in headers else None
+    if sector_idx is not None:
+        for universe_row in data:
+            name = universe_row[sector_idx]
+            result["sector_totals"][name] = result["sector_totals"].get(name, 0) + 1
+
+    passing, out_headers = {}, headers
+    for sid in needed:
+        new_headers, by_symbol = _passing_rows(strategies[sid], headers, data)
+        passing[sid] = by_symbol
+        if len(new_headers) > len(out_headers):
+            out_headers = new_headers
+    result["headers"] = out_headers
+
+    def categories_in(symbol: str, tf: str, cats: list) -> list:
+        return [c["name"] for c in cats
+                if any(symbol in passing.get(sid, {}) for sid in trend_categories.strategies_for(c, tf))]
+
+    symbols = {}
+    for cat in selected:
+        for sid in trend_categories.strategies_for(cat, timeframe):
+            for symbol, row_dict in passing.get(sid, {}).items():
+                symbols.setdefault(symbol, row_dict)
+
+    rows_cache: dict = {}
+    for symbol in sorted(symbols):
+        row_dict = symbols[symbol]
+        row = {
+            "symbol": symbol, "sector": row_dict.get("Sector", "—"), "values": row_dict,
+            "categories": categories_in(symbol, timeframe, selected),
+            "tf_labels": ({tf: categories_in(symbol, tf, all_cats) for tf in trend_categories.TIMEFRAMES}
+                          if multi_timeframe else {}),
+            "days_true": None,
+        }
+        if with_days_true:
+            streaks = [
+                trailing_days_true(symbol, strategies[sid], as_of_date, cache=rows_cache)
+                for cat in selected for sid in trend_categories.strategies_for(cat, timeframe)
+                if sid in strategies and symbol in passing.get(sid, {})
+            ]
+            row["days_true"] = max(streaks) if streaks else 0
+        result["rows"].append(row)
+    return result
+
+
+def trend_category_counts(classification: dict) -> list:
+    """[{"name","color","count"}] — stocks per selected category, in the
+    categories' display order (a stock in two categories counts in both)."""
+    counts = {}
+    for row in classification["rows"]:
+        for name in row["categories"]:
+            counts[name] = counts.get(name, 0) + 1
+    return [{"name": c["name"], "color": c.get("color", "#2979FF"), "count": counts.get(c["name"], 0)}
+            for c in classification["categories"] if counts.get(c["name"], 0)]
+
+
+def _trend_cell(column: str, row: dict, timeframes: list) -> str:
+    if column == "Stock":
+        return row["symbol"]
+    if column == "Sector":
+        return row["sector"]
+    if column == "Category":
+        return ", ".join(row["categories"]) or "—"
+    if column == "Days True":
+        days = row.get("days_true")
+        if days is None:
+            return "—"
+        return f"{days}+" if days >= DAYS_TRUE_LOOKBACK else str(days)
+    if column in timeframes:
+        return ", ".join(row["tf_labels"].get(column, [])) or "—"
+    value = (row.get("values") or {}).get(column)
+    if value is None:
+        return "—"
+    return f"{value:,.2f}" if isinstance(value, float) else str(value)
+
+
+def build_trend_report_pages(classification: dict, columns: list | None = None,
+                             show_days_true: bool = True, multi_timeframe: bool = False) -> list:
+    from services import trend_categories
+
+    rows, timeframe = classification["rows"], classification["timeframe"]
+    selected = classification["categories"]
+    title_cat = selected[0]["name"] if len(selected) == 1 else "All categories"
+    counts = trend_category_counts(classification)
+    segments = [{"label": c["name"], "value": c["count"], "color": c["color"]} for c in counts]
+    donut = charts.donut_chart(segments, center_label=str(len(rows)), center_sublabel="Stocks")
+
+    kpis = (
+        templates.kpi_card("Stocks", str(len(rows)))
+        + templates.kpi_card("Timeframe", timeframe)
+        + templates.kpi_card("Category", title_cat)
+        + templates.kpi_card("As Of", classification["as_of_date"].strftime("%d-%b-%Y"))
+    )
+    notes = ""
+    if classification.get("missing"):
+        notes = (f'<p class="fk-note">{len(classification["missing"])} strategy(ies) linked to these categories '
+                 "no longer exist and were skipped.</p>")
+    page1 = (
+        templates.report_header(
+            "EMV EOD Report", f"Trend — {title_cat} — {timeframe} — {classification['as_of_date'].strftime('%d-%b-%Y')}",
+            datetime.now(),
+        )
+        + f'<div class="kpi-row">{kpis}</div>' + notes
+        + (templates.section("Category Distribution", f'<div class="chart-row"><div>{donut}</div>{charts.donut_legend(segments)}</div>')
+           if segments else "")
+    )
+    if not rows:
+        empty = ('<p style="color:#64748b;font-size:11px;">No stocks currently fall in this category for this '
+                 "timeframe — check that strategies are linked to it (Manage categories).</p>")
+        return [page1 + templates.section("Stocks", empty)]
+
+    timeframes = trend_categories.TIMEFRAMES
+    fixed = ["Stock", "Sector", "Category"] + (["Days True"] if show_days_true else []) \
+        + (timeframes if multi_timeframe else [])
+    extra = [c for c in (columns or []) if c not in fixed and c in (classification.get("headers") or [])]
+    cols = fixed + extra
+
+    # Grouped by sector (most stocks first), like the strategy report.
+    sector_counts: dict = {}
+    for r in rows:
+        sector_counts[r["sector"]] = sector_counts.get(r["sector"], 0) + 1
+    order = {name: i for i, (name, _n) in enumerate(sorted(sector_counts.items(), key=lambda kv: (-kv[1], kv[0])))}
+    ordered = sorted(rows, key=lambda r: (order[r["sector"]], r["symbol"]))
+    table_rows = [[_trend_cell(c, r, timeframes) for c in cols] for r in ordered]
+    return _flow_pages(page1, _STRATEGY_PAGE1_USED_PX, [], f"Stocks — {title_cat} ({timeframe})", cols, table_rows, set())
+
+
+def build_trend_report_html(classification: dict, doc_title: str = "EMV EOD Report", columns: list | None = None,
+                            show_days_true: bool = True, multi_timeframe: bool = False) -> str:
+    return templates.render_report(
+        build_trend_report_pages(classification, columns, show_days_true, multi_timeframe), doc_title=doc_title)

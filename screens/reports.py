@@ -129,6 +129,19 @@ def _build_emv_html(report: dict) -> str:
     subject = report.get("subject_config", {})
     subtype = subject.get("subtype", "stock")
 
+    if subtype == "trend":
+        as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else date.today()
+        classification = emv_report_data.classify_trend(
+            subject.get("category_id"), subject.get("timeframe", "Daily"), as_of,
+            multi_timeframe=bool(subject.get("multi_timeframe")),
+            with_days_true=bool(subject.get("days_true", True)),
+        )
+        return emv_report_data.build_trend_report_html(
+            classification, doc_title=report.get("name", "EMV EOD Report"), columns=report.get("columns"),
+            show_days_true=bool(subject.get("days_true", True)),
+            multi_timeframe=bool(subject.get("multi_timeframe")),
+        )
+
     if subtype == "strategy":
         as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else date.today()
         classification = emv_report_data.classify_strategy(subject.get("strategy_id"), as_of)
@@ -578,9 +591,10 @@ class ReportsScreen(QWidget):
         ]
 
     def _on_emv_subtype_changed(self):
-        is_strategy = self._emv_subtype_combo.currentData() == "strategy"
-        self._emv_stock_frame.setVisible(not is_strategy)
-        self._emv_strategy_frame.setVisible(is_strategy)
+        subtype = self._emv_subtype_combo.currentData()
+        self._emv_stock_frame.setVisible(subtype == "stock")
+        self._emv_strategy_frame.setVisible(subtype == "strategy")
+        self._emv_trend_frame.setVisible(subtype == "trend")
 
     @staticmethod
     def _emv_symbol_choices() -> list:
@@ -592,6 +606,21 @@ class ReportsScreen(QWidget):
         except Exception:
             names = set()
         return sorted(n for n in names if n)
+
+    def _refresh_trend_category_choices(self):
+        from services import trend_categories
+        current = self._emv_trend_category.currentData()
+        self._emv_trend_category.clear()
+        self._emv_trend_category.addItem("All categories", None)
+        for cat in trend_categories.load_all():
+            if cat.get("active"):
+                self._emv_trend_category.addItem(cat["name"], cat["id"])
+        self._select_data(self._emv_trend_category, current)
+
+    def _open_trend_category_manager(self):
+        from screens.trend_category_dialog import TrendCategoryDialog
+        TrendCategoryDialog(parent=self).exec()
+        self._refresh_trend_category_choices()
 
     def _pick_primary_field_color(self):
         chosen = QColorDialog.getColor(QColor(self._emv_field_color), self, "Field line colour")
@@ -647,6 +676,7 @@ class ReportsScreen(QWidget):
         self._emv_subtype_combo = QComboBox()
         self._emv_subtype_combo.addItem("Stock — historical field trend", "stock")
         self._emv_subtype_combo.addItem("Strategy — qualifying stocks", "strategy")
+        self._emv_subtype_combo.addItem("Trend category — stocks by classification", "trend")
         self._emv_subtype_combo.currentIndexChanged.connect(self._on_emv_subtype_changed)
         layout.addWidget(self._emv_subtype_combo)
 
@@ -776,6 +806,43 @@ class ReportsScreen(QWidget):
                 "No Inception strategies configured yet — create one in Inception > Strategy Builder."
             ))
         layout.addWidget(self._emv_strategy_frame)
+
+        # Trend-category subtype fields (issue #64)
+        self._emv_trend_frame = QFrame()
+        trend_lay = QVBoxLayout(self._emv_trend_frame)
+        trend_lay.setContentsMargins(0, 0, 0, 0)
+        trend_lay.setSpacing(8)
+        trend_lay.addWidget(self._field_label("Trend category"))
+        cat_row = QHBoxLayout()
+        self._emv_trend_category = QComboBox()
+        cat_row.addWidget(self._emv_trend_category, 1)
+        manage_cats_btn = QPushButton("Manage categories…")
+        manage_cats_btn.clicked.connect(self._open_trend_category_manager)
+        cat_row.addWidget(manage_cats_btn)
+        trend_lay.addLayout(cat_row)
+        trend_lay.addWidget(self._field_label("Timeframe"))
+        self._emv_trend_timeframe = QComboBox()
+        from services import trend_categories
+        for tf in trend_categories.TIMEFRAMES:
+            self._emv_trend_timeframe.addItem(tf, tf)
+        trend_lay.addWidget(self._emv_trend_timeframe)
+        trend_lay.addWidget(self._field_label("As Of Date"))
+        self._emv_trend_as_of = QDateEdit()
+        self._emv_trend_as_of.setCalendarPopup(True)
+        self._emv_trend_as_of.setDisplayFormat("dd-MMM-yyyy")
+        self._emv_trend_as_of.setDate(QDate.currentDate())
+        trend_lay.addWidget(self._emv_trend_as_of)
+        self._emv_trend_days_true = QCheckBox("Show how many days each stock has been true (Days True)")
+        self._emv_trend_days_true.setChecked(True)
+        trend_lay.addWidget(self._emv_trend_days_true)
+        self._emv_trend_multi = QCheckBox("Show each stock's classification across all timeframes (Daily / Weekly / Monthly / Quarterly)")
+        trend_lay.addWidget(self._emv_trend_multi)
+        trend_lay.addWidget(self._field_label("Extra evidence columns (leave Selected empty for none)"))
+        self._emv_trend_columns = ColumnPickerWidget([c for c in hfs.available_fields()])
+        trend_lay.addWidget(self._emv_trend_columns)
+        layout.addWidget(self._emv_trend_frame)
+        self._refresh_trend_category_choices()
+        self._on_emv_subtype_changed()
 
         self._on_emv_subtype_changed()
 
@@ -930,7 +997,16 @@ class ReportsScreen(QWidget):
         elif rtype == report_store.REPORT_TYPE_EMV:
             subtype = cfg.get("subtype", "stock")
             self._select_data(self._emv_subtype_combo, subtype)
-            if subtype == "strategy":
+            if subtype == "trend":
+                self._select_data(self._emv_trend_category, cfg.get("category_id"))
+                self._select_data(self._emv_trend_timeframe, cfg.get("timeframe", "Daily"))
+                d = QDate.fromString(str(cfg.get("as_of_date") or ""), Qt.DateFormat.ISODate)
+                if d.isValid():
+                    self._emv_trend_as_of.setDate(d)
+                self._emv_trend_days_true.setChecked(bool(cfg.get("days_true", True)))
+                self._emv_trend_multi.setChecked(bool(cfg.get("multi_timeframe")))
+                self._emv_trend_columns.set_columns(report.get("columns") or [])
+            elif subtype == "strategy":
                 self._select_data(self._emv_strategy_combo, cfg.get("strategy_id"))
                 d = QDate.fromString(str(cfg.get("as_of_date") or ""), Qt.DateFormat.ISODate)
                 if d.isValid():
@@ -1012,7 +1088,17 @@ class ReportsScreen(QWidget):
             self._active_report["columns"] = self._lmv_column_picker.columns()
         elif self._active_report["type"] == report_store.REPORT_TYPE_EMV:
             subtype = self._emv_subtype_combo.currentData()
-            if subtype == "strategy":
+            if subtype == "trend":
+                self._active_report["subject_config"] = {
+                    "subtype": "trend",
+                    "category_id": self._emv_trend_category.currentData(),
+                    "timeframe": self._emv_trend_timeframe.currentData(),
+                    "as_of_date": self._emv_trend_as_of.date().toPython().isoformat(),
+                    "days_true": self._emv_trend_days_true.isChecked(),
+                    "multi_timeframe": self._emv_trend_multi.isChecked(),
+                }
+                self._active_report["columns"] = self._emv_trend_columns.columns()
+            elif subtype == "strategy":
                 if self._emv_strategy_combo.count() == 0:
                     QMessageBox.warning(
                         self, "No Strategies",

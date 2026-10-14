@@ -302,3 +302,149 @@ def test_stock_report_without_extras_is_unchanged_in_title_and_data():
     data = emv_report_data.build_stock_report_data("DIVISLAB_I", "DT", date(2026, 1, 12), date(2026, 1, 30))
     assert data["extras"] == []
     assert "DT vs Close" in "".join(emv_report_data.build_stock_report_pages(data))
+
+
+# ── Trend-category report (issue #64) ────────────────────────────────────
+
+def _trend_setup(monkeypatch):
+    """Two stocks with rising closes (ABB higher than SBIN) and three
+    strategies: close>150 (ABB only), close>100 (both), close>10000 (nobody)."""
+    from services import inception_strategy_store, trend_categories, config_store
+
+    _seed("ABB_I", date(2026, 1, 1), 40, start_price=200)       # always > 150
+    _seed("SBIN_I", date(2026, 1, 1), 40, start_price=100)      # 100 -> 139: only > 100 from day 2
+    strategies = [
+        {"id": "s150", "name": "Above 150", "active": True, "category": "Daily", "columns": [], "row_filter": _cond_close_above(150)},
+        {"id": "s100", "name": "Above 100", "active": True, "category": "Weekly", "columns": [], "row_filter": _cond_close_above(100)},
+        {"id": "snever", "name": "Never", "active": True, "category": "Daily", "columns": [], "row_filter": _cond_close_above(10000)},
+    ]
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: strategies)
+    saved = {}
+    monkeypatch.setattr(config_store, "load_json", lambda key, default=None: saved.get(key, default))
+    monkeypatch.setattr(config_store, "save_json", lambda key, value: saved.__setitem__(key, value))
+
+    bull = trend_categories.new_category("Bullish", "#16a34a")
+    bull["rules"]["Daily"] = ["s150", "snever"]
+    bull["rules"]["Weekly"] = ["s100"]
+    sideways = trend_categories.new_category("Sideways", "#64748b")
+    sideways["rules"]["Daily"] = ["s100"]
+    ghost = trend_categories.new_category("Ghost", "#000000")
+    ghost["rules"]["Daily"] = ["deleted-strategy"]
+    inactive = trend_categories.new_category("Off", "#111111")
+    inactive["active"] = False
+    inactive["rules"]["Daily"] = ["s100"]
+    trend_categories.save_all([bull, sideways, ghost, inactive])
+    return strategies
+
+
+def test_trend_category_store_defaults_roundtrip_and_helpers(monkeypatch):
+    from services import trend_categories, config_store
+    saved = {}
+    monkeypatch.setattr(config_store, "load_json", lambda key, default=None: saved.get(key, default))
+    monkeypatch.setattr(config_store, "save_json", lambda key, value: saved.__setitem__(key, value))
+
+    defaults = trend_categories.load_all()
+    assert [c["name"] for c in defaults][:3] == ["Bullish", "Extremely Bullish", "Bearish"]
+    assert len(defaults) == 9 and all(set(c["rules"]) == set(trend_categories.TIMEFRAMES) for c in defaults)
+
+    custom = trend_categories.new_category("Breakout", "#abcdef", "my own")
+    custom["rules"]["Monthly"] = ["a", "b"]
+    trend_categories.save_all(defaults + [custom])
+    reloaded = trend_categories.load_all()
+    assert reloaded[-1]["name"] == "Breakout" and reloaded[-1]["order"] == 9
+    assert trend_categories.strategies_for(reloaded[-1], "Monthly") == ["a", "b"]
+    assert trend_categories.all_strategy_ids([reloaded[-1]], ["Daily"]) == []
+    assert trend_categories.all_strategy_ids([reloaded[-1]]) == ["a", "b"]
+    reloaded[0]["active"] = False
+    trend_categories.save_all(reloaded)
+    assert "Bullish" not in [c["name"] for c in trend_categories.active_categories()]
+
+
+def test_classify_trend_unions_a_categorys_strategies_for_the_timeframe(monkeypatch):
+    _trend_setup(monkeypatch)
+    result = emv_report_data.classify_trend("bullish", "Daily", date(2026, 2, 20), with_days_true=False)
+    assert [r["symbol"] for r in result["rows"]] == ["ABB"]              # s150 passes ABB; "never" adds nobody
+    assert result["rows"][0]["categories"] == ["Bullish"]
+
+    weekly = emv_report_data.classify_trend("bullish", "Weekly", date(2026, 2, 20), with_days_true=False)
+    assert sorted(r["symbol"] for r in weekly["rows"]) == ["ABB", "SBIN"]       # s100 passes both
+
+
+def test_classify_trend_all_categories_skips_inactive_and_reports_missing_strategies(monkeypatch):
+    _trend_setup(monkeypatch)
+    result = emv_report_data.classify_trend(None, "Daily", date(2026, 2, 20), with_days_true=False)
+    cats = {r["symbol"]: r["categories"] for r in result["rows"]}
+    assert cats["ABB"] == ["Bullish", "Sideways"] and cats["SBIN"] == ["Sideways"]
+    assert "Off" not in {c for cs in cats.values() for c in cs}           # inactive category ignored
+    assert result["missing"] == ["deleted-strategy"]                      # Ghost's strategy no longer exists
+
+
+def test_classify_trend_multi_timeframe_labels_each_timeframe_independently(monkeypatch):
+    _trend_setup(monkeypatch)
+    result = emv_report_data.classify_trend("sideways", "Daily", date(2026, 2, 20), multi_timeframe=True, with_days_true=False)
+    sbin = next(r for r in result["rows"] if r["symbol"] == "SBIN")
+    assert sbin["tf_labels"]["Daily"] == ["Sideways"]
+    assert sbin["tf_labels"]["Weekly"] == ["Bullish"]       # classified differently on Weekly (s100 -> Bullish)
+    assert sbin["tf_labels"]["Monthly"] == [] and sbin["tf_labels"]["Quarterly"] == []
+
+
+def test_trailing_days_true_counts_consecutive_days_ending_at_as_of(monkeypatch):
+    strategies = _trend_setup(monkeypatch)
+    s130 = {"id": "s130", "name": "Above 130", "active": True, "category": "Daily", "columns": [],
+            "row_filter": _cond_close_above(130)}
+    as_of = date(2026, 2, 20)
+    bars = inception_bars_store.bars_for_symbol("SBIN_I", date_to=as_of)
+    expected = 0
+    for bar in reversed(bars):            # SBIN rises every day, so >130 holds on the trailing run only
+        if bar["close"] > 130:
+            expected += 1
+        else:
+            break
+    assert 0 < expected < len(bars)
+    assert emv_report_data.trailing_days_true("SBIN", s130, as_of) == expected
+    assert emv_report_data.trailing_days_true("ABB", strategies[0], as_of) == emv_report_data.DAYS_TRUE_LOOKBACK   # true throughout -> capped
+    assert emv_report_data.trailing_days_true("NOPE", strategies[0], as_of) == 0
+
+
+def test_trend_report_pages_show_distribution_days_true_and_multi_timeframe_columns(monkeypatch):
+    _trend_setup(monkeypatch)
+    result = emv_report_data.classify_trend(None, "Daily", date(2026, 2, 20), multi_timeframe=True)
+    html = "".join(emv_report_data.build_trend_report_pages(result, show_days_true=True, multi_timeframe=True))
+    assert "Category Distribution" in html and "Bullish" in html and "Sideways" in html
+    for header in ("Stock", "Sector", "Category", "Days True", "Daily", "Weekly", "Monthly", "Quarterly"):
+        assert f"<th>{header}</th>" in html
+    assert "30+" in html                                   # ABB has been true for the whole lookback
+    assert "skipped" in html                               # the deleted strategy is called out
+
+    plain = "".join(emv_report_data.build_trend_report_pages(result, show_days_true=False, multi_timeframe=False))
+    assert "<th>Days True</th>" not in plain and "<th>Weekly</th>" not in plain
+
+
+def test_trend_report_handles_a_category_with_no_matching_stocks(monkeypatch):
+    _trend_setup(monkeypatch)
+    from services import trend_categories
+    cats = trend_categories.load_all()
+    cats.append(trend_categories.new_category("Empty", "#222222"))
+    trend_categories.save_all(cats)
+    result = emv_report_data.classify_trend("empty", "Monthly", date(2026, 2, 20))
+    html = "".join(emv_report_data.build_trend_report_pages(result))
+    assert "No stocks currently fall in this category" in html
+
+
+def test_trailing_days_true_shares_one_history_pass_across_strategies(monkeypatch):
+    strategies = _trend_setup(monkeypatch)
+    calls = []
+    real = emv_report_data._recent_rows
+
+    def counting(display_symbol, as_of_date, lookback, cache):
+        if cache is None or display_symbol not in cache:
+            calls.append(display_symbol)
+        return real(display_symbol, as_of_date, lookback, cache)
+
+    monkeypatch.setattr(emv_report_data, "_recent_rows", counting)
+    cache = {}
+    as_of = date(2026, 2, 20)
+    a = emv_report_data.trailing_days_true("ABB", strategies[0], as_of, cache=cache)
+    b = emv_report_data.trailing_days_true("ABB", strategies[1], as_of, cache=cache)
+    assert calls == ["ABB"]                       # the second strategy reused the cached rows
+    assert a == b == emv_report_data.DAYS_TRUE_LOOKBACK
