@@ -28,12 +28,39 @@ _RAW_FIELDS = {
 _WARMUP_DAYS = 150
 
 
+def _canonical_field(field: str) -> str:
+    """*field* matched case-insensitively against the known codes (codes like
+    "Max Pain"/"OR.High" are mixed-case, "DT"/"CLOSE" upper); an unknown name
+    is returned stripped, as typed, and just resolves to blank values."""
+    field = (field or "").strip()
+    lookup = {c.upper(): c for c in available_fields()}
+    return lookup.get(field.upper(), field)
+
+
+def _derived_codes() -> set:
+    from services import inception_columns
+    return set(inception_columns.GROUP_A) | set(inception_columns.GROUP_B)
+
+
 def available_fields() -> list:
     """Every field code this module can build a trend for: the raw OHLCV
-    fields plus every services.formula_engine.FORMULA_CODES code (Day/Week/
-    Month Top-Bottom, Camarilla pivots, pivot points, ...)."""
-    from services import formula_engine
-    return list(_RAW_FIELDS.keys()) + list(formula_engine.FORMULA_CODES)
+    fields, every services.formula_engine.FORMULA_CODES code (Day/Week/Month
+    Top-Bottom, Camarilla pivots, pivot points, ...), the synced Reliable
+    Software / NiftyInvest / Market Profile columns (PATP, CWTO, Max Pain,
+    VAH/POC/VAL, OR.High/Low, Avg Rate, ...), Inception's own Group A/B
+    columns (52WH, 52WL, ATH, CQO, gap codes, ...) and every configured
+    Indicator Library output (RSI(14), ...)."""
+    from services import (
+        formula_engine, inception_columns, inception_formula_builder_columns as ifbc, indicator_library,
+    )
+    codes = list(_RAW_FIELDS.keys()) + list(formula_engine.FORMULA_CODES)
+    codes += list(ifbc._LMV_SYNCED_CODE_MAP) + ["Avg Rate"] + list(ifbc._LMV_SYNCED_NEW_FIELD_MAP)
+    codes += inception_columns.all_derived_codes()
+    try:
+        codes += indicator_library.field_codes()
+    except Exception:
+        pass  # config store unreachable — the built-in columns still work
+    return list(dict.fromkeys(codes))
 
 
 def historical_field_series(symbol: str, field: str, date_from: date, date_to: date) -> list:
@@ -46,13 +73,24 @@ def historical_field_series(symbol: str, field: str, date_from: date, date_to: d
     doesn't apply here since a genuinely missing trading day is excluded,
     not silently zero.
     """
-    field = (field or "").strip().upper()
-    warm_start = date_from - timedelta(days=_WARMUP_DAYS)
+    field = _canonical_field(field)
+    raw_key = _RAW_FIELDS.get(field)
+    derived = field in _derived_codes()
+    # Group A/B values (52-week high, all-time high, gap areas, ...) look back
+    # a year or the symbol's whole history, so they need every bar, not just
+    # the short warm-up the Formula Builder codes get.
+    warm_start = None if derived else date_from - timedelta(days=_WARMUP_DAYS)
     bars = inception_bars_store.bars_for_symbol(symbol, warm_start, date_to)
     if not bars:
         return []
 
-    raw_key = _RAW_FIELDS.get(field)
+    derived_by_date = {}
+    if derived:
+        from services import inception_compute_service, inception_settings
+        window_bars = [b for b in bars if b["trade_date"] >= date_from]
+        derived_by_date = inception_compute_service._compute_rows_for_days(
+            bars, inception_settings.load(), window_bars)
+
     series = []
     for i, bar in enumerate(bars):
         trade_date = bar["trade_date"]
@@ -60,6 +98,8 @@ def historical_field_series(symbol: str, field: str, date_from: date, date_to: d
             continue
         if raw_key is not None:
             value = bar.get(raw_key)
+        elif derived:
+            value = (derived_by_date.get(trade_date) or {}).get(field)
         else:
             value = compute_for_bars(symbol, bars[: i + 1]).get(field)
         series.append({"date": trade_date, "value": value, "close": bar.get("close")})

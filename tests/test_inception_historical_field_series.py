@@ -93,3 +93,43 @@ def test_condition_stats_empty_series():
     stats = hfs.condition_stats([])
     assert stats["current_state"] is None
     assert stats["level_change"] is None
+
+
+# ── EMV picker columns: Group A/B, synced and indicator fields (issue #60) ──
+
+def test_available_fields_include_group_a_b_synced_and_indicator_columns(monkeypatch):
+    from services import indicator_library
+    monkeypatch.setattr(indicator_library, "field_codes", lambda: ["RSI(14)"])
+    fields = hfs.available_fields()
+    for expected in ("CLOSE", "DT", "52WH", "52WL", "ATH", "DAY UF GUP 1",     # raw, formula, Group A/B
+                     "PATP", "CWTO", "Avg Rate", "Max Pain", "VAH", "OR.High",   # synced Reliable/Nifty/Profile
+                     "RSI(14)"):
+        assert expected in fields, expected
+    assert len(fields) == len(set(fields))
+
+
+def test_group_a_field_trend_matches_a_rolling_52_week_high():
+    # 300 rising trading days: the 52-week high on each date is that day's own high
+    _seed_rising_prices("ABB", date(2025, 1, 1), 300)
+    series = hfs.historical_field_series("ABB", "52WH", date(2026, 1, 5), date(2026, 2, 27))
+    assert len(series) > 10
+    highs = {b["trade_date"]: b["high"] for b in inception_bars_store.bars_for_symbol("ABB")}
+    for entry in series:
+        assert entry["value"] == pytest.approx(highs[entry["date"]])
+
+
+def test_field_names_resolve_case_insensitively_including_mixed_case_codes():
+    _seed_rising_prices("ABB", date(2026, 1, 1), 12)
+    lower = hfs.historical_field_series("ABB", "close", date(2026, 1, 5), date(2026, 1, 16))
+    upper = hfs.historical_field_series("ABB", "CLOSE", date(2026, 1, 5), date(2026, 1, 16))
+    assert [e["value"] for e in lower] == [e["value"] for e in upper]
+    assert hfs._canonical_field("max pain") == "Max Pain"
+    assert hfs._canonical_field("or.high") == "OR.High"
+    assert hfs._canonical_field("not a field") == "not a field"
+
+
+def test_synced_field_trend_reads_each_bars_own_synced_value():
+    rows = _seed_rising_prices("ABB", date(2026, 1, 1), 8)
+    inception_bars_store.upsert_bars([dict(r, patp=100.0 + i) for i, r in enumerate(rows)])
+    series = hfs.historical_field_series("ABB", "PATP", date(2026, 1, 1), date(2026, 1, 12))
+    assert [e["value"] for e in series] == [100.0 + i for i in range(len(series))]
