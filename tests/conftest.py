@@ -37,6 +37,32 @@ def pytest_configure(config):
     gc.disable()
 
 
+_QTHREADS: "weakref.WeakSet" = None
+
+
+def _track_qthreads():
+    """Record every QThread (and subclass) at construction so the per-test
+    cleanup below only touches those, instead of scanning every object in
+    the process — with the cyclic GC disabled (see pytest_configure) the
+    live-object count only grows, so a gc.get_objects() scan after each test
+    made the whole suite quadratic (~85% of its runtime)."""
+    global _QTHREADS
+    import weakref
+    from PySide6.QtCore import QThread
+
+    _QTHREADS = weakref.WeakSet()
+    original_init = QThread.__init__
+
+    def tracking_init(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        try:
+            _QTHREADS.add(self)
+        except TypeError:
+            pass  # not weak-referenceable — nothing we could stop later
+
+    QThread.__init__ = tracking_init
+
+
 @pytest.fixture(autouse=True)
 def _stop_leaked_qthreads():
     """Several screens (LiveViewerWindow, the Inception HMV/View-by-Date
@@ -49,13 +75,11 @@ def _stop_leaked_qthreads():
     screens deterministically on the main thread, so stopping any
     still-running QThread after each test keeps that from ever reaching a
     destructor. Cheap: quit() on a thread sitting in exec() returns at
-    once. gc.get_objects() still enumerates tracked objects with the
-    collector disabled (see pytest_configure)."""
+    once."""
+    if _QTHREADS is None:
+        _track_qthreads()
     yield
-    from PySide6.QtCore import QThread
-    for obj in gc.get_objects():
-        if not isinstance(obj, QThread):
-            continue
+    for obj in list(_QTHREADS):
         try:
             if obj.isRunning():
                 obj.quit()
