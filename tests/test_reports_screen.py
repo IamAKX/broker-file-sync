@@ -630,3 +630,60 @@ def test_light_theme_report_has_no_dark_overrides_and_edit_prefills_theme(screen
     saved["visuals"]["theme"] = "dark"
     screen._edit_report(saved)
     assert screen._report_theme_combo.currentData() == "dark"              # prefilled when editing
+
+
+# ── EMV stock report: stock dropdown + several columns with colours (issue #61) ──
+
+def test_emv_stock_wizard_offers_a_stock_dropdown_with_type_ahead_and_free_text(screen):
+    from services import report_store
+    _seed_bars("DIVISLAB_I", date(2026, 1, 1), 5)
+    _seed_bars("ABB_I", date(2026, 1, 1), 5)
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    combo = screen._emv_symbol_edit
+    items = [combo.itemText(i) for i in range(combo.count())]
+    assert "DIVISLAB" in items and "ABB" in items and items == sorted(items)
+    combo.setText("whatever")                       # still free text, same API as before
+    assert combo.text() == "whatever"
+
+
+def test_emv_stock_wizard_adds_recolours_removes_extra_columns_and_saves_them(screen, qapp):
+    from services import report_store
+    _seed_bars("DIVISLAB_I", date.today() - timedelta(days=70), 45)     # the report window is relative to today
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    screen._name_edit.setText("Multi")
+    screen._emv_symbol_edit.setText("DIVISLAB")
+    screen._select_data(screen._emv_field_combo, "DT")
+
+    for code in ("WT", "MT", "DT", "WT"):           # DT == primary and the second WT are ignored
+        screen._select_data(screen._emv_extra_combo, code)
+        screen._add_extra_field()
+    assert [e["field"] for e in screen._emv_extra_fields] == ["WT", "MT"]
+
+    screen._emv_extra_list.setCurrentRow(1)
+    screen._emv_extra_fields[1]["color"] = "#112233"      # (what the colour dialog does on accept)
+    screen._set_primary_field_color("#ff0000")
+    screen._emv_extra_list.setCurrentRow(0)
+    screen._remove_extra_field()
+    assert [e["field"] for e in screen._emv_extra_fields] == ["MT"]
+
+    screen._select_data(screen._emv_extra_combo, "WT")
+    screen._add_extra_field()
+    screen._save_and_generate()
+    qapp.processEvents()
+
+    cfg = report_store.load_all()[0]["subject_config"]
+    assert cfg["field_color"] == "#ff0000"
+    assert [e["field"] for e in cfg["extra_fields"]] == ["MT", "WT"]
+    assert cfg["extra_fields"][0]["color"] == "#112233"
+    assert "DT, MT, WT vs Close" in screen._last_rendered_html and 'stroke="#ff0000"' in screen._last_rendered_html
+
+
+def test_emv_stock_wizard_edit_prefills_extra_columns_and_colour(screen):
+    from services import report_store
+    report = report_store.new_report(report_store.REPORT_TYPE_EMV, "Saved")
+    report["subject_config"] = {"subtype": "stock", "symbol": "ABB", "field": "DT", "n_periods": 20,
+                                "field_color": "#abcdef", "extra_fields": [{"field": "WT", "color": "#654321"}]}
+    screen._edit_report(report)
+    assert screen._emv_field_color == "#abcdef"
+    assert screen._emv_extra_fields == [{"field": "WT", "color": "#654321"}]
+    assert screen._emv_extra_list.count() == 1

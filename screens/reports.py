@@ -24,8 +24,9 @@ import threading
 
 import font_scale
 from PySide6.QtCore import QDate, Qt, QTimer, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QDateEdit, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QCheckBox, QColorDialog, QComboBox, QCompleter, QDateEdit, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -147,9 +148,14 @@ def _build_emv_html(report: dict) -> str:
     date_to = date.today()
     date_from = date_to - timedelta(days=int(n_periods * 1.6) + 10)
     indicator_ids = subject.get("indicator_ids") or []
-    data = emv_report_data.build_stock_report_data(symbol, field, date_from, date_to, indicator_ids)
+    data = emv_report_data.build_stock_report_data(
+        symbol, field, date_from, date_to, indicator_ids,
+        extra_fields=subject.get("extra_fields"), field_color=subject.get("field_color"),
+    )
     if len(data["series"]) > n_periods:
         data["series"] = data["series"][-n_periods:]
+        for extra in data["extras"]:
+            extra["series"] = extra["series"][-n_periods:]
         data["stats"] = hfs.condition_stats(data["series"])
         # Re-derive against the trimmed window so plots match the shown periods.
         data["indicator_sections"] = emv_report_data.indicator_sections_for(
@@ -195,6 +201,35 @@ def _build_report_html(report: dict, new_since: datetime | None = None) -> str:
     # Light/Dark chosen in the wizard — applied here so every report type
     # (and the live auto-refresh) gets it, both in the preview and the PDF.
     return templates.apply_theme(html, (report.get("visuals") or {}).get("theme"))
+
+
+class _SymbolCombo(QComboBox):
+    """Editable stock dropdown with type-ahead. setText/text mirror QLineEdit
+    so the wizard code (and tests) written against the old free-text field
+    keep working — the user can still type any symbol that isn't listed."""
+
+    def __init__(self, symbols: list):
+        super().__init__()
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.addItems(symbols)
+        self.setCurrentIndex(-1)
+        self.lineEdit().setPlaceholderText("Select or type a stock, e.g. DIVISLAB")
+        completer = QCompleter(symbols, self)
+        completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        completer.setFilterMode(Qt.MatchFlag.MatchContains)
+        self.setCompleter(completer)
+
+    def setText(self, text: str):
+        self.setCurrentText(text)
+
+    def text(self) -> str:
+        return self.currentText()
+
+
+def _color_button_style(color: str) -> str:
+    return (f"QPushButton {{ background: {color}; border: 1px solid #64748b; border-radius: 4px; "
+            f"min-width: 26px; max-width: 26px; min-height: 22px; max-height: 22px; }}")
 
 
 class ReportsScreen(QWidget):
@@ -547,6 +582,62 @@ class ReportsScreen(QWidget):
         self._emv_stock_frame.setVisible(not is_strategy)
         self._emv_strategy_frame.setVisible(is_strategy)
 
+    @staticmethod
+    def _emv_symbol_choices() -> list:
+        """Display names of every stock with synced bars, sorted — the
+        stock dropdown's choices."""
+        try:
+            from services import inception_bars_store
+            names = {emv_report_data._display_symbol(sym) for sym in inception_bars_store.available_symbols()}
+        except Exception:
+            names = set()
+        return sorted(n for n in names if n)
+
+    def _pick_primary_field_color(self):
+        chosen = QColorDialog.getColor(QColor(self._emv_field_color), self, "Field line colour")
+        if chosen.isValid():
+            self._set_primary_field_color(chosen.name())
+
+    def _set_primary_field_color(self, color: str):
+        self._emv_field_color = color
+        self._emv_field_color_btn.setStyleSheet(_color_button_style(color))
+
+    def _add_extra_field(self):
+        name = self._emv_extra_combo.currentData()
+        primary = self._emv_field_combo.currentData()
+        if not name or name == primary or any(e["field"] == name for e in self._emv_extra_fields):
+            return
+        palette = emv_report_data.EXTRA_FIELD_COLORS
+        self._emv_extra_fields.append({"field": name, "color": palette[len(self._emv_extra_fields) % len(palette)]})
+        self._refresh_extra_field_list()
+
+    def _selected_extra_row(self) -> int:
+        return self._emv_extra_list.currentRow()
+
+    def _recolor_extra_field(self):
+        row = self._selected_extra_row()
+        if row < 0:
+            return
+        chosen = QColorDialog.getColor(QColor(self._emv_extra_fields[row]["color"]), self, "Column line colour")
+        if chosen.isValid():
+            self._emv_extra_fields[row]["color"] = chosen.name()
+            self._refresh_extra_field_list(select=row)
+
+    def _remove_extra_field(self):
+        row = self._selected_extra_row()
+        if row >= 0:
+            del self._emv_extra_fields[row]
+            self._refresh_extra_field_list()
+
+    def _refresh_extra_field_list(self, select: int = -1):
+        self._emv_extra_list.clear()
+        for entry in self._emv_extra_fields:
+            item = QListWidgetItem(f'■  {entry["field"]}   ({entry["color"]})')
+            item.setForeground(QColor(entry["color"]))
+            self._emv_extra_list.addItem(item)
+        if select >= 0:
+            self._emv_extra_list.setCurrentRow(select)
+
     def _populate_emv_fields(self):
         from services import inception_strategy_store
 
@@ -565,10 +656,10 @@ class ReportsScreen(QWidget):
         stock_lay.setContentsMargins(0, 0, 0, 0)
         stock_lay.setSpacing(8)
         stock_lay.addWidget(self._field_label("Stock Symbol"))
-        self._emv_symbol_edit = QLineEdit()
-        self._emv_symbol_edit.setPlaceholderText("e.g. DIVISLAB")
+        self._emv_symbol_edit = _SymbolCombo(self._emv_symbol_choices())
         stock_lay.addWidget(self._emv_symbol_edit)
-        stock_lay.addWidget(self._field_label("Field"))
+        stock_lay.addWidget(self._field_label("Field (compared against Close)"))
+        field_row = QHBoxLayout()
         self._emv_field_combo = QComboBox()
         for code in hfs.available_fields():
             self._emv_field_combo.addItem(code, code)
@@ -576,7 +667,38 @@ class ReportsScreen(QWidget):
         idx = self._emv_field_combo.findData("DT")
         if idx >= 0:
             self._emv_field_combo.setCurrentIndex(idx)
-        stock_lay.addWidget(self._emv_field_combo)
+        field_row.addWidget(self._emv_field_combo, 1)
+        self._emv_field_color = emv_report_data.DEFAULT_FIELD_COLOR
+        self._emv_field_color_btn = QPushButton()
+        self._emv_field_color_btn.setToolTip("Line colour for this field")
+        self._emv_field_color_btn.setStyleSheet(_color_button_style(self._emv_field_color))
+        self._emv_field_color_btn.clicked.connect(self._pick_primary_field_color)
+        field_row.addWidget(self._emv_field_color_btn)
+        stock_lay.addLayout(field_row)
+
+        stock_lay.addWidget(self._field_label("Compare with more columns (each plotted on the same chart)"))
+        self._emv_extra_fields: list = []
+        add_row = QHBoxLayout()
+        self._emv_extra_combo = QComboBox()
+        for code in hfs.available_fields():
+            self._emv_extra_combo.addItem(code, code)
+        add_row.addWidget(self._emv_extra_combo, 1)
+        add_extra_btn = QPushButton("Add")
+        add_extra_btn.clicked.connect(self._add_extra_field)
+        add_row.addWidget(add_extra_btn)
+        stock_lay.addLayout(add_row)
+        self._emv_extra_list = QListWidget()
+        self._emv_extra_list.setMaximumHeight(110)
+        stock_lay.addWidget(self._emv_extra_list)
+        extra_btn_row = QHBoxLayout()
+        recolor_btn = QPushButton("Colour…")
+        recolor_btn.clicked.connect(self._recolor_extra_field)
+        remove_btn = QPushButton("Remove")
+        remove_btn.clicked.connect(self._remove_extra_field)
+        extra_btn_row.addWidget(recolor_btn)
+        extra_btn_row.addWidget(remove_btn)
+        extra_btn_row.addStretch()
+        stock_lay.addLayout(extra_btn_row)
         stock_lay.addWidget(self._field_label("Number of Periods (trading days)"))
         self._emv_periods_spin = QSpinBox()
         self._emv_periods_spin.setRange(2, 500)
@@ -819,6 +941,9 @@ class ReportsScreen(QWidget):
             else:
                 self._emv_symbol_edit.setText(cfg.get("symbol", ""))
                 self._select_data(self._emv_field_combo, cfg.get("field"))
+                self._set_primary_field_color(cfg.get("field_color") or emv_report_data.DEFAULT_FIELD_COLOR)
+                self._emv_extra_fields = emv_report_data.normalize_extra_fields(cfg.get("extra_fields"))
+                self._refresh_extra_field_list()
                 if cfg.get("n_periods"):
                     self._emv_periods_spin.setValue(int(cfg["n_periods"]))
                 chosen = set(cfg.get("indicator_ids") or [])
@@ -911,6 +1036,8 @@ class ReportsScreen(QWidget):
                     "subtype": "stock",
                     "symbol": symbol,
                     "field": self._emv_field_combo.currentData(),
+                    "field_color": self._emv_field_color,
+                    "extra_fields": [dict(e) for e in self._emv_extra_fields],
                     "n_periods": self._emv_periods_spin.value(),
                     "indicator_ids": self._selected_indicator_ids(),
                 }

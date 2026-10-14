@@ -79,15 +79,40 @@ def indicator_sections_for(symbol: str, series: list, instance_ids: list | None)
     return indicator_charts.build_indicator_sections(bars, [e["date"] for e in series], chosen)
 
 
+DEFAULT_FIELD_COLOR = "#2979FF"
+EXTRA_FIELD_COLORS = ["#D97706", "#8250df", "#0891b2", "#bf3989", "#65a30d", "#dc2626", "#0f766e"]
+
+
+def normalize_extra_fields(extra_fields: list | None) -> list:
+    """[{"field", "color"}] from the saved config — entries given as a bare
+    field name or without a colour get a default colour from a fixed rotation
+    (never the primary's blue or Close's green), blanks/dupes dropped."""
+    out, seen = [], set()
+    for i, entry in enumerate(extra_fields or []):
+        item = entry if isinstance(entry, dict) else {"field": entry}
+        name = str(item.get("field") or "").strip()
+        if not name or name.upper() in seen:
+            continue
+        seen.add(name.upper())
+        out.append({"field": name, "color": item.get("color") or EXTRA_FIELD_COLORS[len(out) % len(EXTRA_FIELD_COLORS)]})
+    return out
+
+
 def build_stock_report_data(symbol: str, field: str, date_from: date, date_to: date,
-                             indicator_ids: list | None = None) -> dict:
+                             indicator_ids: list | None = None, extra_fields: list | None = None,
+                             field_color: str | None = None) -> dict:
     series = hfs.historical_field_series(symbol, field, date_from, date_to)
     stats = hfs.condition_stats(series)
     current_value = next((e["value"] for e in reversed(series) if e["value"] is not None), None)
     current_close = series[-1]["close"] if series else None
+    extras = [
+        dict(e, series=hfs.historical_field_series(symbol, e["field"], date_from, date_to))
+        for e in normalize_extra_fields(extra_fields) if e["field"].upper() != str(field).upper()
+    ]
     return {
         "symbol": symbol, "field": field, "date_from": date_from, "date_to": date_to,
         "sector": inception_sector.sector_for(symbol),
+        "field_color": field_color or DEFAULT_FIELD_COLOR, "extras": extras,
         "series": series, "stats": stats,
         "current_value": current_value, "current_close": current_close,
         "indicator_ids": indicator_ids or [],
@@ -181,13 +206,21 @@ def build_stock_report_pages(data: dict) -> list:
         )
     )
 
+    extras = data.get("extras") or []
     if series:
+        n = len(series)
+        plotted = [{"label": data["field"], "points": [e["value"] for e in series],
+                    "color": data.get("field_color") or DEFAULT_FIELD_COLOR}]
+        for extra in extras:
+            # Same bars => same dates; align by date anyway so a column with a
+            # gap can never shift against the others.
+            by_date = {e["date"]: e["value"] for e in extra["series"]}
+            plotted.append({"label": extra["field"], "color": extra["color"],
+                            "points": [by_date.get(e["date"]) for e in series]})
+        plotted.append({"label": "Close", "points": [e["close"] for e in series],
+                        "color": "#16a34a", "dashed": True})
         line = charts.line_chart(
-            [
-                {"label": data["field"], "points": [e["value"] for e in series], "color": "#2979FF"},
-                {"label": "Close", "points": [e["close"] for e in series], "color": "#16a34a", "dashed": True},
-            ],
-            x_labels=[e["date"].strftime("%d-%b") for e in series], y_label="Value",
+            plotted, x_labels=[e["date"].strftime("%d-%b") for e in series], y_label="Value",
         )
         bar = charts.bar_chart(
             [e["date"].strftime("%d-%b") for e in series], [e["value"] for e in series], color="#2979FF",
@@ -205,7 +238,8 @@ def build_stock_report_pages(data: dict) -> list:
             datetime.now(),
         )
         + f'<div class="kpi-row">{kpis}</div>'
-        + templates.section(f'{data["field"]} vs Close', line)
+        + templates.section(
+            f'{", ".join([data["field"]] + [e["field"] for e in extras])} vs Close', line)
     )
 
     def _state_pill(entry):

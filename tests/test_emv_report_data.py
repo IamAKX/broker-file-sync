@@ -268,3 +268,37 @@ def test_classify_strategy_uses_latest_synced_day_on_or_before_a_weekend_as_of(m
 
     assert [r["symbol"] for r in classification["rows"]] == ["ABB"]      # not an empty universe
     assert classification["as_of_date"] < saturday                       # the real trading day used
+
+
+# ── Multiple columns plotted against Close, configurable colours (issue #61) ──
+
+def test_normalize_extra_fields_defaults_colours_and_drops_blanks_and_dupes():
+    out = emv_report_data.normalize_extra_fields(
+        ["WT", {"field": "mt", "color": "#123456"}, {"field": "WT"}, "", None, {"field": "  "}])
+    assert out == [{"field": "WT", "color": emv_report_data.EXTRA_FIELD_COLORS[0]},
+                   {"field": "mt", "color": "#123456"}]
+    assert emv_report_data.normalize_extra_fields(None) == []
+
+
+def test_stock_report_plots_primary_extras_and_close_with_their_colours():
+    _seed("DIVISLAB_I", date(2026, 1, 1), 30)
+    data = emv_report_data.build_stock_report_data(
+        "DIVISLAB_I", "DT", date(2026, 1, 12), date(2026, 1, 30),
+        extra_fields=[{"field": "WT", "color": "#aa00aa"}, "MT", "DT"],       # DT == primary -> not duplicated
+        field_color="#ff8800",
+    )
+    assert [e["field"] for e in data["extras"]] == ["WT", "MT"]
+    assert all(len(e["series"]) == len(data["series"]) for e in data["extras"])
+
+    html = "".join(emv_report_data.build_stock_report_pages(data))
+    assert "DT, WT, MT vs Close" in html
+    for label in (">DT<", ">WT<", ">MT<", ">Close<"):                        # legend names every line
+        assert label in html
+    assert 'stroke="#ff8800"' in html and 'stroke="#aa00aa"' in html          # user-chosen colours drawn
+
+
+def test_stock_report_without_extras_is_unchanged_in_title_and_data():
+    _seed("DIVISLAB_I", date(2026, 1, 1), 30)
+    data = emv_report_data.build_stock_report_data("DIVISLAB_I", "DT", date(2026, 1, 12), date(2026, 1, 30))
+    assert data["extras"] == []
+    assert "DT vs Close" in "".join(emv_report_data.build_stock_report_pages(data))
