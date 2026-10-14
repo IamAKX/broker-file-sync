@@ -594,3 +594,39 @@ def test_stale_background_result_is_ignored_after_leaving_preview(screen, qapp, 
         qapp.processEvents()
     assert screen._last_rendered_html is None or "STALE" not in screen._last_rendered_html
     assert screen._stack.currentWidget() is screen._gallery_page
+
+
+# ── Light / dark report theme (issue #59) ────────────────────────────────
+
+def test_wizard_saves_report_theme_and_dark_is_applied_to_the_generated_html(screen, qapp):
+    from services import report_store
+    from services.strategy_alerts import state_store
+
+    _seed_open(state_store, "INFY")
+    screen._start_new_report(report_store.REPORT_TYPE_FUKU_LIVE)
+    screen._name_edit.setText("Dark one")
+    assert screen._report_theme_combo.currentData() == "light"             # default
+    screen._select_data(screen._report_theme_combo, "dark")
+
+    screen._save_and_generate()
+    qapp.processEvents()
+
+    assert report_store.load_all()[0]["visuals"]["theme"] == "dark"
+    assert "--text-primary: #E2E8F0" in screen._last_rendered_html
+
+
+def test_light_theme_report_has_no_dark_overrides_and_edit_prefills_theme(screen, qapp):
+    from services import report_store
+    from services.strategy_alerts import state_store
+
+    _seed_open(state_store, "INFY")
+    screen._start_new_report(report_store.REPORT_TYPE_FUKU_LIVE)
+    screen._name_edit.setText("Light one")
+    screen._save_and_generate()
+    qapp.processEvents()
+    assert "--text-primary: #E2E8F0" not in screen._last_rendered_html
+
+    saved = report_store.load_all()[0]
+    saved["visuals"]["theme"] = "dark"
+    screen._edit_report(saved)
+    assert screen._report_theme_combo.currentData() == "dark"              # prefilled when editing

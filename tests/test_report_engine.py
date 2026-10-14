@@ -198,3 +198,24 @@ def test_line_chart_legend_wraps_onto_extra_rows_for_many_series():
 def test_bar_chart_shows_y_axis_values():
     svg = charts.bar_chart(["a", "b"], [4.0, -2.0])
     assert ">4.0<" in svg and ">0.0<" in svg and ">-2.0<" in svg
+
+
+# ── light / dark report themes (issue #59) ───────────────────────────────
+
+def test_apply_theme_dark_injects_overrides_and_light_is_a_noop():
+    doc = templates.render_report(["<p>x</p>"], doc_title="T")
+    assert templates.apply_theme(doc, "light") == doc
+    assert templates.apply_theme(doc, None) == doc
+    dark = templates.apply_theme(doc, "dark")
+    assert dark != doc and doc in dark.replace(templates._DARK_CSS, "")      # only a CSS addition
+    assert "--text-primary: #E2E8F0" in dark and "background: #0F172A" in dark
+    assert dark.count("<style>") == 1                                        # same single stylesheet
+
+
+def test_dark_theme_remaps_the_svg_chart_colours():
+    svg_doc = templates.render_report([charts.line_chart(
+        [{"label": "A", "points": [1, 2, 3], "color": "#2979FF"}], x_labels=["a", "b", "c"])])
+    dark = templates.apply_theme(svg_doc, "dark")
+    for light_value in ('fill="#64748b"', 'stroke="#E2E8F0"'):
+        assert light_value in svg_doc                    # the chart itself still draws light-theme colours...
+    assert 'svg text[fill="#64748b"]' in dark and 'svg line[stroke="#E2E8F0"]' in dark   # ...remapped by CSS

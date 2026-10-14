@@ -185,12 +185,16 @@ def _build_fuku_live_html(report: dict, new_since: datetime | None = None) -> st
 def _build_report_html(report: dict, new_since: datetime | None = None) -> str:
     report_type = report.get("type")
     if report_type == report_store.REPORT_TYPE_LMV:
-        return _build_lmv_html(report)
-    if report_type == report_store.REPORT_TYPE_EMV:
-        return _build_emv_html(report)
-    if report_type == report_store.REPORT_TYPE_FUKU_LIVE:
-        return _build_fuku_live_html(report, new_since)
-    return _build_placeholder_html(report)
+        html = _build_lmv_html(report)
+    elif report_type == report_store.REPORT_TYPE_EMV:
+        html = _build_emv_html(report)
+    elif report_type == report_store.REPORT_TYPE_FUKU_LIVE:
+        html = _build_fuku_live_html(report, new_since)
+    else:
+        html = _build_placeholder_html(report)
+    # Light/Dark chosen in the wizard — applied here so every report type
+    # (and the live auto-refresh) gets it, both in the preview and the PDF.
+    return templates.apply_theme(html, (report.get("visuals") or {}).get("theme"))
 
 
 class ReportsScreen(QWidget):
@@ -382,6 +386,15 @@ class ReportsScreen(QWidget):
         self._recipients_edit = QLineEdit()
         self._recipients_edit.setPlaceholderText("name@example.com; name2@example.com")
         card_lay.addWidget(self._recipients_edit)
+
+        theme_label = QLabel("Report appearance")
+        theme_label.setFont(font_scale.font(font_scale.SMALL, False))
+        theme_label.setStyleSheet(f"color: {t.get('text_secondary')};")
+        card_lay.addWidget(theme_label)
+        self._report_theme_combo = QComboBox()
+        self._report_theme_combo.addItem("Light", "light")
+        self._report_theme_combo.addItem("Dark", "dark")
+        card_lay.addWidget(self._report_theme_combo)
 
         self._type_fields_layout = QVBoxLayout()
         self._type_fields_layout.setSpacing(10)
@@ -751,6 +764,7 @@ class ReportsScreen(QWidget):
         self._recipients_edit.setText(
             "; ".join(report_recipients.load_recipients(report["id"])) if prefill else ""
         )
+        self._select_data(self._report_theme_combo, (report.get("visuals") or {}).get("theme", "light"))
 
         _clear_layout(self._type_fields_layout)
         if report_type == report_store.REPORT_TYPE_LMV:
@@ -927,6 +941,7 @@ class ReportsScreen(QWidget):
                 self._active_report["subject_config"] = {"strategy_id": strategy_id, "symbol": symbol}
 
         self._active_report["name"] = name
+        self._active_report.setdefault("visuals", {})["theme"] = self._report_theme_combo.currentData()
         report_store.save_report(self._active_report)
         report_recipients.save_recipients(self._active_report["id"], parsed)
 

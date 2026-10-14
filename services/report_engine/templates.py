@@ -184,6 +184,49 @@ table.report-table tr:last-child td {{ border-bottom: none; }}
 """
 
 
+# Dark-mode overrides appended after _BASE_CSS (see apply_theme). The charts
+# are inline SVG with fixed light-theme colours, so they're remapped here by
+# attribute selector rather than threading a theme through every chart call.
+_DARK_CSS = """
+:root {
+  --text-primary: #E2E8F0; --text-secondary: #94A3B8; --header-blue: #93C5FD; --border: #334155;
+  --positive-text: #86EFAC; --positive-bg: #14532D; --negative-text: #FCA5A5; --negative-bg: #7F1D1D;
+  --neutral-bg: #1E293B; --accent-amber: #FBBF24;
+}
+html, body { background: #0B1220; }
+.report-page { background: #0F172A; }
+.status-pill.warning { background: #78350F; color: #FCD34D; }
+.fk-card { background: #111C33; }
+.fk-card.fk-new { box-shadow: 0 0 0 2px #78350F; }
+.fk-kpi.score .v { color: #FBBF24; }
+.fk-badge.open { color: #93C5FD; background: #1E3A8A; border-color: #2563EB; }
+.fk-badge.win { color: #86EFAC; background: #14532D; border-color: #16A34A; }
+.fk-badge.loss { color: #FCA5A5; background: #7F1D1D; border-color: #DC2626; }
+.fk-badge.cancel { color: #FCD34D; background: #78350F; border-color: #D97706; }
+.fk-chip.ok { color: #86EFAC; background: #14532D; }
+.fk-chip.no { color: #FCA5A5; background: #7F1D1D; }
+.fk-tl-item::before { border-color: #0F172A; box-shadow: 0 0 0 1px #475569; }
+.fk-tl { border-left-color: #475569; }
+svg text[fill="#334155"], svg text[fill="#0f172a"], svg text[fill="#0F172A"] { fill: #E2E8F0; }
+svg text[fill="#64748b"], svg text[fill="#94a3b8"] { fill: #94A3B8; }
+svg line[stroke="#E2E8F0"] { stroke: #334155; }
+svg line[stroke="#CBD5E1"] { stroke: #475569; }
+svg line[stroke="#0F172A"] { stroke: #E2E8F0; }
+svg circle[fill="#fff"], svg circle[fill="#ffffff"] { fill: #0F172A; }
+"""
+
+THEMES = ("light", "dark")
+
+
+def apply_theme(html_doc: str, theme: str | None) -> str:
+    """Re-skin a finished report document for *theme* ("light" is a no-op).
+    Dark appends _DARK_CSS after the base stylesheet, so every report type
+    gets it without its own builder knowing about themes."""
+    if theme != "dark":
+        return html_doc
+    return html_doc.replace("</style>", _DARK_CSS + "</style>", 1)
+
+
 def esc(value) -> str:
     return html.escape(str(value)) if value is not None else ""
 
