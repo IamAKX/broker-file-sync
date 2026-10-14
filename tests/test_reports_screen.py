@@ -104,7 +104,7 @@ def test_save_and_generate_persists_report_and_shows_preview(screen, qapp):
 
     assert screen._stack.currentWidget() is screen._preview_page
     assert "My Weekly LMV Report" in screen._last_rendered_html
-    assert "Page 1 of 2" in screen._last_rendered_html
+    assert "Page 1 of" in screen._last_rendered_html
 
 
 def test_save_and_generate_rejects_invalid_recipient(screen, monkeypatch):

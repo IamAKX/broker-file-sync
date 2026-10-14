@@ -15,7 +15,7 @@ it contributes no yield and isn't part of win/loss counts.
 
 from datetime import date, datetime, timedelta
 
-from services import report_columns, report_metrics, strategy_store
+from services import emv_report_data, report_columns, report_metrics, strategy_store
 from services.report_engine import charts, templates
 from services.strategy_alerts import state_store
 
@@ -45,31 +45,41 @@ def sector_distribution(summary: dict) -> list:
     ]
 
 
-def compare_stocks(summary: dict, symbols: tuple | None = None) -> list | None:
-    """Stock-vs-stock stats (avg yield, win rate, trade count) for two
-    stocks traded under this strategy (requirements §4.3). Defaults to
-    ALKEM vs TATASTEEL when both traded, else the two most-traded stocks.
-    None when fewer than two stocks traded."""
-    by_symbol: dict = {}
+def compare_assets(summary: dict, mode: str = "stock", asset_1: str | None = None,
+                   asset_2: str | None = None) -> dict | None:
+    """Cross-compare (requirements §4.3) two stocks or two sectors traded
+    under this strategy: trades, average yield, win rate. *asset_1/2* are
+    user picks (case-insensitive); anything unset or not traded falls back
+    to ALKEM vs TATASTEEL (stock mode, when both traded), else the two
+    most-traded assets. None when fewer than two assets traded."""
+    key = "sector" if mode == "sector" else "symbol"
+    by_asset: dict = {}
     for r in summary["rows"]:
-        by_symbol.setdefault(r["symbol"], []).append(r["yield"])
-    if len(by_symbol) < 2:
+        name = (r["trade"].get("sector") or "Unclassified") if key == "sector" else r["symbol"]
+        by_asset.setdefault(name, []).append(r["yield"])
+    if len(by_asset) < 2:
         return None
-    if symbols and all(s in by_symbol for s in symbols):
-        picked = list(symbols)
-    elif all(s in by_symbol for s in _COMPARE_DEFAULTS):
+
+    lookup = {name.upper(): name for name in by_asset}
+    picks = [lookup.get((a or "").strip().upper()) for a in (asset_1, asset_2)]
+    if picks[0] and picks[1] and picks[0] != picks[1]:
+        picked = picks
+    elif key == "symbol" and all(d in by_asset for d in _COMPARE_DEFAULTS):
         picked = list(_COMPARE_DEFAULTS)
     else:
-        picked = sorted(by_symbol, key=lambda k: (-len(by_symbol[k]), k))[:2]
-    return [
-        {
-            "symbol": sym,
-            "trades": len(by_symbol[sym]),
-            "avg_yield": report_metrics.blended_yield(by_symbol[sym]),
-            "win_rate": report_metrics.win_rate(by_symbol[sym]),
-        }
-        for sym in picked
-    ]
+        picked = sorted(by_asset, key=lambda k: (-len(by_asset[k]), k))[:2]
+    return {
+        "mode": mode,
+        "rows": [
+            {
+                "name": n,
+                "trades": len(by_asset[n]),
+                "avg_yield": report_metrics.blended_yield(by_asset[n]),
+                "win_rate": report_metrics.win_rate(by_asset[n]),
+            }
+            for n in picked
+        ],
+    }
 
 
 def _as_date(value) -> date:
@@ -93,15 +103,25 @@ def _fallback_exit_price(trade: dict) -> float | None:
     actually resolved the trade rather than showing a blank yield."""
     metrics = trade.get("metrics") or {}
     resolution = trade.get("resolution")
+    candidate = None
     if resolution == "all_targets_achieved":
         for m in metrics.values():
             if m.get("role") == "target" and m.get("achieved") and m.get("value") is not None:
-                return m["value"]
-    if resolution == "stopped_out":
+                candidate = m["value"]
+                break
+    elif resolution == "stopped_out":
         for m in metrics.values():
             if m.get("role") in ("stop_loss", "trailing_exit") and m.get("value") is not None:
-                return m["value"]
-    return None
+                candidate = m["value"]
+                break
+    # A target/SL metric is only a price if its formula produced one — many
+    # strategies use boolean-style conditions (value 1.0 / 0.0), and treating
+    # that as an exit price yielded a bogus ~-100%. Accept it only when it's
+    # in a plausible band around entry; otherwise the yield is unknown.
+    entry = trade.get("entry_price")
+    if candidate is None or not entry or not (0.5 * entry <= candidate <= 2 * entry):
+        return None
+    return candidate
 
 
 def _exit_price(trade: dict) -> float | None:
@@ -266,8 +286,10 @@ def compute_strategy_summary(strategy_id: str, date_from: date | None, date_to: 
 def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
                        timeframe: str, date_from: date | None, date_to: date | None,
                        investment_amount: float = DEFAULT_INVESTMENT_AMOUNT,
-                       include_backend: bool = False) -> dict:
-    """*timeframe* is the CURVE'S bucketing granularity (daily/weekly/
+                       include_backend: bool = False,
+                       compare: dict | None = None) -> dict:
+    """*compare*: optional {"mode": "stock"|"sector", "asset_1", "asset_2"}
+    for the Cross-Compare section. *timeframe* is the CURVE'S bucketing granularity (daily/weekly/
     monthly/quarterly — how the comparative performance curve groups
     trades), independent of *date_from*/*date_to* (the lookback window
     itself, already resolved by the caller e.g. via report_metrics.
@@ -310,6 +332,7 @@ def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
         "investment": investment,
         "investment_amount": investment_amount,
         "timeframe": timeframe,
+        "compare": compare or {},
         "date_from": date_from,
         "date_to": date_to,
     }
@@ -397,7 +420,10 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
                 + charts.donut_chart(segments, center_label=str(total), center_sublabel="Stocks")
                 + f'</div>{charts.donut_legend(segments)}</div>'
             )
-    insights = templates.section("Sector Distribution", sector_html) if sector_html else ""
+    blocks = []
+    if sector_html:
+        n_donuts = 2 if comparing else 1
+        blocks.append((templates.section("Sector Distribution", sector_html), 40 + 215 * n_donuts))
 
     all_trades = summary_a["trades"] + (summary_b["trades"] if comparing else [])
     available = report_columns.lmv_catalog(report_columns.lmv_metric_names(all_trades))
@@ -410,15 +436,33 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
         ]
 
     all_rows = _table_rows(summary_a) + (_table_rows(summary_b) if comparing else [])
-    table_html = templates.data_table(
-        columns, all_rows, column_html={"Status"},
-    ) if all_rows else '<p style="color:#64748b;font-size:11px;">No closed trades in the selected period.</p>'
+
+    cfg = data.get("compare") or {}
+    cmp = compare_assets(summary_a, cfg.get("mode", "stock"), cfg.get("asset_1"), cfg.get("asset_2"))
+    if cmp:
+        cmp_rows = cmp["rows"]
+        noun = "Sector" if cmp["mode"] == "sector" else "Stock"
+        cmp_html = templates.data_table(
+            [noun, "Trades", "Avg Intraday Yield", "Win Rate"],
+            [[r["name"], str(r["trades"]), _fmt_pct(r["avg_yield"]),
+              f'{r["win_rate"]:.0f}%' if r["win_rate"] is not None else "—"] for r in cmp_rows],
+        )
+        has_yields = any(r["avg_yield"] is not None for r in cmp_rows)
+        if has_yields:  # a chart of unknown yields would just be empty space
+            cmp_html += charts.bar_chart(
+                [r["name"] for r in cmp_rows], [r["avg_yield"] or 0 for r in cmp_rows],
+                color="#16a34a", negative_color="#dc2626", show_values=True,
+            )
+        blocks.append((templates.section(
+            f'Cross-Compare — {cmp_rows[0]["name"]} vs {cmp_rows[1]["name"]}', cmp_html),
+            38 + 90 + (220 if has_yields else 0)))
 
     ratio_cards = (
         templates.kpi_card("Sharpe Ratio", _fmt_ratio(summary_a["sharpe"]))
         + templates.kpi_card("Sortino Ratio", _fmt_ratio(summary_a["sortino"]))
         + templates.kpi_card("Calmar Ratio", _fmt_ratio(summary_a["calmar"]))
     )
+    blocks.append((templates.section("Efficiency Ratios", f'<div class="kpi-row">{ratio_cards}</div>'), 38 + 78))
 
     inv = data["investment"]
     inv_html = (
@@ -434,25 +478,20 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
         )
         + '</div><p style="color:#64748b;font-size:10px;">Hypothetical simulation only — not an actual brokerage/P&amp;L statement.</p>'
     )
+    blocks.append((templates.section(
+        f'₹{data["investment_amount"]:,.0f} Investment Simulation', inv_html), 38 + 78 + 24))
 
-    page2 = (
-        templates.section("Directional Stock Performance", table_html)
-        + templates.section("Efficiency Ratios", f'<div class="kpi-row">{ratio_cards}</div>')
-        + templates.section(f'₹{data["investment_amount"]:,.0f} Investment Simulation', inv_html)
+    if not all_rows:
+        blocks.append((templates.section(
+            "Directional Stock Performance",
+            '<p style="color:#64748b;font-size:11px;">No closed trades in the selected period.</p>'), 70))
+
+    # Page 1 (header, KPIs, donut(s), curve) is measured; the rest flows —
+    # the trade table can be hundreds of rows, so it continues across pages.
+    page1_used = 74 + 78 + (2 if comparing else 1) * 218 + 298
+    return emv_report_data._flow_pages(
+        page1, page1_used, blocks, "Directional Stock Performance", columns, all_rows, {"Status"},
     )
-
-    cmp_rows = compare_stocks(summary_a)
-    if cmp_rows:
-        cmp_html = templates.data_table(
-            ["Stock", "Trades", "Avg Intraday Yield", "Win Rate"],
-            [[r["symbol"], str(r["trades"]), _fmt_pct(r["avg_yield"]),
-              f'{r["win_rate"]:.0f}%' if r["win_rate"] is not None else "—"] for r in cmp_rows],
-        ) + charts.bar_chart(
-            [r["symbol"] for r in cmp_rows], [r["avg_yield"] or 0 for r in cmp_rows],
-        )
-        insights += templates.section(f'Cross-Compare — {cmp_rows[0]["symbol"]} vs {cmp_rows[1]["symbol"]}', cmp_html)
-
-    return [page1] + ([insights] if insights else []) + [page2]
 
 
 def build_report_html(data: dict, doc_title: str = "LMV EOD Report", columns: list | None = None) -> str:

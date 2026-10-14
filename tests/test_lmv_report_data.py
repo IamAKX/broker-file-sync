@@ -107,10 +107,11 @@ def test_build_report_pages_renders_without_crashing_and_has_two_pages():
 
     pages = lmv_report_data.build_report_pages(data)
 
-    assert len(pages) == 3  # summary, sector distribution, trade table
-    assert "Sector Distribution" in pages[1]
-    assert "ALKEM" in pages[-1]
-    assert "TARGET HIT" in pages[-1]
+    assert len(pages) >= 2  # summary page + flowed content
+    joined = "".join(pages)
+    assert "Sector Distribution" in joined
+    assert "ALKEM" in joined
+    assert "TARGET HIT" in joined
 
 
 def test_build_report_pages_handles_no_trades():
@@ -119,7 +120,7 @@ def test_build_report_pages_handles_no_trades():
 
     pages = lmv_report_data.build_report_pages(data)
 
-    assert "No closed trades" in pages[1]
+    assert "No closed trades" in "".join(pages)
 
 
 def test_build_report_html_is_a_full_document():
@@ -127,8 +128,7 @@ def test_build_report_html_is_a_full_document():
     data = lmv_report_data.build_report_data("s1", None, "daily", None, None)
     html = lmv_report_data.build_report_html(data)
     assert "<!DOCTYPE html>" in html
-    assert "Page 1 of 2" in html
-    assert "Page 2 of 2" in html
+    assert "Page 1 of" in html
 
 
 def test_fallback_exit_price_used_when_exit_price_missing():
@@ -171,7 +171,49 @@ def test_cross_compare_defaults_to_alkem_vs_tatasteel():
             _trade("s1", sym, "BUY", 100, ex, "all_targets_achieved", "2026-03-05T10:00:00")
         )
     data = lmv_report_data.build_report_data("s1", None, "daily", date(2026, 3, 5), date(2026, 3, 5))
-    cmp_rows = lmv_report_data.compare_stocks(data["summary_a"])
-    assert [r["symbol"] for r in cmp_rows] == ["ALKEM", "TATASTEEL"]
+    cmp_rows = lmv_report_data.compare_assets(data["summary_a"])["rows"]
+    assert [r["name"] for r in cmp_rows] == ["ALKEM", "TATASTEEL"]
     assert "Cross-Compare" in "".join(lmv_report_data.build_report_pages(data))
     assert lmv_report_data.sector_distribution(data["summary_a"])[0]["label"] == "IT"
+
+
+def test_cross_compare_user_picks_and_sector_mode():
+    _seed_strategy("s1", "Strategy A")
+    for sym, sector, ex in (("ALKEM", "Pharma", 110), ("TATASTEEL", "Metals", 90), ("INFY", "IT", 105)):
+        tr = _trade("s1", sym, "BUY", 100, ex, "all_targets_achieved", "2026-03-05T10:00:00")
+        tr["sector"] = sector
+        state_store.append_alert_history(tr)
+    summary = lmv_report_data.build_report_data(
+        "s1", None, "daily", date(2026, 3, 5), date(2026, 3, 5))["summary_a"]
+    picked = lmv_report_data.compare_assets(summary, "stock", "infy", "ALKEM")
+    assert [r["name"] for r in picked["rows"]] == ["INFY", "ALKEM"]
+    sectors = lmv_report_data.compare_assets(summary, "sector", "Metals", "IT")
+    assert [r["name"] for r in sectors["rows"]] == ["Metals", "IT"]
+    # An untraded pick falls back to the auto choice rather than failing.
+    assert len(lmv_report_data.compare_assets(summary, "stock", "NOPE", "ALKEM")["rows"]) == 2
+
+
+def test_boolean_style_target_metric_is_not_treated_as_exit_price():
+    """A target whose value is a 1.0/0.0 condition flag (not a price) used
+    to produce a bogus ~-100% yield for pre-exit_price history."""
+    _seed_strategy("s1", "Strategy A")
+    trade = _trade("s1", "BANKNIFTY", "BUY", 57412.0, None, "all_targets_achieved", "2026-03-05T10:00:00")
+    trade["metrics"] = {"m1": {"name": "Target 1", "role": "target", "value": 1.0, "achieved": True}}
+    state_store.append_alert_history(trade)
+
+    summary = lmv_report_data.compute_strategy_summary("s1", None, None)
+    assert summary["rows"][0]["yield"] is None
+    assert summary["blended_yield"] is None
+
+
+def test_long_trade_table_flows_across_pages():
+    _seed_strategy("s1", "Strategy A")
+    for i in range(120):
+        tr = _trade("s1", f"S{i}", "BUY", 100, 110, "all_targets_achieved", "2026-03-05T10:00:00")
+        tr["id"] = f"t{i}"
+        state_store.append_alert_history(tr)
+    data = lmv_report_data.build_report_data("s1", None, "daily", date(2026, 3, 5), date(2026, 3, 5))
+    pages = lmv_report_data.build_report_pages(data)
+    assert len(pages) >= 3
+    assert "(continued)" in "".join(pages)
+    assert sum(p.count("<tr>") for p in pages) >= 120

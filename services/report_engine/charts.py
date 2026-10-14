@@ -147,6 +147,11 @@ def line_chart(series: list, width: int = 680, height: int = 260,
             f'<line x1="{pad_left}" y1="{gy:.1f}" x2="{pad_left + plot_w}" y2="{gy:.1f}" '
             f'stroke="#E2E8F0" stroke-width="1"/>'
         )
+        tick = hi - span * i / 4
+        parts.append(
+            f'<text x="{pad_left - 6}" y="{gy + 3:.1f}" text-anchor="end" '
+            f'font-family="sans-serif" font-size="9" fill="#94a3b8">{tick:.1f}</text>'
+        )
 
     if zero_line and lo < 0 < hi:
         zy = y_at(0)
@@ -186,11 +191,14 @@ def line_chart(series: list, width: int = 680, height: int = 260,
     # while preserving access to every date via hover", which the per-point
     # <title> above already provides).
     labels = x_labels or [str(i) for i in range(n)]
-    max_labels = max(2, plot_w // 60)
+    max_labels = max(2, plot_w // 80)
     step = max(1, math.ceil(n / max_labels))
     for i in range(0, n, step):
+        # The final label would overhang the right edge if centered on its
+        # point — right-align it instead of clipping it.
+        anchor = "end" if x_at(i) + 30 > width else "middle"
         parts.append(
-            f'<text x="{x_at(i):.1f}" y="{height - 8}" text-anchor="middle" '
+            f'<text x="{x_at(i):.1f}" y="{height - 8}" text-anchor="{anchor}" '
             f'font-family="sans-serif" font-size="10" fill="#64748b">{_esc(labels[i])}</text>'
         )
 
@@ -207,7 +215,8 @@ def line_chart(series: list, width: int = 680, height: int = 260,
 
 
 def bar_chart(categories: list, values: list, width: int = 680, height: int = 220,
-               color: str = "#2979FF", min_bar_width: int = 18) -> str:
+               color: str = "#2979FF", min_bar_width: int = 18,
+               negative_color: str | None = None, show_values: bool = False) -> str:
     """Vertical bar chart, one bar per (category, value) pair. *width* is a
     target — if fitting ``len(categories)`` bars at *min_bar_width* each
     would exceed it, the returned SVG is WIDER than *width* instead of
@@ -215,6 +224,9 @@ def bar_chart(categories: list, values: list, width: int = 680, height: int = 22
     into an unreadable narrow chart" rule); callers render this inside a
     horizontally-scrollable container for that case, and PDF export lets it
     print at its natural width.
+
+    *negative_color* recolors bars below zero; *show_values* prints each
+    bar's value above (or below, for negatives) it.
     """
     n = len(values)
     if n == 0:
@@ -247,11 +259,18 @@ def bar_chart(categories: list, values: list, width: int = 680, height: int = 22
         bar_y = pad_top + plot_h - ((v - lo) / span) * plot_h
         bar_h = abs(zero_y - bar_y)
         top = min(bar_y, zero_y)
+        fill = negative_color if (negative_color and v < 0) else color
         parts.append(
             f'<rect x="{cx - bar_width / 2:.1f}" y="{top:.1f}" width="{bar_width:.1f}" '
-            f'height="{max(bar_h, 1):.1f}" fill="{_esc(color)}" rx="2">'
+            f'height="{max(bar_h, 1):.1f}" fill="{_esc(fill)}" rx="2">'
             f'<title>{_esc(cat)}: {v:g}</title></rect>'
         )
+        if show_values:
+            label_y = top + bar_h + 12 if v < 0 else top - 4
+            parts.append(
+                f'<text x="{cx:.1f}" y="{label_y:.1f}" text-anchor="middle" '
+                f'font-family="sans-serif" font-size="10" font-weight="600" fill="#334155">{v:.2f}</text>'
+            )
 
     max_labels = max(2, int(plot_w // 40))
     step = max(1, math.ceil(n / max_labels))

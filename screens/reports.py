@@ -110,10 +110,12 @@ def _build_lmv_html(report: dict) -> str:
         # labels adaptively for a long daily range.
         report_metrics.TIMEFRAME_DAILY, date_from, date_to,
         subject.get("investment_amount", lmv_report_data.DEFAULT_INVESTMENT_AMOUNT),
-        # Only worth the network round trip for a Custom range, which can
-        # reach further back than local history's retention — see
-        # services.lmv_report_data.build_report_data's own docstring.
-        include_backend=(mode == report_metrics.TIMEFRAME_CUSTOM),
+        # Local alert_history is per-machine and capped at ~500 records, so
+        # even a recent Daily/Weekly report can be empty on a machine that
+        # didn't fire the alerts — always supplement from the backend
+        # (best-effort: failures just fall back to local history).
+        include_backend=True,
+        compare=subject.get("compare"),
     )
     return lmv_report_data.build_report_html(
         data, doc_title=report.get("name", "LMV EOD Report"), columns=report.get("columns")
@@ -424,6 +426,20 @@ class ReportsScreen(QWidget):
         self._investment_edit = QLineEdit(str(int(lmv_report_data.DEFAULT_INVESTMENT_AMOUNT)))
         layout.addWidget(self._investment_edit)
 
+        layout.addWidget(self._field_label("Cross-Compare — compare two assets under Strategy A"))
+        self._compare_mode_combo = QComboBox()
+        self._compare_mode_combo.addItem("Stock vs Stock", "stock")
+        self._compare_mode_combo.addItem("Sector vs Sector", "sector")
+        layout.addWidget(self._compare_mode_combo)
+        compare_row = QHBoxLayout()
+        self._compare_asset_1 = QLineEdit()
+        self._compare_asset_2 = QLineEdit()
+        self._compare_asset_1.setPlaceholderText("Asset 1 (blank = auto, e.g. ALKEM)")
+        self._compare_asset_2.setPlaceholderText("Asset 2 (blank = auto, e.g. TATASTEEL)")
+        compare_row.addWidget(self._compare_asset_1)
+        compare_row.addWidget(self._compare_asset_2)
+        layout.addLayout(compare_row)
+
         layout.addWidget(self._field_label(
             "Trade table columns (leave Selected empty for the default set)"
         ))
@@ -673,6 +689,10 @@ class ReportsScreen(QWidget):
                     edit.setDate(d)
             if cfg.get("investment_amount") is not None:
                 self._investment_edit.setText(str(int(cfg["investment_amount"])))
+            compare = cfg.get("compare") or {}
+            self._select_data(self._compare_mode_combo, compare.get("mode", "stock"))
+            self._compare_asset_1.setText(compare.get("asset_1") or "")
+            self._compare_asset_2.setText(compare.get("asset_2") or "")
             self._lmv_column_picker.set_columns(report.get("columns") or [])
         elif rtype == report_store.REPORT_TYPE_EMV:
             subtype = cfg.get("subtype", "stock")
@@ -731,6 +751,11 @@ class ReportsScreen(QWidget):
                 "strategy_a_id": strategy_a_id,
                 "strategy_b_id": strategy_b_id,
                 "investment_amount": investment_amount,
+                "compare": {
+                    "mode": self._compare_mode_combo.currentData(),
+                    "asset_1": self._compare_asset_1.text().strip(),
+                    "asset_2": self._compare_asset_2.text().strip(),
+                },
             }
             self._active_report["timeframe"] = {
                 "mode": mode,
