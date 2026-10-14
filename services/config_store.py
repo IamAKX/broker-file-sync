@@ -331,14 +331,7 @@ def load_inception_column_highlight_colors() -> dict:
     return dict(colors) if isinstance(colors, dict) else {}
 
 
-def get_rename_map() -> dict:
-    """
-    Mapping of {actual_column_name -> renamed_column_name} from the
-    'Main Column Name' tab. Only entries with a non-empty renamed value that
-    differs from the actual name are included.
-    """
-    from config_defaults import MAIN_COLUMN_NAME_DATA
-    rows = load_tab(MAIN_COLUMN_NAME, MAIN_COLUMN_NAME_DATA)
+def _rename_map_from_rows(rows) -> dict:
     mapping = {}
     for row in rows:
         if len(row) < 2:
@@ -347,3 +340,22 @@ def get_rename_map() -> dict:
         if actual and renamed and actual != renamed:
             mapping[actual] = renamed
     return mapping
+
+
+def get_rename_map() -> dict:
+    """
+    Mapping of {actual_column_name -> renamed_column_name} from the
+    'Main Column Name' tab. Only entries with a non-empty renamed value that
+    differs from the actual name are included.
+    """
+    from config_defaults import MAIN_COLUMN_NAME_DATA
+    return _rename_map_from_rows(load_tab(MAIN_COLUMN_NAME, MAIN_COLUMN_NAME_DATA))
+
+
+def peek_rename_map() -> dict:
+    """get_rename_map() from the LOCAL cache only — never a server round
+    trip, so it's safe on the GUI thread inside a render pass. The cache is
+    refreshed whenever the Config Editor saves (save_json) or loads the tab."""
+    from config_defaults import MAIN_COLUMN_NAME_DATA
+    rows = _load_raw().get(MAIN_COLUMN_NAME)
+    return _rename_map_from_rows(rows if isinstance(rows, list) else MAIN_COLUMN_NAME_DATA)

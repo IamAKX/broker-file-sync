@@ -44,9 +44,29 @@ def _svg_icon(filename: str, color: str) -> QIcon:
 
 
 
+def _all_lmv_column_names() -> list:
+    """Every LMV column this account can show: the built-in order list,
+    Formula Builder fields, then each strategy's own columns."""
+    from config_defaults import MAIN_COLUMN_ORDER_DATA
+    from services import formula_tokens, strategy_store
+    names = [row[0] for row in MAIN_COLUMN_ORDER_DATA]
+    names += formula_tokens.all_field_codes()
+    for strategy in strategy_store.load_all():
+        names += [c.get("name") for c in strategy.get("columns", [])]
+    return names
+
+
+def _all_inception_column_names() -> list:
+    """Every Inception (HMV / View by Date) column: Sector/Symbol plus the
+    full raw + derived catalogue."""
+    from services import inception_columns
+    return ["Sector", "Symbol"] + [c.code for c in inception_columns.column_catalogue()]
+
+
 class ConfigTabWidget(QWidget):
     def __init__(self, col_headers: list, default_data: list, theme,
-                 reorderable: bool = False, store_key: str = None, parent=None):
+                 reorderable: bool = False, store_key: str = None, parent=None,
+                 extra_names=None):
         super().__init__(parent)
         self._theme = theme
         self._col_headers = col_headers
@@ -65,6 +85,20 @@ class ConfigTabWidget(QWidget):
             from services import config_store
             saved = config_store.load_column_order(key=store_key)
             self._initial_data = [(name,) for name in saved] if saved else self._default_data
+            # Columns the app knows about but this account hasn't ordered yet
+            # (formula-builder fields, strategy columns, Inception columns)
+            # are appended — the saved order stays exactly as it was — so
+            # every column is listed and rearrangeable without adding rows
+            # by hand (issue #67).
+            if extra_names:
+                try:
+                    names = list(extra_names() if callable(extra_names) else extra_names)
+                except Exception:
+                    names = []
+                present = {row[0] for row in self._initial_data if row}
+                self._initial_data = list(self._initial_data) + [
+                    (n,) for n in dict.fromkeys(names) if n and n not in present
+                ]
         elif store_key:
             from services import config_store
             self._initial_data = [tuple(r) for r in
@@ -420,7 +454,8 @@ class ConfigEditorScreen(QWidget):
         )
         tabs.addTab(
             ConfigTabWidget(["Column Name"], MAIN_COLUMN_ORDER_DATA, t,
-                            reorderable=True, store_key="main_column_order"),
+                            reorderable=True, store_key="main_column_order",
+                            extra_names=_all_lmv_column_names),
             "Main Column Order"
         )
         from services.config_store import INCEPTION_HMV_COLUMN_ORDER
@@ -444,7 +479,8 @@ class ConfigEditorScreen(QWidget):
         ]
         tabs.addTab(
             ConfigTabWidget(["Column Name"], inception_column_order_defaults, t,
-                            reorderable=True, store_key=INCEPTION_HMV_COLUMN_ORDER),
+                            reorderable=True, store_key=INCEPTION_HMV_COLUMN_ORDER,
+                            extra_names=_all_inception_column_names),
             "Inception Column Order"
         )
 

@@ -87,6 +87,7 @@ def build_stock_report_data(symbol: str, field: str, date_from: date, date_to: d
     current_close = series[-1]["close"] if series else None
     return {
         "symbol": symbol, "field": field, "date_from": date_from, "date_to": date_to,
+        "sector": inception_sector.sector_for(symbol),
         "series": series, "stats": stats,
         "current_value": current_value, "current_close": current_close,
         "indicator_ids": indicator_ids or [],
@@ -99,7 +100,7 @@ def build_stock_report_data(symbol: str, field: str, date_from: date, date_to: d
 # the browser onto footer-less overflow pages. So content is packed into pages
 # here using height estimates (px at 96dpi, matching templates.py's CSS).
 _PAGE_BUDGET_PX = 1000      # 297mm - 2*12mm padding, minus footer clearance
-_PAGE1_USED_PX = 74 + 78 + 250   # header + KPI row + first chart section (measured)
+_PAGE1_USED_PX = 74 + 78 + 250 + 24   # header + KPI row + first chart section + its legend row (measured)
 _SECTION_OVERHEAD_PX = 22 + 16   # <h2> + bottom margin
 _STRATEGY_PAGE1_USED_PX = 74 + 78 + 240   # header + KPI row + donut section
 _TABLE_HEAD_PX = 30
@@ -154,6 +155,15 @@ def _flow_pages(first_page: str, used_px: int, blocks: list, table_title: str,
     return pages
 
 
+def _level_change_basis(field: str, series: list) -> str:
+    """Spells out where Level Change comes from: the field's value on the
+    first period of the report vs its latest value, as a % of the first."""
+    values = [e["value"] for e in series if e["value"] is not None]
+    if len(values) < 2:
+        return ""
+    return f'{field}: {_fmt(values[0])} → {_fmt(values[-1])}'
+
+
 def build_stock_report_pages(data: dict) -> list:
     series, stats = data["series"], data["stats"]
 
@@ -166,6 +176,7 @@ def build_stock_report_pages(data: dict) -> list:
         )
         + templates.kpi_card(
             "Level Change", f'{stats["level_change_pct"]:+.2f}%' if stats["level_change_pct"] is not None else "—",
+            sublabel=_level_change_basis(data["field"], series),
             kind="positive" if (stats["level_change_pct"] or 0) >= 0 else "negative",
         )
     )
@@ -190,7 +201,7 @@ def build_stock_report_pages(data: dict) -> list:
     page1 = (
         templates.report_header(
             "EMV EOD Report",
-            f'{data["symbol"]} — {data["field"]} — {len(series)} periods',
+            f'{data["symbol"]} ({data.get("sector") or "—"}) — {data["field"]} — {len(series)} periods',
             datetime.now(),
         )
         + f'<div class="kpi-row">{kpis}</div>'
@@ -211,8 +222,13 @@ def build_stock_report_pages(data: dict) -> list:
         (templates.section(title, svg), _section_height(svg))
         for title, svg in data.get("indicator_sections", [])
     ]
-    blocks.append((templates.section(f'Historical {data["field"]} — {len(series)} periods', bar),
-                   _section_height(bar)))
+    bar_caption = (
+        f'<p style="font-size:10px;color:#64748b;margin:2px 0 0 0;">'
+        f'<span style="display:inline-block;width:10px;height:10px;background:#2979FF;border-radius:2px;'
+        f'vertical-align:middle;margin-right:4px;"></span>{templates.esc(data["field"])} value per period</p>'
+    ) if series else ""
+    blocks.append((templates.section(f'Historical {data["field"]} — {len(series)} periods', bar + bar_caption),
+                   _section_height(bar) + (22 if bar_caption else 0)))
     return _flow_pages(page1, _PAGE1_USED_PX, blocks, "Historical Values",
                        ["Date", data["field"], "Close", "State"], rows, {"State"}, table_empty=not rows)
 

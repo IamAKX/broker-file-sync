@@ -102,9 +102,30 @@ def donut_legend(segments: list) -> str:
     return f'<div class="legend">{"".join(rows)}</div>'
 
 
+def _legend_svg(series: list, width: int, y0: int) -> tuple:
+    """(svg_parts, extra_height): a colour key under the plot — a short line
+    swatch (dashed when the series is) plus its label, wrapped into rows."""
+    items = [(s.get("label", ""), s.get("color", "#2979FF"), bool(s.get("dashed")))
+             for s in series if s.get("label")]
+    if not items:
+        return [], 0
+    parts, x, y, row_h = [], 8, y0 + 10, 16
+    for label, color, dashed in items:
+        w = 34 + 6.2 * len(str(label))
+        if x + w > width - 8 and x > 8:
+            x, y = 8, y + row_h
+        dash = ' stroke-dasharray="4 3"' if dashed else ""
+        parts.append(f'<line x1="{x}" y1="{y - 3}" x2="{x + 20}" y2="{y - 3}" stroke="{_esc(color)}" stroke-width="2.5"{dash}/>')
+        parts.append(
+            f'<text x="{x + 25}" y="{y}" font-family="sans-serif" font-size="10" fill="#334155">{_esc(label)}</text>'
+        )
+        x += w
+    return parts, (y - y0) + 8
+
+
 def line_chart(series: list, width: int = 680, height: int = 260,
                 x_labels: list | None = None, y_label: str = "",
-                zero_line: bool = False) -> str:
+                zero_line: bool = False, legend: bool = True) -> str:
     """*series*: [{"label", "points": [float|None, ...], "color", "dashed": bool}, ...]
     — every series must have the same number of points, aligned to
     *x_labels* (or plain index labels if omitted). A None point renders as
@@ -119,7 +140,7 @@ def line_chart(series: list, width: int = 680, height: int = 260,
     if n == 0:
         return _no_data_svg(width, height)
 
-    pad_left, pad_right, pad_top, pad_bottom = 48, 16, 16, 28
+    pad_left, pad_right, pad_top, pad_bottom = 48, 16, 26, 28
     plot_w = max(1, width - pad_left - pad_right)
     plot_h = max(1, height - pad_top - pad_bottom)
 
@@ -204,12 +225,18 @@ def line_chart(series: list, width: int = 680, height: int = 260,
 
     if y_label:
         parts.append(
-            f'<text x="{12}" y="{pad_top - 4}" font-family="sans-serif" '
+            f'<text x="{4}" y="{10}" font-family="sans-serif" '
             f'font-size="10" fill="#64748b">{_esc(y_label)}</text>'
         )
 
+    total_height = height
+    if legend:
+        legend_parts, extra = _legend_svg(series, width, height)
+        parts += legend_parts
+        total_height = height + extra
+
     return (
-        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'<svg width="{width}" height="{total_height}" viewBox="0 0 {width} {total_height}" '
         f'xmlns="http://www.w3.org/2000/svg">{"".join(parts)}</svg>'
     )
 
@@ -251,6 +278,12 @@ def bar_chart(categories: list, values: list, width: int = 680, height: int = 22
         f'<line x1="{pad_left}" y1="{zero_y:.1f}" x2="{pad_left + plot_w:.1f}" y2="{zero_y:.1f}" '
         f'stroke="#CBD5E1" stroke-width="1"/>'
     ]
+    # Y-axis values: the top, zero and bottom of the scale.
+    for tick_value, tick_y in ((hi, pad_top), (0.0, zero_y), (lo, pad_top + plot_h)):
+        parts.append(
+            f'<text x="{pad_left - 6}" y="{tick_y + 3:.1f}" text-anchor="end" font-family="sans-serif" '
+            f'font-size="9" fill="#94a3b8">{tick_value:.1f}</text>'
+        )
     bar_width = bar_slot * 0.6
     for i, (cat, v) in enumerate(zip(categories, values)):
         cx = pad_left + bar_slot * i + bar_slot / 2

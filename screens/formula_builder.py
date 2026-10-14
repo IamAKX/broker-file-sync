@@ -300,6 +300,7 @@ class FormulaBuilderScreen(QWidget):
         self._theme = controller.theme
         self._formulas: list = config_store.load_json(_STORE_KEY, _default_formulas())
         self._active_editor = None
+        self._search_query = ""
         self._build()
 
     def _build(self):
@@ -354,6 +355,19 @@ class FormulaBuilderScreen(QWidget):
         self._list_title = list_title
         left_root.addWidget(list_title)
 
+        self._search_box = QLineEdit()
+        self._search_box.setPlaceholderText("Search formulas…")
+        self._search_box.setFixedHeight(30)
+        self._search_box.setFont(font_scale.font(font_scale.SMALL, False))
+        self._search_box.setClearButtonEnabled(True)
+        self._search_box.setStyleSheet(
+            f"QLineEdit{{background:{_t(t,'input_bg')};color:{_t(t,'text_primary')};"
+            f"border:1px solid {bd};border-radius:6px;padding:0 8px;}}"
+            f"QLineEdit:focus{{border-color:{_t(t,'accent')};}}"
+        )
+        self._search_box.textChanged.connect(self._on_search_changed)
+        left_root.addWidget(self._search_box)
+
         self._list_scroll = QScrollArea()
         self._list_scroll.setWidgetResizable(True)
         self._list_scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -394,11 +408,30 @@ class FormulaBuilderScreen(QWidget):
             item = self._list_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        self._list_title.setText(f"Formulas ({len(self._formulas)})")
-        for formula in self._formulas:
+        visible = self._filtered_formulas()
+        if len(visible) == len(self._formulas):
+            self._list_title.setText(f"Formulas ({len(self._formulas)})")
+        else:
+            self._list_title.setText(f"Formulas ({len(visible)} of {len(self._formulas)})")
+        for formula in visible:
             card = FormulaCard(formula, self._theme, parent=self)
             card.set_callbacks(self._open_editor, self._delete_formula)
             self._list_layout.insertWidget(self._list_layout.count() - 1, card)
+
+    def _filtered_formulas(self) -> list:
+        """Formulas matching the search text in their code, name or
+        description (case-insensitive); everything when the box is empty."""
+        query = self._search_query.strip().lower()
+        if not query:
+            return list(self._formulas)
+        return [
+            f for f in self._formulas
+            if query in " ".join(str(f.get(k, "")) for k in ("code", "name", "description")).lower()
+        ]
+
+    def _on_search_changed(self, text: str):
+        self._search_query = text
+        self._refresh_list()
 
     def _open_editor(self, formula: dict):
         while self._editor_slot.count():

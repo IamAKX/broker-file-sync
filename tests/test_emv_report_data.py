@@ -46,7 +46,7 @@ def test_build_stock_report_data_has_series_and_stats():
 def test_build_stock_report_pages_flows_short_series_onto_one_page():
     _seed("DIVISLAB_I", date(2026, 1, 1), 30)
     data = emv_report_data.build_stock_report_data(
-        "DIVISLAB_I", "CLOSE", date(2026, 1, 20), date(2026, 1, 30)
+        "DIVISLAB_I", "CLOSE", date(2026, 1, 23), date(2026, 1, 30)
     )
     pages = emv_report_data.build_stock_report_pages(data)
     assert len(pages) == 1
@@ -56,7 +56,7 @@ def test_build_stock_report_pages_flows_short_series_onto_one_page():
 def test_build_stock_report_html_is_a_full_document():
     _seed("DIVISLAB_I", date(2026, 1, 1), 15)
     data = emv_report_data.build_stock_report_data(
-        "DIVISLAB_I", "CLOSE", date(2026, 1, 5), date(2026, 1, 15)
+        "DIVISLAB_I", "CLOSE", date(2026, 1, 12), date(2026, 1, 16)
     )
     html = emv_report_data.build_stock_report_html(data)
     assert "<!DOCTYPE html>" in html
@@ -184,3 +184,27 @@ def test_flow_pages_moves_block_that_does_not_fit_to_next_page():
     blocks = [("<b>one</b>", 400), ("<b>two</b>", 400), ("<b>three</b>", 400)]
     pages = emv_report_data._flow_pages("", 0, blocks, "T", ["A"], [], set(), table_empty=True)
     assert len(pages) == 2 and "three" in pages[1]
+
+
+# ── Sector / legend / level-change basis (issue #62) ─────────────────────
+
+def test_stock_report_shows_sector_legend_and_level_change_basis(monkeypatch):
+    from services import inception_sector
+    monkeypatch.setattr(inception_sector, "sector_for", lambda symbol: "PHARMA")
+    _seed("DIVISLAB_I", date(2026, 1, 1), 30)
+    data = emv_report_data.build_stock_report_data(
+        "DIVISLAB_I", "CLOSE", date(2026, 1, 20), date(2026, 1, 30)
+    )
+    html = "".join(emv_report_data.build_stock_report_pages(data))
+
+    assert data["sector"] == "PHARMA"
+    assert "DIVISLAB_I (PHARMA)" in html                      # sector in the report header
+    assert ">CLOSE<" in html and ">Close<" in html            # legend names both plotted lines
+    assert "CLOSE value per period" in html                   # caption under the bar chart
+    values = [e["value"] for e in data["series"] if e["value"] is not None]
+    assert f"CLOSE: {emv_report_data._fmt(values[0])} → {emv_report_data._fmt(values[-1])}" in html
+
+
+def test_level_change_basis_is_blank_without_two_values():
+    assert emv_report_data._level_change_basis("DT", []) == ""
+    assert emv_report_data._level_change_basis("DT", [{"value": 1.0}]) == ""

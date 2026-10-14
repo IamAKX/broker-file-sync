@@ -170,3 +170,31 @@ def test_bubble_chart_draws_one_bubble_per_point_and_dedupes_colliding_labels():
     svg = charts.bubble_chart(pts)
     assert svg.count("<circle") == 6
     assert 1 <= svg.count('font-size="8"') < 6   # identical positions -> labels thinned, not stacked
+
+
+# ── legends / axis values (issue #62) ────────────────────────────────────
+
+def test_line_chart_draws_a_colour_legend_with_dashed_swatches():
+    series = [
+        {"label": "DT", "points": [1, 2, 3], "color": "#2979FF"},
+        {"label": "Close", "points": [1, 2, 3], "color": "#16a34a", "dashed": True},
+    ]
+    svg = charts.line_chart(series, x_labels=["a", "b", "c"])
+    assert ">DT<" in svg and ">Close<" in svg
+    assert 'stroke="#16a34a" stroke-width="2.5" stroke-dasharray="4 3"' in svg     # dashed swatch
+    assert 'stroke="#2979FF" stroke-width="2.5"/>' in svg                           # solid swatch
+    # the legend lives inside the SVG, so the chart grew taller to make room
+    assert int(svg.split('height="')[1].split('"')[0]) > 260
+    assert ">DT<" not in charts.line_chart(series, legend=False)
+
+
+def test_line_chart_legend_wraps_onto_extra_rows_for_many_series():
+    many = [{"label": f"Indicator number {i}", "points": [1, 2], "color": "#2979FF"} for i in range(8)]
+    one = charts.line_chart(many[:1])
+    wrapped = charts.line_chart(many)
+    assert int(wrapped.split('height="')[1].split('"')[0]) > int(one.split('height="')[1].split('"')[0])
+
+
+def test_bar_chart_shows_y_axis_values():
+    svg = charts.bar_chart(["a", "b"], [4.0, -2.0])
+    assert ">4.0<" in svg and ">0.0<" in svg and ">-2.0<" in svg

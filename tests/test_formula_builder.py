@@ -184,3 +184,41 @@ def test_edit_menu_has_formula_builder(qapp):
                 if action.text() == "Formula Builder":
                     found = True
     assert found
+
+
+# ── Search (issue #68) ───────────────────────────────────────────────────
+
+def test_search_filters_cards_by_code_name_or_description_and_restores(screen):
+    total = len(screen._formulas)
+    target = screen._formulas[0]
+    code = target["code"]
+
+    screen._search_box.setText(code.lower())          # case-insensitive, by code
+    shown = screen._filtered_formulas()
+    assert target in shown and 0 < len(shown) <= total
+    assert screen._list_title.text() == (
+        f"Formulas ({len(shown)} of {total})" if len(shown) != total else f"Formulas ({total})"
+    )
+
+    screen._search_box.setText("zzz-no-such-formula")
+    assert screen._filtered_formulas() == []
+    assert screen._list_title.text() == f"Formulas (0 of {total})"
+
+    screen._search_box.setText("")                    # clearing brings everything back
+    assert len(screen._filtered_formulas()) == total
+    assert screen._list_title.text() == f"Formulas ({total})"
+
+
+def test_search_matches_the_description_text(screen):
+    screen._formulas.append({"id": "x1", "code": "QQQ1", "name": "Plain", "tokens": [],
+                             "description": "uses Opening Range breakout", "frequency": "DAILY"})
+    screen._search_box.setText("opening range")
+    assert [f["code"] for f in screen._filtered_formulas()] == ["QQQ1"]
+    screen._search_box.setText("")
+
+
+def test_search_does_not_change_the_stored_formulas(screen):
+    before = [dict(f) for f in screen._formulas]
+    screen._search_box.setText("zzz")
+    screen._search_box.setText("")
+    assert screen._formulas == before

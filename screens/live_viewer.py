@@ -2258,6 +2258,7 @@ class LiveViewerWindow(QWidget):
         try:
             self._table.setColumnCount(len(disp_headers))
             self._table.setHorizontalHeaderLabels(disp_headers)
+            self._apply_header_renames(disp_headers)
             self._table.setRowCount(len(disp_data))
 
             bold_font   = font_scale.font(font_scale.SMALL, True)
@@ -2345,7 +2346,7 @@ class LiveViewerWindow(QWidget):
                 self._move_section_programmatically(hdr, visual, 0)
                 return
         ordered = [
-            self._table.horizontalHeaderItem(hdr.logicalIndex(v)).text()
+            self._header_name(self._table.horizontalHeaderItem(hdr.logicalIndex(v)))
             for v in range(hdr.count())
             if self._table.horizontalHeaderItem(hdr.logicalIndex(v))
         ]
@@ -2463,13 +2464,42 @@ class LiveViewerWindow(QWidget):
 
     # ── Column sort ───────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _header_name(item) -> str:
+        """A column's real (internal) name. The header may DISPLAY a renamed
+        label (Config Editor > Main Column Name), with the actual name kept
+        in UserRole — every lookup/sort/order/hidden-column operation must
+        use this, never the display text."""
+        if item is None:
+            return ""
+        actual = item.data(Qt.ItemDataRole.UserRole)
+        return actual if isinstance(actual, str) and actual else item.text()
+
+    def _apply_header_renames(self, disp_headers: list) -> None:
+        """Show each header's configured 'Main Column Name' rename while
+        keeping its real name available via _header_name. Uses the network-
+        free local cache so a render pass never blocks on the server."""
+        from services import config_store
+        try:
+            rename_map = config_store.peek_rename_map()
+        except Exception:
+            return
+        if not rename_map:
+            return
+        for col, name in enumerate(disp_headers):
+            renamed = rename_map.get(name)
+            item = self._table.horizontalHeaderItem(col)
+            if renamed and item is not None:
+                item.setText(renamed)
+                item.setData(Qt.ItemDataRole.UserRole, name)
+
     def _on_header_clicked(self, logical_index: int):
         if logical_index is None or logical_index < 0:
             return
         item = self._table.horizontalHeaderItem(logical_index)
         if item is None:
             return
-        name = item.text()
+        name = self._header_name(item)
         if self._sort_col_name == name:
             self._sort_descending = not self._sort_descending
         else:
@@ -2493,9 +2523,9 @@ class LiveViewerWindow(QWidget):
             hdr_item = self._table.horizontalHeaderItem(c)
             if hdr_item is None:
                 continue
-            if hdr_item.text() == self._sort_col_name:
+            if self._header_name(hdr_item) == self._sort_col_name:
                 col_idx = c
-            if hdr_item.text() == "Scrip Name":
+            if self._header_name(hdr_item) == "Scrip Name":
                 scrip_idx = c
         if col_idx is None or scrip_idx is None:
             self._row_order = None
@@ -2659,7 +2689,7 @@ class LiveViewerWindow(QWidget):
         for logical in range(n):
             item = self._table.horizontalHeaderItem(logical)
             if item:
-                name_to_logical[item.text()] = logical
+                name_to_logical[self._header_name(item)] = logical
         # Walk the saved order; skip names not present in the current table.
         # load_column_order() already filters to strings (see its
         # docstring), but a non-string entry here would crash this loop
@@ -2967,7 +2997,7 @@ class LiveViewerWindow(QWidget):
         straight from the table so it always matches what's on screen,
         regardless of whether strategies are active."""
         return [
-            self._table.horizontalHeaderItem(c).text() if self._table.horizontalHeaderItem(c) else ""
+            self._header_name(self._table.horizontalHeaderItem(c))
             for c in range(self._table.columnCount())
         ]
 
@@ -3202,7 +3232,7 @@ class LiveViewerWindow(QWidget):
         headers = []
         for logical in cols:
             item = self._table.horizontalHeaderItem(logical)
-            headers.append(item.text() if item else "")
+            headers.append(self._header_name(item))
 
         rows = []
         for r in range(self._table.rowCount()):

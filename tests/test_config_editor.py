@@ -174,3 +174,50 @@ def test_config_editor_has_inception_column_order_tab(screen):
     tab = screen.findChildren(QTabWidget)[0]
     labels = [tab.tabText(i) for i in range(tab.count())]
     assert "Inception Column Order" in labels
+
+
+# ── Unordered known columns are auto-listed (issue #67) ──────────────────
+
+def test_reorderable_tab_appends_known_columns_missing_from_saved_order(theme, tmp_path, monkeypatch):
+    from services import config_store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "c.json"))
+    config_store.save_column_order(["Close", "Open"], key="main_column_order")
+
+    from screens.config_editor import ConfigTabWidget
+    tab = ConfigTabWidget(["Column Name"], [("Default",)], theme, reorderable=True,
+                          store_key="main_column_order",
+                          extra_names=lambda: ["Open", "RSC", "My Strategy Col", "RSC", ""])
+    # saved order untouched and first; only genuinely new names appended, once each, blanks skipped
+    assert tab.get_data() == [("Close",), ("Open",), ("RSC",), ("My Strategy Col",)]
+
+
+def test_reorderable_tab_extra_names_also_extend_the_default_list(theme, tmp_path, monkeypatch):
+    from services import config_store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "c.json"))
+    from screens.config_editor import ConfigTabWidget
+    tab = ConfigTabWidget(["Column Name"], [("A",)], theme, reorderable=True,
+                          store_key="main_column_order", extra_names=["B"])
+    assert tab.get_data() == [("A",), ("B",)]
+
+
+def test_extra_names_failure_never_breaks_the_tab(theme, tmp_path, monkeypatch):
+    from services import config_store
+    monkeypatch.setattr(config_store, "_STORE_FILE", str(tmp_path / "c.json"))
+    from screens.config_editor import ConfigTabWidget
+
+    def boom():
+        raise RuntimeError("backend down")
+    tab = ConfigTabWidget(["Column Name"], [("A",)], theme, reorderable=True,
+                          store_key="main_column_order", extra_names=boom)
+    assert tab.get_data() == [("A",)]
+
+
+def test_column_name_sources_cover_formula_strategy_and_inception_columns(monkeypatch):
+    from screens import config_editor
+    from services import formula_tokens, strategy_store, inception_columns
+    monkeypatch.setattr(formula_tokens, "all_field_codes", lambda: ["RSC", "PDTO"])
+    monkeypatch.setattr(strategy_store, "load_all", lambda: [{"columns": [{"name": "Floor_10D"}, {"name": "Trigger"}]}])
+    lmv = config_editor._all_lmv_column_names()
+    assert {"RSC", "PDTO", "Floor_10D", "Trigger"} <= set(lmv)
+    inception = config_editor._all_inception_column_names()
+    assert inception[:2] == ["Sector", "Symbol"] and "52WH" in inception and len(inception) > 100

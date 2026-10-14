@@ -127,3 +127,29 @@ def test_open_formula_history_computes_single_symbol_panel_scoped_to_days(lmv, m
     assert captured["symbol_filter"] == "INFY"
     assert captured["initial_days"] == 20
     assert captured["computed"] is True
+
+
+# ── Main Column Name renames shown in the grid (issue #69) ───────────────
+
+def test_renamed_column_header_is_displayed_but_internal_name_is_kept(lmv, monkeypatch):
+    from services import config_store
+    monkeypatch.setattr(config_store, "peek_rename_map", lambda: {"Week % Change": "WC %"})
+    lmv._headers = ["Sector", "Scrip Name", "Week % Change", "LTP"]
+    data = [["IT", "INFY", "1.5", "100"]]
+
+    lmv._populate_table(data, precomputed_disp=(lmv._headers, data))
+
+    labels = [lmv._table.horizontalHeaderItem(c).text() for c in range(4)]
+    names = [lmv._header_name(lmv._table.horizontalHeaderItem(c)) for c in range(4)]
+    assert labels == ["Sector", "Scrip Name", "WC %", "LTP"]            # what the user sees
+    assert names == ["Sector", "Scrip Name", "Week % Change", "LTP"]    # what logic/saved order/sort use
+    assert lmv._current_column_labels()[2] == "Week % Change"   # internal consumers never see the alias
+
+
+def test_unrenamed_headers_are_untouched_when_no_renames(lmv, monkeypatch):
+    from services import config_store
+    monkeypatch.setattr(config_store, "peek_rename_map", lambda: {})
+    lmv._headers = ["Sector", "Scrip Name", "LTP"]
+    data = [["IT", "INFY", "100"]]
+    lmv._populate_table(data, precomputed_disp=(lmv._headers, data))
+    assert [lmv._table.horizontalHeaderItem(c).text() for c in range(3)] == ["Sector", "Scrip Name", "LTP"]
