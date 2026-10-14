@@ -20,12 +20,56 @@ from services.report_engine import charts, templates
 from services.strategy_alerts import state_store
 
 DEFAULT_INVESTMENT_AMOUNT = 5000.0
+_MAX_BACKEND_PAGES = 20
 
 _RESOLUTION_LABELS = {
     "all_targets_achieved": ("TARGET HIT", "positive"),
     "stopped_out": ("STOP LOSS", "negative"),
     "intraday_closed": ("CLOSED", "neutral"),
 }
+
+
+_SECTOR_PALETTE = ["#2979FF", "#16a34a", "#D97706", "#dc2626", "#8250df", "#0969da", "#bf3989", "#65a30d"]
+_COMPARE_DEFAULTS = ("ALKEM", "TATASTEEL")  # requirements doc §4.3 defaults
+
+
+def sector_distribution(summary: dict) -> list:
+    """Donut segments: number of distinct stocks traded per sector."""
+    stocks: dict = {}
+    for t in summary["trades"]:
+        stocks.setdefault(t.get("sector") or "Unclassified", set()).add(t.get("symbol"))
+    ranked = sorted(stocks.items(), key=lambda kv: -len(kv[1]))
+    return [
+        {"label": sector, "value": len(syms), "color": _SECTOR_PALETTE[i % len(_SECTOR_PALETTE)]}
+        for i, (sector, syms) in enumerate(ranked)
+    ]
+
+
+def compare_stocks(summary: dict, symbols: tuple | None = None) -> list | None:
+    """Stock-vs-stock stats (avg yield, win rate, trade count) for two
+    stocks traded under this strategy (requirements §4.3). Defaults to
+    ALKEM vs TATASTEEL when both traded, else the two most-traded stocks.
+    None when fewer than two stocks traded."""
+    by_symbol: dict = {}
+    for r in summary["rows"]:
+        by_symbol.setdefault(r["symbol"], []).append(r["yield"])
+    if len(by_symbol) < 2:
+        return None
+    if symbols and all(s in by_symbol for s in symbols):
+        picked = list(symbols)
+    elif all(s in by_symbol for s in _COMPARE_DEFAULTS):
+        picked = list(_COMPARE_DEFAULTS)
+    else:
+        picked = sorted(by_symbol, key=lambda k: (-len(by_symbol[k]), k))[:2]
+    return [
+        {
+            "symbol": sym,
+            "trades": len(by_symbol[sym]),
+            "avg_yield": report_metrics.blended_yield(by_symbol[sym]),
+            "win_rate": report_metrics.win_rate(by_symbol[sym]),
+        }
+        for sym in picked
+    ]
 
 
 def _as_date(value) -> date:
@@ -110,19 +154,38 @@ def _backend_resolved_trades(strategy_id: str, date_from: date, date_to: date) -
     try:
         from api import strategy_signals_api
         from api.exceptions import ApiError, NetworkError
-
-        response = strategy_signals_api.list_signals(
-            strategy_id=strategy_id,
-            start_time=datetime.combine(date_from, datetime.min.time()).isoformat(),
-            end_time=datetime.combine(date_to, datetime.max.time()).isoformat(),
-            page_size=100,
-        )
-    except (ApiError, NetworkError):
+    except ImportError:
         return []
-    return [
-        r for r in response.get("items", [])
-        if r.get("resolution") not in (None, "trade_cancelled") and r.get("resolved_at")
-    ]
+
+    start = datetime.combine(date_from, datetime.min.time()).isoformat()
+    end = datetime.combine(date_to, datetime.max.time()).isoformat()
+    items: list = []
+    page = 1
+    while page <= _MAX_BACKEND_PAGES:
+        try:
+            response = strategy_signals_api.list_signals(
+                strategy_id=strategy_id, start_time=start, end_time=end,
+                page=page, page_size=100,
+            )
+        except (ApiError, NetworkError):
+            break
+        items.extend(response.get("items", []))
+        if page >= (response.get("total_pages") or 1):
+            break
+        page += 1
+
+    trades = []
+    for r in items:
+        # The backend row's outcome field is "status" ("open" while still
+        # live); local alert_history calls the same thing "resolution".
+        trade = dict(r)
+        trade["resolution"] = r.get("resolution") or (
+            None if r.get("status") == "open" else r.get("status")
+        )
+        if trade["resolution"] in (None, "trade_cancelled") or not trade.get("resolved_at"):
+            continue
+        trades.append(trade)
+    return trades
 
 
 def resolved_trades_for_strategy(strategy_id: str, date_from: date | None = None,
@@ -323,6 +386,19 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
         + templates.section("Comparative Performance Curve" if comparing else "Performance Curve", curve_html)
     )
 
+    sector_html = ""
+    for summary in [summary_a] + ([summary_b] if comparing else []):
+        segments = sector_distribution(summary)
+        total = sum(seg["value"] for seg in segments)
+        if segments:
+            sector_html += (
+                (f'<p style="font-size:11px;font-weight:600;">{templates.esc(summary["name"])}</p>' if comparing else "")
+                + '<div class="chart-row"><div>'
+                + charts.donut_chart(segments, center_label=str(total), center_sublabel="Stocks")
+                + f'</div>{charts.donut_legend(segments)}</div>'
+            )
+    insights = templates.section("Sector Distribution", sector_html) if sector_html else ""
+
     all_trades = summary_a["trades"] + (summary_b["trades"] if comparing else [])
     available = report_columns.lmv_catalog(report_columns.lmv_metric_names(all_trades))
     columns = report_columns.resolve_columns(columns, available, report_columns.LMV_DEFAULT_COLUMNS)
@@ -365,7 +441,18 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
         + templates.section(f'₹{data["investment_amount"]:,.0f} Investment Simulation', inv_html)
     )
 
-    return [page1, page2]
+    cmp_rows = compare_stocks(summary_a)
+    if cmp_rows:
+        cmp_html = templates.data_table(
+            ["Stock", "Trades", "Avg Intraday Yield", "Win Rate"],
+            [[r["symbol"], str(r["trades"]), _fmt_pct(r["avg_yield"]),
+              f'{r["win_rate"]:.0f}%' if r["win_rate"] is not None else "—"] for r in cmp_rows],
+        ) + charts.bar_chart(
+            [r["symbol"] for r in cmp_rows], [r["avg_yield"] or 0 for r in cmp_rows],
+        )
+        insights += templates.section(f'Cross-Compare — {cmp_rows[0]["symbol"]} vs {cmp_rows[1]["symbol"]}', cmp_html)
+
+    return [page1] + ([insights] if insights else []) + [page2]
 
 
 def build_report_html(data: dict, doc_title: str = "LMV EOD Report", columns: list | None = None) -> str:

@@ -107,9 +107,10 @@ def test_build_report_pages_renders_without_crashing_and_has_two_pages():
 
     pages = lmv_report_data.build_report_pages(data)
 
-    assert len(pages) == 2
-    assert "ALKEM" in pages[1]
-    assert "TARGET HIT" in pages[1]
+    assert len(pages) == 3  # summary, sector distribution, trade table
+    assert "Sector Distribution" in pages[1]
+    assert "ALKEM" in pages[-1]
+    assert "TARGET HIT" in pages[-1]
 
 
 def test_build_report_pages_handles_no_trades():
@@ -140,3 +141,37 @@ def test_fallback_exit_price_used_when_exit_price_missing():
 
     summary = lmv_report_data.compute_strategy_summary("s1", None, None)
     assert round(summary["rows"][0]["yield"], 2) == 15.0
+
+
+def test_backend_signals_use_status_field_and_paginate(monkeypatch):
+    """Issue #56: backend rows carry "status", not "resolution" — they used
+    to be dropped wholesale, leaving a Custom-range report blank."""
+    from api import strategy_signals_api
+
+    def row(i, status, resolved="2026-09-04T10:00:00"):
+        return {"id": f"b{i}", "strategy_id": "s1", "symbol": f"S{i}", "direction": "BUY",
+                "status": status, "entry_price": 100.0, "exit_price": 110.0,
+                "entry_time": "2026-09-03T10:00:00", "resolved_at": resolved, "metrics": {}}
+
+    pages = {
+        1: {"items": [row(1, "all_targets_achieved"), row(2, "open", None)], "total_pages": 2},
+        2: {"items": [row(3, "stopped_out"), row(4, "trade_cancelled")], "total_pages": 2},
+    }
+    monkeypatch.setattr(strategy_signals_api, "list_signals", lambda **kw: pages[kw["page"]])
+
+    out = lmv_report_data._backend_resolved_trades("s1", date(2026, 9, 3), date(2026, 9, 8))
+    assert [t["symbol"] for t in out] == ["S1", "S3"]
+    assert [t["resolution"] for t in out] == ["all_targets_achieved", "stopped_out"]
+
+
+def test_cross_compare_defaults_to_alkem_vs_tatasteel():
+    _seed_strategy("s1", "Strategy A")
+    for sym, ex in (("ALKEM", 110), ("TATASTEEL", 90), ("INFY", 120)):
+        state_store.append_alert_history(
+            _trade("s1", sym, "BUY", 100, ex, "all_targets_achieved", "2026-03-05T10:00:00")
+        )
+    data = lmv_report_data.build_report_data("s1", None, "daily", date(2026, 3, 5), date(2026, 3, 5))
+    cmp_rows = lmv_report_data.compare_stocks(data["summary_a"])
+    assert [r["symbol"] for r in cmp_rows] == ["ALKEM", "TATASTEEL"]
+    assert "Cross-Compare" in "".join(lmv_report_data.build_report_pages(data))
+    assert lmv_report_data.sector_distribution(data["summary_a"])[0]["label"] == "IT"
