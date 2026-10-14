@@ -17,7 +17,11 @@ _REAL_ENSURE_LOADED_ASYNC = lif.ensure_loaded_async
 def _reset_module_state(tmp_path, monkeypatch):
     monkeypatch.setattr(lif, "_CACHE_FILE", str(tmp_path / "inception_lmv_snapshot.json"))
     monkeypatch.setattr(lif, "ensure_loaded_async", _REAL_ENSURE_LOADED_ASYNC)
+    monkeypatch.setattr(lif, "_INDICATOR_CACHE_FILE", str(tmp_path / "inception_lmv_indicators.json"))
     monkeypatch.setattr(lif, "_snapshot", {})
+    monkeypatch.setattr(lif, "_base_snapshot", {})
+    monkeypatch.setattr(lif, "_indicator_snapshot", {})
+    monkeypatch.setattr(lif, "_on_ready_cb", None)
     monkeypatch.setattr(lif, "_loading", False)
     monkeypatch.setattr(lif, "_loaded", False)
     yield
@@ -163,3 +167,72 @@ def test_ensure_loaded_async_completes(monkeypatch):
             t.join(timeout=10)
     assert lif.current_snapshot().get("INFY", {}).get("ATH") == 77.0
     assert done
+
+
+# ── Indicator Library fields ────────────────────────────────────────────────
+
+def _bars(n=60):
+    from datetime import timedelta
+    start = date(2026, 6, 1)
+    return [
+        {"trade_date": start + timedelta(days=i), "open": 100 + i, "high": 101 + i,
+         "low": 99 + i, "close": 100 + i, "volume": 1000, "open_interest": 0}
+        for i in range(n)
+    ]
+
+
+def _stub_indicator_sources(monkeypatch, instances):
+    from services import indicator_library, inception_bars_store
+    _stub_sources(monkeypatch)
+    monkeypatch.setattr(indicator_library, "load_instances", lambda: list(instances))
+    monkeypatch.setattr(indicator_library, "field_codes", lambda: ["SMA(5)"])
+    monkeypatch.setattr(inception_bars_store, "latest_synced_date_on_or_before", lambda d: date(2026, 7, 29))
+    monkeypatch.setattr(inception_bars_store, "available_symbols", lambda: ["ABB_I", "M_M_I"])
+    monkeypatch.setattr(inception_bars_store, "bars_for_symbol", lambda sym, a=None, b=None: _bars())
+
+
+def test_indicator_values_merge_into_snapshot_by_normalized_symbol(monkeypatch):
+    from services import indicator_library
+    inst = indicator_library.new_instance("SMA", {"period": 5})
+    _stub_indicator_sources(monkeypatch, [inst])
+    monkeypatch.setattr(lif, "_base_snapshot", {"ABB": {"52WH": 1.0}, "MM": {"52WH": 2.0}})
+
+    lif._load_indicators(force=True)
+
+    snap = lif.current_snapshot()
+    assert snap["ABB"]["52WH"] == 1.0                       # base fields untouched
+    assert snap["ABB"]["SMA(5)"] == snap["MM"]["SMA(5)"]    # same synthetic bars
+    assert snap["ABB"]["SMA(5)"] is not None
+
+
+def test_indicator_cache_reused_until_indicator_set_changes(monkeypatch):
+    from services import indicator_library
+    inst = indicator_library.new_instance("SMA", {"period": 5})
+    _stub_indicator_sources(monkeypatch, [inst])
+    lif._load_indicators(force=True)
+
+    calls = []
+    monkeypatch.setattr(lif, "_build_indicator_snapshot", lambda i: calls.append(1) or {})
+    lif._load_indicators()                      # same set -> disk cache hit
+    assert calls == []
+    other = indicator_library.new_instance("SMA", {"period": 9})
+    monkeypatch.setattr(indicator_library, "load_instances", lambda: [inst, other])
+    lif._load_indicators()                      # set changed -> recompute
+    assert calls == [1]
+
+
+def test_no_indicators_leaves_snapshot_unchanged(monkeypatch):
+    from services import indicator_library
+    _stub_indicator_sources(monkeypatch, [])
+    monkeypatch.setattr(lif, "_base_snapshot", {"ABB": {"52WH": 1.0}})
+    lif._load_indicators()
+    assert lif.current_snapshot() == {"ABB": {"52WH": 1.0}}
+
+
+def test_all_field_codes_and_catalogue_include_indicators(monkeypatch):
+    from services import indicator_library
+    monkeypatch.setattr(indicator_library, "field_codes", lambda: ["RSI(14)", "52WH"])
+    codes = lif.all_field_codes()
+    assert codes[:len(lif.FIELD_CODES)] == lif.FIELD_CODES
+    assert codes.count("52WH") == 1 and "RSI(14)" in codes
+    assert "RSI(14)" in [e["token"]["value"] for e in lif.field_catalogue()]

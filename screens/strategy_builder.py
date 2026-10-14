@@ -2161,7 +2161,8 @@ class StrategyEditor(QWidget):
         invisible to it.
         """
         from services.formula_tokens import all_field_codes
-        from services.lmv_inception_fields import FIELD_CODES as _inception_codes
+        from services.lmv_inception_fields import all_field_codes
+        _inception_codes = all_field_codes()
         offered = self._lmv_headers + [
             c for c in all_field_codes() if c not in self._lmv_headers
         ]
@@ -2696,6 +2697,14 @@ class StrategyBuilderScreen(QWidget):
         vars_btn.clicked.connect(self._open_variables_manager)
         self._vars_btn = vars_btn
 
+        ind_btn = _btn("Indicators", theme=t)
+        ind_btn.setToolTip(
+            "Indicator Library — configure RSI/MACD/SMA/... and use them in strategy "
+            "formulas as [RSI(14)] etc. (latest daily value per stock)"
+        )
+        ind_btn.clicked.connect(self._open_indicator_library)
+        self._ind_btn = ind_btn
+
         new_btn = _btn("+ New Strategy", accent=True, theme=t)
         new_btn.clicked.connect(self._new_strategy)
         self._new_btn = new_btn
@@ -2704,6 +2713,8 @@ class StrategyBuilderScreen(QWidget):
         top_lay.addSpacing(16)
         top_lay.addWidget(self._lmv_warn)
         top_lay.addStretch()
+        top_lay.addWidget(ind_btn)
+        top_lay.addSpacing(8)
         top_lay.addWidget(vars_btn)
         top_lay.addSpacing(8)
         top_lay.addWidget(new_btn)
@@ -2901,13 +2912,23 @@ class StrategyBuilderScreen(QWidget):
         columns plus every Formula Builder (Data menu) field not already
         one of them, so a saved Variable can reference one too."""
         from services.formula_tokens import all_field_codes
-        from services.lmv_inception_fields import FIELD_CODES as _inception_codes
+        from services.lmv_inception_fields import all_field_codes
+        _inception_codes = all_field_codes()
         offered = self._lmv_headers + [
             c for c in all_field_codes() if c not in self._lmv_headers
         ]
         seen = set(offered)
         offered += [c for c in _inception_codes if c not in seen]
         return offered
+
+    def _open_indicator_library(self):
+        from screens.indicator_library_dialog import IndicatorLibraryDialog
+        IndicatorLibraryDialog(parent=self).exec()
+        # Saving/deleting an indicator already schedules the background
+        # recompute (indicator_library._persist); this just makes sure the
+        # field snapshot is loaded at all if LMV hasn't kicked it yet.
+        from services import lmv_inception_fields
+        lmv_inception_fields.ensure_loaded_async()
 
     def _open_variables_manager(self):
         from screens.formula_editor import VariablesManagerDialog

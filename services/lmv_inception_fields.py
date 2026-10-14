@@ -15,6 +15,15 @@ snapshot(as_of_date), the identical call HMV's own grid is built from
 reimplementation, no range gate (an as-of snapshot with no user-chosen date
 window — same as services.inception_compute_service.snapshot()).
 
+── Indicator Library fields ─────────────────────────────────────────────────
+Indicators configured in the Indicator Library (RSI(14), SMA(20), MACD(...)
+.Signal, ...) are offered next to the Group A/B codes and resolve the same
+way: the latest value per symbol, computed from that symbol's recent daily
+bars (the last _INDICATOR_LOOKBACK_DAYS — plenty of warm-up for every
+registered indicator) on the same background thread, cached in
+inception_lmv_indicators.json, and recomputed only when the indicator set or
+the synced bars change. They are daily-close values, not intraday ticks.
+
 ── Performance ─────────────────────────────────────────────────────────────
 A cold walk across the whole synced universe (~217 instruments x up to
 ~6500 bars) is ~45s in pure Python — far too slow to block LMV's load. So:
@@ -44,6 +53,10 @@ from services import inception_columns
 _CACHE_FILE = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), "inception_lmv_snapshot.json"
 )
+_INDICATOR_CACHE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)), "inception_lmv_indicators.json"
+)
+_INDICATOR_LOOKBACK_DAYS = 900
 
 # The request's exact column list — GROUP_A minus the P.* raw previous-day
 # fields, plus the 24 bare GROUP_B gap codes (each aliased to its HIGH
@@ -71,6 +84,9 @@ _FIELD_CODE_SET = set(FIELD_CODES)
 # {normalized_symbol: {code: value}} — replaced atomically (never mutated in
 # place) so a reader on the LMV worker thread always sees a consistent dict.
 _snapshot: dict[str, dict] = {}
+_base_snapshot: dict[str, dict] = {}       # Group A/B codes only
+_indicator_snapshot: dict[str, dict] = {}  # Indicator Library codes only
+_on_ready_cb = None
 _lock = threading.Lock()
 _loading = False
 _loaded = False
@@ -80,6 +96,18 @@ def _description(code: str) -> str:
     return (inception_columns.GROUP_A.get(code)
             or inception_columns.GROUP_B.get(code)
             or f"Inception historical field ({code})")
+
+
+def indicator_field_codes() -> list[str]:
+    """Field codes of every indicator configured in the Indicator Library
+    right now (warms the library's cache — may hit config_store once)."""
+    from services import indicator_library
+    return indicator_library.field_codes()
+
+
+def all_field_codes() -> list[str]:
+    """Group A/B codes plus the configured indicators' codes."""
+    return FIELD_CODES + [c for c in indicator_field_codes() if c not in _FIELD_CODE_SET]
 
 
 def field_catalogue() -> list[dict]:
@@ -99,6 +127,20 @@ def field_catalogue() -> list[dict]:
             "token": {"type": "col", "value": code},
         }
         for code in FIELD_CODES
+    ] + [
+        {
+            "name": f"[{code}]",
+            "signature": f"[{code}]",
+            "description": (
+                f"Indicator Library: {code}\n\nLatest value from this stock's "
+                f"daily continuous-futures bars (as of the last synced trading "
+                f"day — not an intraday tick). Blank for a stock with no F&O "
+                f"series or too little history."
+            ),
+            "token": {"type": "col", "value": code},
+        }
+        for code in indicator_field_codes()
+        if code not in _FIELD_CODE_SET
     ]
 
 
@@ -136,15 +178,18 @@ def clear_cache() -> None:
     Inception sync — the fingerprint would invalidate the file anyway, but
     this also frees the resident dict and forces the next ensure_loaded_async
     to recompute."""
-    global _snapshot, _loaded
+    global _snapshot, _base_snapshot, _indicator_snapshot, _loaded
     with _lock:
         _snapshot = {}
+        _base_snapshot = {}
+        _indicator_snapshot = {}
         _loaded = False
-    try:
-        if os.path.exists(_CACHE_FILE):
-            os.remove(_CACHE_FILE)
-    except OSError:
-        pass
+    for path in (_CACHE_FILE, _INDICATOR_CACHE_FILE):
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError:
+            pass
 
 
 # ── Loading ────────────────────────────────────────────────────────────────
@@ -200,27 +245,111 @@ def _build_snapshot() -> tuple[str, dict]:
     return as_of.isoformat(), out
 
 
+def _merge_snapshots() -> None:
+    """Rebuild the merged snapshot from the base + indicator layers and swap
+    it in atomically (readers never see a half-built dict)."""
+    global _snapshot
+    with _lock:
+        base, ind = _base_snapshot, _indicator_snapshot
+    if not ind:
+        merged = base
+    else:
+        merged = {sym: {**vals, **ind.get(sym, {})} for sym, vals in base.items()}
+        for sym, vals in ind.items():
+            merged.setdefault(sym, dict(vals))
+    with _lock:
+        _snapshot = merged
+
+
+def _indicator_fingerprint(instances: list) -> str:
+    from services import indicator_library
+    labels = sorted(indicator_library.instance_label(i["key"], i.get("params")) for i in instances)
+    return _fingerprint() + "#" + ",".join(labels)
+
+
+def _build_indicator_snapshot(instances: list) -> dict:
+    """{normalized_symbol: {indicator_code: latest value}} from each
+    instrument's last _INDICATOR_LOOKBACK_DAYS of bars."""
+    from datetime import timedelta
+    from services import indicator_library, inception_bars_store
+
+    as_of = inception_bars_store.latest_synced_date_on_or_before(date.today())
+    if as_of is None:
+        return {}
+    since = as_of - timedelta(days=_INDICATOR_LOOKBACK_DAYS)
+    out: dict[str, dict] = {}
+    for symbol in inception_bars_store.available_symbols():
+        key = _normalize_inception_symbol(symbol)
+        if not key:
+            continue
+        bars = inception_bars_store.bars_for_symbol(symbol, since, as_of)
+        if bars:
+            out[key] = indicator_library.latest_values(bars, instances)
+    return out
+
+
+def _load_indicators(force: bool = False) -> None:
+    """Fills _indicator_snapshot (disk cache when its fingerprint — synced
+    bars + the exact indicator set — still matches, else a fresh compute)
+    and re-merges. Never raises."""
+    global _indicator_snapshot
+    try:
+        from services import indicator_library
+        instances = indicator_library.load_instances()
+        if not instances:
+            rows: dict = {}
+        else:
+            want = _indicator_fingerprint(instances)
+            rows = None
+            if not force:
+                try:
+                    with open(_INDICATOR_CACHE_FILE, encoding="utf-8") as fh:
+                        blob = json.load(fh)
+                    if blob.get("fingerprint") == want:
+                        rows = dict(blob.get("rows") or {})
+                except (OSError, ValueError):
+                    pass
+            if rows is None:
+                rows = _build_indicator_snapshot(instances)
+                try:
+                    tmp = _INDICATOR_CACHE_FILE + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as fh:
+                        json.dump({"fingerprint": want, "rows": rows}, fh)
+                    os.replace(tmp, _INDICATOR_CACHE_FILE)
+                except OSError:
+                    pass
+        with _lock:
+            _indicator_snapshot = rows
+        _merge_snapshots()
+    except Exception:  # never let a background walk crash the app
+        pass
+
+
 def _do_load(on_ready) -> None:
-    global _snapshot, _loading, _loaded
+    global _base_snapshot, _loading, _loaded
     try:
         fingerprint, cached_rows = _read_disk_cache()
         want = _fingerprint()
         if fingerprint == want and cached_rows:
             with _lock:
-                _snapshot = cached_rows
-                _loaded = True
-            return
-        # Stale cache still beats nothing while the walk runs.
-        if cached_rows:
+                _base_snapshot = cached_rows
+            _merge_snapshots()
+        else:
+            # Stale cache still beats nothing while the walk runs.
+            if cached_rows:
+                with _lock:
+                    _base_snapshot = cached_rows
+                _merge_snapshots()
+                if on_ready:
+                    _safe_call(on_ready)
+            as_of, rows = _build_snapshot()
+            _write_disk_cache(want, as_of, rows)
             with _lock:
-                _snapshot = cached_rows
-            if on_ready:
-                _safe_call(on_ready)
-        as_of, rows = _build_snapshot()
-        _write_disk_cache(want, as_of, rows)
+                _base_snapshot = rows
+            _merge_snapshots()
         with _lock:
-            _snapshot = rows
             _loaded = True
+        _load_indicators()
     except Exception:  # never let a background walk crash the app
         pass
     finally:
@@ -228,6 +357,38 @@ def _do_load(on_ready) -> None:
             _loading = False
         if on_ready:
             _safe_call(on_ready)
+
+
+_indicator_refreshing = False
+_indicator_refresh_pending = False
+
+
+def refresh_indicators_async() -> None:
+    """Recompute just the indicator layer (the Indicator Library changed).
+    Coalesces: a change arriving mid-recompute triggers one more pass. Fires
+    the on_ready callback registered by ensure_loaded_async when done."""
+    global _indicator_refreshing, _indicator_refresh_pending
+    with _lock:
+        if not _loaded and not _snapshot:
+            return  # nothing loaded yet — the first load picks the new set up
+        if _indicator_refreshing:
+            _indicator_refresh_pending = True
+            return
+        _indicator_refreshing = True
+
+    def _run():
+        global _indicator_refreshing, _indicator_refresh_pending
+        while True:
+            _load_indicators()
+            if _on_ready_cb:
+                _safe_call(_on_ready_cb)
+            with _lock:
+                if not _indicator_refresh_pending:
+                    _indicator_refreshing = False
+                    return
+                _indicator_refresh_pending = False
+
+    threading.Thread(target=_run, name="lmv-indicator-fields", daemon=True).start()
 
 
 def _safe_call(fn) -> None:
@@ -244,7 +405,9 @@ def ensure_loaded_async(on_ready=None) -> None:
     caller can rely on it). on_ready() is invoked (possibly from the daemon
     thread — marshal to the GUI thread yourself) whenever _snapshot changes.
     """
-    global _loading
+    global _loading, _on_ready_cb
+    if on_ready:
+        _on_ready_cb = on_ready
     with _lock:
         if _loaded:
             if on_ready:

@@ -1540,3 +1540,23 @@ def test_apply_strategies_include_streak_columns_false_suppresses_them():
     new_headers, new_data = apply_strategies([strategy], headers, data, include_streak_columns=False)
     assert new_headers == headers
     assert new_data == data
+
+
+def test_apply_strategies_resolves_indicator_library_code_with_parentheses():
+    """An Indicator Library field ([RSI(14)] style) resolves like any other
+    inception field — and works inside a row filter, not just a column."""
+    from services.strategy_engine import apply_strategies
+    strat = {
+        "id": "ind1", "active": True,
+        "row_filter": [tok_col("RSI(14)"), tok_op(">"), tok_num(60)],
+        "columns": [{"name": "RSI Gap", "formula": [tok_col("RSI(14)"), tok_op("-"), tok_num(50)]}],
+    }
+    headers = ["Scrip Name", "Close"]
+    data = [["BAJAJ-AUTO", "9000"], ["RANDOMCASH", "50"], ["ABB", "100"]]
+    inception_values = {"BAJAJAUTO": {"RSI(14)": 70.0}, "ABB": {"RSI(14)": 40.0}}
+    new_headers, new_data = apply_strategies(
+        [strat], headers, data, inception_values=inception_values,
+    )
+    assert [r[0] for r in new_data] == ["BAJAJ-AUTO"]        # only RSI > 60 survives
+    assert new_data[0][new_headers.index("RSI Gap")] == 20.0
+    assert "RSI(14)" not in new_headers

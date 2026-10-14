@@ -425,8 +425,9 @@ def _persist(instances: list) -> None:
 def _invalidate_dependents() -> None:
     """compute_for_bars memoizes per (symbol, bars, date) — a changed
     indicator set makes those entries stale."""
-    from services import inception_formula_builder_columns
+    from services import inception_formula_builder_columns, lmv_inception_fields
     inception_formula_builder_columns.clear_cache()
+    lmv_inception_fields.refresh_indicators_async()
 
 
 def field_codes() -> list:

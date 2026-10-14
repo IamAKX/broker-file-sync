@@ -1076,8 +1076,8 @@ class ExpressionEditorDialog(QDialog):
         if inception_field_codes is not None:
             self._inception_field_codes = list(inception_field_codes)
         else:
-            from services.lmv_inception_fields import FIELD_CODES
-            self._inception_field_codes = list(FIELD_CODES)
+            from services.lmv_inception_fields import all_field_codes
+            self._inception_field_codes = list(all_field_codes())
         self._inception_field_code_set = set(self._inception_field_codes)
         self._row_symbol_col = row_symbol_col if row_symbol_col is not None else ROW_SYMBOL_COLUMN
         # The sheet's OWN currently-loaded columns — a strict subset of
