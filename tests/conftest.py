@@ -220,3 +220,29 @@ def _isolate_disk_stores(tmp_path, monkeypatch):
     # one test can't be served to the next.
     from services import external_import_source
     external_import_source._reset_caches()
+
+
+# ── clean process exit ────────────────────────────────────────────────────
+# On the Linux CI runner the suite passes and then the interpreter segfaults
+# (exit 139) while tearing down QtWebEngine objects (the report preview /
+# PDF export views) left alive until shutdown. Nothing is left to verify at
+# that point, so once pytest has printed its summary leave with the real
+# result code instead of running Qt's finalisers. xdist workers are skipped:
+# they must shut down through execnet.
+_SESSION_EXIT_STATUS = {"code": None}
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _SESSION_EXIT_STATUS["code"] = int(exitstatus)
+
+
+def pytest_unconfigure(config):
+    import os
+    import sys
+
+    code = _SESSION_EXIT_STATUS["code"]
+    if code is None or os.environ.get("PYTEST_XDIST_WORKER"):
+        return
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
