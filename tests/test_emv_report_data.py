@@ -448,3 +448,24 @@ def test_trailing_days_true_shares_one_history_pass_across_strategies(monkeypatc
     b = emv_report_data.trailing_days_true("ABB", strategies[1], as_of, cache=cache)
     assert calls == ["ABB"]                       # the second strategy reused the cached rows
     assert a == b == emv_report_data.DAYS_TRUE_LOOKBACK
+
+
+# ── Right-hand axis for columns of a very different scale (issue #61 follow-up: RSC) ──
+
+def test_pick_axes_puts_far_scale_extras_on_the_right_axis():
+    price = [4800.0, 4850.0, 4900.0, 4750.0]
+    assert emv_report_data.pick_axes(price, [[99.0, 101.0, 103.0, 100.0], [4700.0, 4800.0, 4900.0, 5000.0],
+                                              [None, None], [40000.0, 41000.0]]) == ["right", "left", "left", "right"]
+    assert emv_report_data.pick_axes([], [[1.0]]) == ["left"]            # nothing to compare against -> keep left
+
+
+def test_stock_report_draws_a_right_axis_for_an_rsc_like_extra_series():
+    _seed("DIVISLAB_I", date(2026, 1, 1), 30, start_price=4800)
+    data = emv_report_data.build_stock_report_data("DIVISLAB_I", "CLOSE", date(2026, 1, 12), date(2026, 1, 30))
+    data["extras"] = [{"field": "RSC [RSC]", "color": "#aa00aa",
+                       "series": [{"date": e["date"], "value": 100.0 + i * 0.5, "close": e["close"]}
+                                  for i, e in enumerate(data["series"])]}]
+    html = "".join(emv_report_data.build_stock_report_pages(data))
+    assert "RSC [RSC] (right axis)" in html                       # legend says which scale it is on
+    # the right-hand tick labels run on RSC's own scale (~100-105), not the price's (~4800)
+    assert ">100.0<" in html or ">100.5<" in html or ">101.0<" in html or ">104.5<" in html

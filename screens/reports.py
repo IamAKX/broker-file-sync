@@ -26,7 +26,7 @@ import font_scale
 from PySide6.QtCore import QDate, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QCheckBox, QColorDialog, QComboBox, QCompleter, QDateEdit, QFileDialog, QFrame, QHBoxLayout, QLabel,
+    QCheckBox, QColorDialog, QComboBox, QCompleter, QDateEdit, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
     QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -35,7 +35,7 @@ from PySide6.QtWebEngineWidgets import QWebEngineView
 from screens.report_column_picker import ColumnPickerWidget
 from services import (
     emv_report_data, fuku_live_report_data, lmv_report_data, report_columns,
-    report_metrics, report_recipients, report_store, strategy_store,
+    report_metrics, report_recipients, report_store, sector_report_data, strategy_store,
 )
 from services.strategy_alerts import config_store as alerts_config_store
 from services import indicator_library
@@ -46,6 +46,7 @@ _REPORT_TYPE_LABELS = {
     report_store.REPORT_TYPE_LMV: "LMV EOD Report",
     report_store.REPORT_TYPE_EMV: "EMV EOD Report",
     report_store.REPORT_TYPE_FUKU_LIVE: "Fuku Live Report",
+    report_store.REPORT_TYPE_SECTOR: "Sector Report",
 }
 _REPORT_TYPE_DESCRIPTIONS = {
     report_store.REPORT_TYPE_LMV: "Strategy performance — directional yield, "
@@ -54,6 +55,8 @@ _REPORT_TYPE_DESCRIPTIONS = {
                                    "user-defined categories and Fuku Score.",
     report_store.REPORT_TYPE_FUKU_LIVE: "Per-alert live report — Fuku Score, "
                                          "support/resistance, lifecycle.",
+    report_store.REPORT_TYPE_SECTOR: "EOD or Live sector heatmaps, strongest/weakest "
+                                      "sectors, sector bars and stock drill-down.",
 }
 _TIMEFRAME_OPTIONS = [
     (report_metrics.TIMEFRAME_DAILY, "Daily"),
@@ -182,6 +185,35 @@ def _is_fuku_strategy_scope(report: dict) -> bool:
             and (report.get("subject_config") or {}).get("scope") == "strategy")
 
 
+def _is_live_sector(report: dict) -> bool:
+    return (report.get("type") == report_store.REPORT_TYPE_SECTOR
+            and (report.get("subject_config") or {}).get("mode") == "live")
+
+
+def _is_auto_refresh_report(report: dict) -> bool:
+    """Reports that regenerate on a timer while their preview is open."""
+    return _is_fuku_strategy_scope(report) or _is_live_sector(report)
+
+
+def _build_sector_html(report: dict, lmv_snapshot: tuple | None = None) -> str:
+    subject = report.get("subject_config", {})
+    metric = subject.get("metric") or None
+    mode = subject.get("mode", "eod")
+    if mode == "live":
+        headers, data = lmv_snapshot if lmv_snapshot else ([], [])
+        source = sector_report_data.live_stocks(headers, data, metric)
+    else:
+        as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else date.today()
+        source = sector_report_data.eod_stocks(as_of, metric)
+    sector_data = sector_report_data.build_sector_report_data(
+        source, mode, metric, selected_sector=subject.get("sector"),
+        primary_timeframe=subject.get("primary_timeframe", "Daily"),
+        heat_step=subject.get("heat_step") or None,
+        refresh_minutes=int(subject.get("refresh_minutes") or 0) if mode == "live" else 0,
+    )
+    return sector_report_data.build_sector_report_html(sector_data, doc_title=report.get("name", "Sector Report"))
+
+
 def _build_fuku_live_html(report: dict, new_since: datetime | None = None) -> str:
     subject = report.get("subject_config", {})
     if subject.get("scope") == "strategy":
@@ -201,7 +233,7 @@ def _build_fuku_live_html(report: dict, new_since: datetime | None = None) -> st
     return fuku_live_report_data.build_report_html(data, doc_title=report.get("name", "Fuku Live Report"))
 
 
-def _build_report_html(report: dict, new_since: datetime | None = None) -> str:
+def _build_report_html(report: dict, new_since: datetime | None = None, lmv_snapshot: tuple | None = None) -> str:
     report_type = report.get("type")
     if report_type == report_store.REPORT_TYPE_LMV:
         html = _build_lmv_html(report)
@@ -209,6 +241,8 @@ def _build_report_html(report: dict, new_since: datetime | None = None) -> str:
         html = _build_emv_html(report)
     elif report_type == report_store.REPORT_TYPE_FUKU_LIVE:
         html = _build_fuku_live_html(report, new_since)
+    elif report_type == report_store.REPORT_TYPE_SECTOR:
+        html = _build_sector_html(report, lmv_snapshot)
     else:
         html = _build_placeholder_html(report)
     # Light/Dark chosen in the wizard — applied here so every report type
@@ -913,6 +947,139 @@ class ReportsScreen(QWidget):
         self._fuku_strategy_frame.setVisible(is_strategy)
         self._fuku_single_frame.setVisible(not is_strategy)
 
+    def _populate_sector_fields(self):
+        """Sector Report wizard (issue #66)."""
+        from services import inception_sector, trend_categories  # noqa: F401  (trend import keeps lazy-import style uniform)
+
+        layout = self._type_fields_layout
+        layout.addWidget(self._field_label("Report mode"))
+        self._sector_mode_combo = QComboBox()
+        self._sector_mode_combo.addItem("EOD — end-of-day snapshot of the synced data", "eod")
+        self._sector_mode_combo.addItem("Live — latest values from the open Live Master View", "live")
+        self._sector_mode_combo.currentIndexChanged.connect(self._on_sector_mode_changed)
+        layout.addWidget(self._sector_mode_combo)
+
+        self._sector_eod_frame = QFrame()
+        eod_lay = QVBoxLayout(self._sector_eod_frame)
+        eod_lay.setContentsMargins(0, 0, 0, 0)
+        eod_lay.addWidget(self._field_label("EOD date (the latest synced trading day on or before it is used)"))
+        self._sector_as_of = QDateEdit()
+        self._sector_as_of.setCalendarPopup(True)
+        self._sector_as_of.setDisplayFormat("dd-MMM-yyyy")
+        self._sector_as_of.setDate(QDate.currentDate())
+        eod_lay.addWidget(self._sector_as_of)
+        layout.addWidget(self._sector_eod_frame)
+
+        self._sector_live_frame = QFrame()
+        live_lay = QVBoxLayout(self._sector_live_frame)
+        live_lay.setContentsMargins(0, 0, 0, 0)
+        live_lay.addWidget(self._field_label(
+            "Auto-refresh every N minutes while the preview is open (0 = off). Needs the Live Master View "
+            "to be running."))
+        self._sector_refresh_spin = QSpinBox()
+        self._sector_refresh_spin.setRange(0, 240)
+        self._sector_refresh_spin.setValue(5)
+        live_lay.addWidget(self._sector_refresh_spin)
+        layout.addWidget(self._sector_live_frame)
+
+        layout.addWidget(self._field_label("Sector view"))
+        self._sector_view_combo = QComboBox()
+        self._sector_view_combo.addItem("All sectors", None)
+        try:
+            inception_sector.refresh()
+            for name in inception_sector.all_sectors():
+                self._sector_view_combo.addItem(f"Specific sector — {name}", name)
+        except Exception:
+            pass
+        layout.addWidget(self._sector_view_combo)
+
+        layout.addWidget(self._field_label("Default timeframe (shown first)"))
+        self._sector_timeframe_combo = QComboBox()
+        for tf in sector_report_data.TIMEFRAMES:
+            self._sector_timeframe_combo.addItem(tf, tf)
+        layout.addWidget(self._sector_timeframe_combo)
+
+        layout.addWidget(self._field_label("Custom % change metric (optional, in addition to Daily / Weekly / Monthly)"))
+        self._sector_metric_combo = QComboBox()
+        self._sector_metric_combo.addItem("None — default Daily / Weekly / Monthly only", sector_report_data.METRIC_NONE)
+        self._sector_metric_combo.addItem("Two fields — % change from field A to field B", sector_report_data.METRIC_PAIR)
+        self._sector_metric_combo.addItem("A strategy's column", sector_report_data.METRIC_STRATEGY)
+        self._sector_metric_combo.currentIndexChanged.connect(self._on_sector_metric_changed)
+        layout.addWidget(self._sector_metric_combo)
+
+        self._sector_pair_frame = QFrame()
+        pair_lay = QHBoxLayout(self._sector_pair_frame)
+        pair_lay.setContentsMargins(0, 0, 0, 0)
+        self._sector_pair_from = QComboBox()
+        self._sector_pair_to = QComboBox()
+        for combo in (self._sector_pair_from, self._sector_pair_to):
+            combo.setEditable(True)
+            for code in hfs.available_fields():
+                combo.addItem(code)
+        self._sector_pair_from.setCurrentText("MT")
+        self._sector_pair_to.setCurrentText("CLOSE")
+        pair_lay.addWidget(QLabel("From (A):"))
+        pair_lay.addWidget(self._sector_pair_from, 1)
+        pair_lay.addWidget(QLabel("To (B):"))
+        pair_lay.addWidget(self._sector_pair_to, 1)
+        layout.addWidget(self._sector_pair_frame)
+
+        self._sector_strategy_frame = QFrame()
+        strat_lay = QHBoxLayout(self._sector_strategy_frame)
+        strat_lay.setContentsMargins(0, 0, 0, 0)
+        self._sector_strategy_combo = QComboBox()
+        self._sector_strategy_combo.currentIndexChanged.connect(self._refresh_sector_strategy_columns)
+        self._sector_column_combo = QComboBox()
+        strat_lay.addWidget(self._sector_strategy_combo, 1)
+        strat_lay.addWidget(self._sector_column_combo, 1)
+        layout.addWidget(self._sector_strategy_frame)
+
+        layout.addWidget(self._field_label("Heatmap colour step in % (0 = automatic)"))
+        self._sector_step_spin = QDoubleSpinBox()
+        self._sector_step_spin.setRange(0, 1000)
+        self._sector_step_spin.setDecimals(2)
+        self._sector_step_spin.setValue(0)
+        layout.addWidget(self._sector_step_spin)
+
+        self._on_sector_mode_changed()
+        self._on_sector_metric_changed()
+
+    def _sector_strategies(self) -> list:
+        """Strategies whose columns can serve as the custom metric: Inception
+        strategies for an EOD report, Live Master View strategies for a Live
+        one (each mode evaluates against its own data)."""
+        from services import inception_strategy_store
+        mode = self._sector_mode_combo.currentData()
+        return list(inception_strategy_store.load_all() if mode == "eod" else strategy_store.load_all())
+
+    def _on_sector_mode_changed(self):
+        is_eod = self._sector_mode_combo.currentData() == "eod"
+        self._sector_eod_frame.setVisible(is_eod)
+        self._sector_live_frame.setVisible(not is_eod)
+        previous = self._sector_strategy_combo.currentData()
+        self._sector_strategy_combo.blockSignals(True)
+        self._sector_strategy_combo.clear()
+        for strat in self._sector_strategies():
+            self._sector_strategy_combo.addItem(strat.get("name", ""), strat.get("id"))
+        self._sector_strategy_combo.blockSignals(False)
+        self._select_data(self._sector_strategy_combo, previous)
+        self._refresh_sector_strategy_columns()
+
+    def _refresh_sector_strategy_columns(self):
+        current = self._sector_column_combo.currentText()
+        self._sector_column_combo.clear()
+        strat = next((s for s in self._sector_strategies() if s.get("id") == self._sector_strategy_combo.currentData()), None)
+        for col in (strat or {}).get("columns", []):
+            if col.get("name"):
+                self._sector_column_combo.addItem(col["name"])
+        if current:
+            self._sector_column_combo.setCurrentText(current)
+
+    def _on_sector_metric_changed(self):
+        kind = self._sector_metric_combo.currentData()
+        self._sector_pair_frame.setVisible(kind == sector_report_data.METRIC_PAIR)
+        self._sector_strategy_frame.setVisible(kind == sector_report_data.METRIC_STRATEGY)
+
     def _populate_placeholder_fields(self, type_label: str):
         note = self._field_label(
             f"{type_label}-specific options (subject, fields, sections) will "
@@ -962,6 +1129,8 @@ class ReportsScreen(QWidget):
             self._populate_emv_fields()
         elif report_type == report_store.REPORT_TYPE_FUKU_LIVE:
             self._populate_fuku_live_fields()
+        elif report_type == report_store.REPORT_TYPE_SECTOR:
+            self._populate_sector_fields()
         else:
             self._populate_placeholder_fields(_REPORT_TYPE_LABELS[report_type])
         if prefill:
@@ -1027,6 +1196,24 @@ class ReportsScreen(QWidget):
                     item = self._emv_indicator_list.item(i)
                     if item.data(Qt.ItemDataRole.UserRole) in chosen:
                         item.setCheckState(Qt.CheckState.Checked)
+        elif rtype == report_store.REPORT_TYPE_SECTOR:
+            self._select_data(self._sector_mode_combo, cfg.get("mode", "eod"))
+            d = QDate.fromString(str(cfg.get("as_of_date") or ""), Qt.DateFormat.ISODate)
+            if d.isValid():
+                self._sector_as_of.setDate(d)
+            self._sector_refresh_spin.setValue(int(cfg.get("refresh_minutes") or 0))
+            self._select_data(self._sector_view_combo, cfg.get("sector"))
+            self._select_data(self._sector_timeframe_combo, cfg.get("primary_timeframe", "Daily"))
+            self._sector_step_spin.setValue(float(cfg.get("heat_step") or 0))
+            metric = cfg.get("metric") or {}
+            self._select_data(self._sector_metric_combo, metric.get("kind", sector_report_data.METRIC_NONE))
+            if metric.get("kind") == sector_report_data.METRIC_PAIR:
+                self._sector_pair_from.setCurrentText(metric.get("from", ""))
+                self._sector_pair_to.setCurrentText(metric.get("to", ""))
+            elif metric.get("kind") == sector_report_data.METRIC_STRATEGY:
+                self._select_data(self._sector_strategy_combo, metric.get("strategy_id"))
+                self._refresh_sector_strategy_columns()
+                self._sector_column_combo.setCurrentText(metric.get("column", ""))
         elif rtype == report_store.REPORT_TYPE_FUKU_LIVE:
             scope = cfg.get("scope", "single")
             self._select_data(self._fuku_scope_combo, scope)
@@ -1127,6 +1314,31 @@ class ReportsScreen(QWidget):
                     "n_periods": self._emv_periods_spin.value(),
                     "indicator_ids": self._selected_indicator_ids(),
                 }
+        elif self._active_report["type"] == report_store.REPORT_TYPE_SECTOR:
+            kind = self._sector_metric_combo.currentData()
+            metric = None
+            if kind == sector_report_data.METRIC_PAIR:
+                a, b = self._sector_pair_from.currentText().strip(), self._sector_pair_to.currentText().strip()
+                if not a or not b or a.upper() == b.upper():
+                    QMessageBox.warning(self, "Custom Metric", "Pick two different fields for the custom % change.")
+                    return
+                metric = {"kind": kind, "from": a, "to": b}
+            elif kind == sector_report_data.METRIC_STRATEGY:
+                column = self._sector_column_combo.currentText().strip()
+                if not column or self._sector_strategy_combo.currentData() is None:
+                    QMessageBox.warning(self, "Custom Metric", "Pick a strategy that has a column to use as the metric.")
+                    return
+                metric = {"kind": kind, "strategy_id": self._sector_strategy_combo.currentData(),
+                          "strategy_name": self._sector_strategy_combo.currentText(), "column": column}
+            self._active_report["subject_config"] = {
+                "mode": self._sector_mode_combo.currentData(),
+                "as_of_date": self._sector_as_of.date().toPython().isoformat(),
+                "refresh_minutes": self._sector_refresh_spin.value(),
+                "sector": self._sector_view_combo.currentData(),
+                "primary_timeframe": self._sector_timeframe_combo.currentData(),
+                "metric": metric,
+                "heat_step": self._sector_step_spin.value() or None,
+            }
         elif self._active_report["type"] == report_store.REPORT_TYPE_FUKU_LIVE:
             if self._fuku_scope_combo.currentData() == "strategy":
                 if self._fuku_strategy_combo.count() == 0:
@@ -1228,13 +1440,14 @@ class ReportsScreen(QWidget):
         started = datetime.now()
         # First run: stocks entered within one refresh interval count as new.
         new_since = started - timedelta(minutes=refresh) if (_is_fuku_strategy_scope(report) and refresh) else None
+        snapshot = self._lmv_snapshot_for(report)
         self._refresh_timer.stop()
         self._generation_token += 1
         token = self._generation_token
 
         if not self._async_generation:
             try:
-                html = _build_report_html(report, new_since)
+                html = _build_report_html(report, new_since, snapshot)
             except Exception as exc:
                 QMessageBox.warning(self, "Report Generation Failed", f"Could not generate this report:\n\n{exc}")
                 return
@@ -1245,7 +1458,7 @@ class ReportsScreen(QWidget):
 
         def work():
             try:
-                html, error = _build_report_html(report, new_since), None
+                html, error = _build_report_html(report, new_since, snapshot), None
             except Exception as exc:  # shown to the user on the GUI thread
                 html, error = None, str(exc)
             try:
@@ -1284,8 +1497,17 @@ class ReportsScreen(QWidget):
         self._preview_view.setHtml(html)
         self._stack.setCurrentWidget(self._preview_page)
         refresh = int((report.get("subject_config") or {}).get("refresh_minutes") or 0)
-        if _is_fuku_strategy_scope(report) and refresh:
+        if _is_auto_refresh_report(report) and refresh:
             self._refresh_timer.start(refresh * 60_000)
+
+    def _lmv_snapshot_for(self, report: dict):
+        """The open Live Master View's (headers, data) for a Live sector
+        report — read here on the GUI thread, then handed to the worker, so
+        one generation sees one consistent snapshot."""
+        if not _is_live_sector(report):
+            return None
+        getter = getattr(self._controller, "get_lmv_snapshot", None)
+        return getter() if callable(getter) else None
 
     def _leave_preview(self):
         self._refresh_timer.stop()
@@ -1298,13 +1520,13 @@ class ReportsScreen(QWidget):
         generation are added upfront and highlighted. Keeps the reader's
         scroll position."""
         report = self._active_report
-        if (report is None or not _is_fuku_strategy_scope(report)
+        if (report is None or not _is_auto_refresh_report(report)
                 or self._stack.currentWidget() is not self._preview_page):
             self._refresh_timer.stop()
             return
         started = datetime.now()
         try:
-            html = _build_report_html(report, self._last_generated_at)
+            html = _build_report_html(report, self._last_generated_at, self._lmv_snapshot_for(report))
         except Exception:
             return  # keep showing the last good report; try again next tick
         self._last_rendered_html = html

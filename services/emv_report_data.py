@@ -98,6 +98,29 @@ def normalize_extra_fields(extra_fields: list | None) -> list:
     return out
 
 
+AXIS_SCALE_RATIO = 8.0
+
+
+def _typical_magnitude(values: list) -> float:
+    nums = sorted(abs(v) for v in values if v is not None)
+    return nums[len(nums) // 2] if nums else 0.0
+
+
+def pick_axes(reference_values: list, extras: list) -> list:
+    """For each extra column's values: "right" when its typical magnitude
+    differs from the reference (primary field + Close) by more than
+    AXIS_SCALE_RATIO either way — an RSC around 100 beside a price near 5,000
+    would otherwise be a flat line — else "left". Extras that go right share
+    the one right-hand scale."""
+    ref = _typical_magnitude(reference_values)
+    axes = []
+    for values in extras:
+        mag = _typical_magnitude(values)
+        far = ref > 0 and mag > 0 and (mag / ref > AXIS_SCALE_RATIO or ref / mag > AXIS_SCALE_RATIO)
+        axes.append("right" if far else "left")
+    return axes
+
+
 def build_stock_report_data(symbol: str, field: str, date_from: date, date_to: date,
                              indicator_ids: list | None = None, extra_fields: list | None = None,
                              field_color: str | None = None) -> dict:
@@ -211,12 +234,15 @@ def build_stock_report_pages(data: dict) -> list:
         n = len(series)
         plotted = [{"label": data["field"], "points": [e["value"] for e in series],
                     "color": data.get("field_color") or DEFAULT_FIELD_COLOR}]
+        aligned = []
         for extra in extras:
             # Same bars => same dates; align by date anyway so a column with a
             # gap can never shift against the others.
             by_date = {e["date"]: e["value"] for e in extra["series"]}
-            plotted.append({"label": extra["field"], "color": extra["color"],
-                            "points": [by_date.get(e["date"]) for e in series]})
+            aligned.append([by_date.get(e["date"]) for e in series])
+        axes = pick_axes([e["value"] for e in series] + [e["close"] for e in series], aligned)
+        for extra, points, axis in zip(extras, aligned, axes):
+            plotted.append({"label": extra["field"], "color": extra["color"], "points": points, "axis": axis})
         plotted.append({"label": "Close", "points": [e["close"] for e in series],
                         "color": "#16a34a", "dashed": True})
         line = charts.line_chart(

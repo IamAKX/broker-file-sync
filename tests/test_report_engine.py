@@ -219,3 +219,19 @@ def test_dark_theme_remaps_the_svg_chart_colours():
     for light_value in ('fill="#64748b"', 'stroke="#E2E8F0"'):
         assert light_value in svg_doc                    # the chart itself still draws light-theme colours...
     assert 'svg text[fill="#64748b"]' in dark and 'svg line[stroke="#E2E8F0"]' in dark   # ...remapped by CSS
+
+
+def test_line_chart_right_axis_uses_its_own_scale_and_labels():
+    series = [
+        {"label": "Price", "points": [4800.0, 4900.0, 5000.0], "color": "#16a34a"},
+        {"label": "RSC", "points": [100.0, 102.0, 104.0], "color": "#8250df", "axis": "right"},
+    ]
+    svg = charts.line_chart(series, x_labels=["a", "b", "c"])
+    assert ">RSC (right axis)<" in svg and ">Price<" in svg
+    assert 'text-anchor="start"' in svg and ">104.0<" in svg and ">5000.0<" in svg      # both scales labelled
+    # RSC's line spans the plot height (own scale), so it is NOT flat despite being ~50x smaller than the price
+    import re
+    ys = [float(y) for y in re.findall(r'<circle cx="[\d.]+" cy="([\d.]+)" r="2.5" fill="#8250df"', svg)]
+    assert len(ys) == 3 and max(ys) - min(ys) > 100
+    plain = charts.line_chart(series[:1], x_labels=["a", "b", "c"])
+    assert 'text-anchor="start"' not in plain                                            # no right ticks without a right series

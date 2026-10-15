@@ -529,7 +529,7 @@ def test_generation_runs_off_the_gui_thread_and_shows_progress_then_result(scree
 
     started, release, thread_names = threading.Event(), threading.Event(), []
 
-    def slow_build(report, new_since=None):
+    def slow_build(report, new_since=None, lmv_snapshot=None):
         thread_names.append(threading.current_thread().name)
         started.set()
         release.wait(5)
@@ -561,7 +561,7 @@ def test_failed_background_generation_warns_and_returns_to_gallery(screen, qapp,
     warnings = []
     monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: warnings.append(a[2])))
 
-    def boom(report, new_since=None):
+    def boom(report, new_since=None, lmv_snapshot=None):
         raise RuntimeError("snapshot exploded")
 
     monkeypatch.setattr(reports, "_build_report_html", boom)
@@ -581,7 +581,7 @@ def test_stale_background_result_is_ignored_after_leaving_preview(screen, qapp, 
 
     release = threading.Event()
 
-    def slow_build(report, new_since=None):
+    def slow_build(report, new_since=None, lmv_snapshot=None):
         release.wait(5)
         return "<html>STALE</html>"
 
@@ -798,3 +798,108 @@ def test_category_manager_delete_and_reorder_never_overwrite_other_categories(qa
     assert [c["name"] for c in dlg._cats][:2] == [before[1], before[0]]
     dlg._save()
     assert [c["name"] for c in trend_categories.load_all()] == [before[1], before[0]] + before[3:]
+
+
+# ── Sector Report wizard (issue #66) ─────────────────────────────────────
+
+def _lmv_rows():
+    headers = ["Sector", "Scrip Name", "% Change", "Current", "WEEK % CHANGE", "MONTH % CHANGE", "MT", "Close"]
+    data = [["IT", "TCS", "1.0", "100", "2.0", "3.0", "98", "100"], ["IT", "INFY", "-0.5", "90", "1.0", "1.5", "91", "90"],
+            ["BANK", "HDFC", "0.2", "50", "-1.0", "-2.0", "50", "50"]]
+    return headers, data
+
+
+def test_sector_report_gallery_entry_and_live_wizard_generates_from_the_lmv_snapshot(screen, qapp, monkeypatch):
+    from services import report_store
+
+    assert report_store.REPORT_TYPE_SECTOR in report_store.REPORT_TYPES
+    monkeypatch.setattr(screen._controller, "get_lmv_snapshot", lambda: _lmv_rows(), raising=False)
+    screen._start_new_report(report_store.REPORT_TYPE_SECTOR)
+    screen._select_data(screen._sector_mode_combo, "live")
+    assert screen._sector_live_frame.isHidden() is False and screen._sector_eod_frame.isHidden() is True
+    screen._sector_refresh_spin.setValue(2)
+    screen._select_data(screen._sector_timeframe_combo, "Weekly")
+    screen._select_data(screen._sector_metric_combo, "pair")
+    screen._sector_pair_from.setCurrentText("MT")
+    screen._sector_pair_to.setCurrentText("Close")
+    screen._name_edit.setText("Live sectors")
+    screen._save_and_generate()
+    qapp.processEvents()
+
+    cfg = report_store.load_all()[0]["subject_config"]
+    assert cfg["mode"] == "live" and cfg["refresh_minutes"] == 2 and cfg["primary_timeframe"] == "Weekly"
+    assert cfg["metric"] == {"kind": "pair", "from": "MT", "to": "Close"} and cfg["sector"] is None
+    html = screen._last_rendered_html
+    assert "Fuku Live Sector Report" in html and "MT vs Close % Change" in html
+    assert "IT" in html and "BANK" in html
+    assert "+0.50%" in html                                                 # IT daily = 1.0 + (-0.5)
+    assert "+3.00%" in html                                                 # IT weekly = 2.0 + 1.0 (a SUM, not an average)
+    assert html.index("Heatmap — Weekly") < html.index("Heatmap — Daily")   # chosen default timeframe first
+    assert screen._refresh_timer.isActive() and screen._refresh_timer.interval() == 2 * 60_000
+
+
+def test_live_sector_report_refreshes_from_a_fresh_snapshot_each_tick(screen, qapp, monkeypatch):
+    from services import report_store
+
+    state = {"rows": _lmv_rows()}
+    monkeypatch.setattr(screen._controller, "get_lmv_snapshot", lambda: state["rows"], raising=False)
+    report = report_store.new_report(report_store.REPORT_TYPE_SECTOR, "Live")
+    report["subject_config"] = {"mode": "live", "refresh_minutes": 5}
+    screen._generate_and_preview(report)
+    assert "+3.00%" in screen._last_rendered_html and "Auto-refresh every 5 min" in screen._last_rendered_html
+
+    headers, data = _lmv_rows()
+    data[0][4] = "10.0"                                                     # TCS weekly jumps 2.0 -> 10.0
+    state["rows"] = (headers, data)
+    screen._auto_refresh_tick()
+    qapp.processEvents()
+    assert "+11.00%" in screen._last_rendered_html                          # IT weekly is now 10.0 + 1.0
+    screen._leave_preview()
+    assert not screen._refresh_timer.isActive()
+
+
+def test_live_sector_report_without_the_live_view_says_so_instead_of_failing(screen):
+    from services import report_store
+    screen._controller.get_lmv_snapshot = lambda: None
+    report = report_store.new_report(report_store.REPORT_TYPE_SECTOR, "Live")
+    report["subject_config"] = {"mode": "live"}
+    screen._generate_and_preview(report)
+    assert "open the Live Master View first" in screen._last_rendered_html
+
+
+def test_eod_sector_wizard_saves_options_generates_and_prefills(screen, qapp):
+    from services import report_store
+    _seed_bars("ABB_I", date.today() - timedelta(days=70), 45, start_price=200)
+    screen._start_new_report(report_store.REPORT_TYPE_SECTOR)
+    assert screen._sector_mode_combo.currentData() == "eod" and screen._sector_eod_frame.isHidden() is False
+    assert screen._sector_view_combo.itemText(0) == "All sectors"
+    screen._select_data(screen._sector_metric_combo, "pair")
+    screen._sector_pair_from.setCurrentText("OPEN")
+    screen._sector_pair_to.setCurrentText("CLOSE")
+    screen._sector_step_spin.setValue(1.5)
+    screen._name_edit.setText("EOD sectors")
+    screen._save_and_generate()
+    qapp.processEvents()
+
+    report = report_store.load_all()[0]
+    assert report["subject_config"]["mode"] == "eod" and report["subject_config"]["heat_step"] == 1.5
+    assert "Fuku EOD Sector Report" in screen._last_rendered_html and "OPEN vs CLOSE % Change" in screen._last_rendered_html
+    assert not screen._refresh_timer.isActive()                             # EOD reports never auto-refresh
+
+    screen._edit_report(report)
+    assert screen._sector_metric_combo.currentData() == "pair" and screen._sector_pair_from.currentText() == "OPEN"
+    assert screen._sector_step_spin.value() == 1.5
+
+
+def test_sector_wizard_rejects_identical_pair_fields(screen, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+    from services import report_store
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a[2])))
+    screen._start_new_report(report_store.REPORT_TYPE_SECTOR)
+    screen._select_data(screen._sector_metric_combo, "pair")
+    screen._sector_pair_from.setCurrentText("CLOSE")
+    screen._sector_pair_to.setCurrentText("close")
+    screen._name_edit.setText("x")
+    screen._save_and_generate()
+    assert warned and "two different fields" in warned[0] and report_store.load_all() == []

@@ -33,7 +33,7 @@ def _canonical_field(field: str) -> str:
     "Max Pain"/"OR.High" are mixed-case, "DT"/"CLOSE" upper); an unknown name
     is returned stripped, as typed, and just resolves to blank values."""
     field = (field or "").strip()
-    lookup = {c.upper(): c for c in available_fields()}
+    lookup = {c.upper(): c for c in available_fields(include_strategy_columns=False)}
     return lookup.get(field.upper(), field)
 
 
@@ -42,14 +42,16 @@ def _derived_codes() -> set:
     return set(inception_columns.GROUP_A) | set(inception_columns.GROUP_B)
 
 
-def available_fields() -> list:
+def available_fields(include_strategy_columns: bool = True) -> list:
     """Every field code this module can build a trend for: the raw OHLCV
     fields, every services.formula_engine.FORMULA_CODES code (Day/Week/Month
     Top-Bottom, Camarilla pivots, pivot points, ...), the synced Reliable
     Software / NiftyInvest / Market Profile columns (PATP, CWTO, Max Pain,
     VAH/POC/VAL, OR.High/Low, Avg Rate, ...), Inception's own Group A/B
     columns (52WH, 52WL, ATH, CQO, gap codes, ...) and every configured
-    Indicator Library output (RSI(14), ...)."""
+    Indicator Library output (RSI(14), ...) and — unless
+    *include_strategy_columns* is False — every Inception strategy column
+    ("RSC [RSC]", ...; see services.inception_strategy_series)."""
     from services import (
         formula_engine, inception_columns, inception_formula_builder_columns as ifbc, indicator_library,
     )
@@ -60,6 +62,12 @@ def available_fields() -> list:
         codes += indicator_library.field_codes()
     except Exception:
         pass  # config store unreachable — the built-in columns still work
+    if include_strategy_columns:
+        try:
+            from services import inception_strategy_series
+            codes += inception_strategy_series.strategy_field_codes()
+        except Exception:
+            pass
     return list(dict.fromkeys(codes))
 
 
@@ -74,6 +82,11 @@ def historical_field_series(symbol: str, field: str, date_from: date, date_to: d
     not silently zero.
     """
     field = _canonical_field(field)
+    from services import inception_strategy_series
+    strategy_field = inception_strategy_series.resolve_field(field)
+    if strategy_field is not None:
+        strategy, column = strategy_field
+        return inception_strategy_series.column_series(symbol, strategy, column, date_from, date_to)
     raw_key = _RAW_FIELDS.get(field)
     derived = field in _derived_codes()
     # Group A/B values (52-week high, all-time high, gap areas, ...) look back

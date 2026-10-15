@@ -105,7 +105,8 @@ def donut_legend(segments: list) -> str:
 def _legend_svg(series: list, width: int, y0: int) -> tuple:
     """(svg_parts, extra_height): a colour key under the plot — a short line
     swatch (dashed when the series is) plus its label, wrapped into rows."""
-    items = [(s.get("label", ""), s.get("color", "#2979FF"), bool(s.get("dashed")))
+    items = [(f'{s["label"]} (right axis)' if s.get("axis") == "right" else s["label"],
+              s.get("color", "#2979FF"), bool(s.get("dashed")))
              for s in series if s.get("label")]
     if not items:
         return [], 0
@@ -126,11 +127,15 @@ def _legend_svg(series: list, width: int, y0: int) -> tuple:
 def line_chart(series: list, width: int = 680, height: int = 260,
                 x_labels: list | None = None, y_label: str = "",
                 zero_line: bool = False, legend: bool = True) -> str:
-    """*series*: [{"label", "points": [float|None, ...], "color", "dashed": bool}, ...]
-    — every series must have the same number of points, aligned to
-    *x_labels* (or plain index labels if omitted). A None point renders as
-    a gap (per every spec's "missing values must be visibly distinguished
-    from zero" requirement) rather than being silently connected across.
+    """*series*: [{"label", "points": [float|None, ...], "color", "dashed": bool,
+    "axis": "left"|"right"}, ...] — every series must have the same number of
+    points, aligned to *x_labels* (or plain index labels if omitted). A None
+    point renders as a gap (per every spec's "missing values must be visibly
+    distinguished from zero" requirement) rather than being silently
+    connected across. Series with ``"axis": "right"`` share a second, right-
+    hand scale (with its own tick labels) — for a line of a very different
+    magnitude (an RSC around 100 next to a price near 5,000) that would
+    otherwise be a flat line.
     """
     series = [s for s in series if s.get("points")]
     if not series:
@@ -140,25 +145,39 @@ def line_chart(series: list, width: int = 680, height: int = 260,
     if n == 0:
         return _no_data_svg(width, height)
 
-    pad_left, pad_right, pad_top, pad_bottom = 48, 16, 26, 28
+    has_right = any(s.get("axis") == "right" for s in series)
+    pad_left, pad_right, pad_top, pad_bottom = 48, (52 if has_right else 16), 26, 28
     plot_w = max(1, width - pad_left - pad_right)
     plot_h = max(1, height - pad_top - pad_bottom)
 
-    all_values = [v for s in series for v in s["points"] if v is not None]
-    if not all_values:
+    def _scale(subset, with_zero=False):
+        values = [v for s in subset for v in s["points"] if v is not None]
+        if not values:
+            return None
+        low, high = min(values), max(values)
+        if with_zero:
+            low, high = min(low, 0.0), max(high, 0.0)
+        if low == high:
+            low, high = low - 1, high + 1
+        return low, high
+
+    left_series = [s for s in series if s.get("axis") != "right"]
+    right_series = [s for s in series if s.get("axis") == "right"]
+    left_scale = _scale(left_series, zero_line) or _scale(right_series)
+    right_scale = _scale(right_series) or left_scale
+    if left_scale is None:
         return _no_data_svg(width, height)
-    lo, hi = min(all_values), max(all_values)
-    if zero_line:
-        lo, hi = min(lo, 0.0), max(hi, 0.0)
-    if lo == hi:
-        lo, hi = lo - 1, hi + 1
+    lo, hi = left_scale
     span = hi - lo
+    r_lo, r_hi = right_scale
+    r_span = r_hi - r_lo
 
     def x_at(i):
         return pad_left + (i / max(1, n - 1)) * plot_w
 
-    def y_at(v):
-        return pad_top + plot_h - ((v - lo) / span) * plot_h
+    def y_at(v, right=False):
+        low, sp = (r_lo, r_span) if right else (lo, span)
+        return pad_top + plot_h - ((v - low) / sp) * plot_h
 
     parts = []
     # Gridlines: 4 horizontal bands.
@@ -173,6 +192,12 @@ def line_chart(series: list, width: int = 680, height: int = 260,
             f'<text x="{pad_left - 6}" y="{gy + 3:.1f}" text-anchor="end" '
             f'font-family="sans-serif" font-size="9" fill="#94a3b8">{tick:.1f}</text>'
         )
+        if has_right:
+            r_tick = r_hi - r_span * i / 4
+            parts.append(
+                f'<text x="{pad_left + plot_w + 6}" y="{gy + 3:.1f}" text-anchor="start" '
+                f'font-family="sans-serif" font-size="9" fill="#94a3b8">{r_tick:.1f}</text>'
+            )
 
     if zero_line and lo < 0 < hi:
         zy = y_at(0)
@@ -184,6 +209,7 @@ def line_chart(series: list, width: int = 680, height: int = 260,
     for s in series:
         color = _esc(s.get("color", "#2979FF"))
         dash = ' stroke-dasharray="6 4"' if s.get("dashed") else ""
+        right = s.get("axis") == "right"
         segment_points = []
         run = []
         for i, v in enumerate(s["points"]):
@@ -192,7 +218,7 @@ def line_chart(series: list, width: int = 680, height: int = 260,
                     segment_points.append(run)
                 run = []
                 continue
-            run.append((x_at(i), y_at(v)))
+            run.append((x_at(i), y_at(v, right)))
         if len(run) > 1:
             segment_points.append(run)
 
@@ -204,7 +230,7 @@ def line_chart(series: list, width: int = 680, height: int = 260,
             if v is None:
                 continue
             parts.append(
-                f'<circle cx="{x_at(i):.1f}" cy="{y_at(v):.1f}" r="2.5" fill="{color}">'
+                f'<circle cx="{x_at(i):.1f}" cy="{y_at(v, right):.1f}" r="2.5" fill="{color}">'
                 f'<title>{_esc(s.get("label", ""))}: {v:g}</title></circle>'
             )
 
@@ -465,6 +491,64 @@ def bubble_chart(points: list, width: int = 680, height: int = 320,
         parts.append(
             f'<text x="4" y="10" font-family="sans-serif" font-size="10" fill="#64748b">{_esc(y_label)}</text>'
         )
+    return (
+        f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
+        f'xmlns="http://www.w3.org/2000/svg">{"".join(parts)}</svg>'
+    )
+
+
+def grouped_bar_chart(categories: list, series: list, width: int = 680, bar_h: int = 8,
+                      group_gap: int = 10) -> str:
+    """Horizontal grouped bars: one row per category (name on the left, so
+    long names stay readable however many there are), one bar per series
+    {"label","color","values": [float|None, ...]}. A bar for a missing value is
+    simply absent — never drawn as zero. Positive values extend right of the
+    zero line, negative left; a legend sits underneath."""
+    values = [v for s in series for v in s["values"] if v is not None]
+    if not categories or not series or not values:
+        return _no_data_svg(width, 120)
+    pad_left, pad_right, pad_top = 140, 56, 8
+    plot_w = width - pad_left - pad_right
+    lo, hi = min(0.0, min(values)), max(0.0, max(values))
+    if lo == hi:
+        hi = lo + 1
+    span = hi - lo
+    group_h = len(series) * bar_h
+
+    def x_at(v):
+        return pad_left + (v - lo) / span * plot_w
+
+    zero_x = x_at(0)
+    parts = []
+    for i, name in enumerate(categories):
+        y0 = pad_top + i * (group_h + group_gap)
+        parts.append(
+            f'<text x="{pad_left - 6}" y="{y0 + group_h / 2 + 3:.1f}" text-anchor="end" font-family="sans-serif" '
+            f'font-size="9" fill="#334155">{_esc(str(name)[:22])}</text>'
+        )
+        for j, s in enumerate(series):
+            v = s["values"][i]
+            if v is None:
+                continue
+            x = x_at(v)
+            y = y0 + j * bar_h
+            parts.append(
+                f'<rect x="{min(x, zero_x):.1f}" y="{y}" width="{max(abs(x - zero_x), 1):.1f}" height="{bar_h - 1}" '
+                f'fill="{_esc(s["color"])}" rx="1"><title>{_esc(name)} — {_esc(s["label"])}: {v:+.2f}</title></rect>'
+            )
+            anchor, tx = ("start", max(x, zero_x) + 3) if v >= 0 else ("end", min(x, zero_x) - 3)
+            parts.append(
+                f'<text x="{tx:.1f}" y="{y + bar_h - 1.5}" text-anchor="{anchor}" font-family="sans-serif" '
+                f'font-size="7" fill="#64748b">{v:+.2f}</text>'
+            )
+    plot_bottom = pad_top + len(categories) * (group_h + group_gap)
+    parts.append(
+        f'<line x1="{zero_x:.1f}" y1="{pad_top - 2}" x2="{zero_x:.1f}" y2="{plot_bottom - group_gap + 2}" '
+        f'stroke="#94a3b8" stroke-width="1.2"/>'
+    )
+    legend_parts, extra = _legend_svg(series, width, plot_bottom)
+    parts += legend_parts
+    height = plot_bottom + extra
     return (
         f'<svg width="{width}" height="{height}" viewBox="0 0 {width} {height}" '
         f'xmlns="http://www.w3.org/2000/svg">{"".join(parts)}</svg>'
