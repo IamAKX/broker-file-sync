@@ -1582,14 +1582,19 @@ class ReportsScreen(QWidget):
         self._last_generated_at = started
 
         def restore_scroll(y):
-            def _after(ok):
-                try:
-                    self._preview_view.loadFinished.disconnect(_after)
-                except (TypeError, RuntimeError):
-                    pass
-                self._preview_view.page().runJavaScript(f"window.scrollTo(0, {int(y or 0)});")
-            self._preview_view.loadFinished.connect(_after)
-            self._preview_view.setHtml(html)
+            # runJavaScript answers asynchronously — the screen may have been
+            # closed (preview view deleted) by then.
+            try:
+                def _after(ok):
+                    try:
+                        self._preview_view.loadFinished.disconnect(_after)
+                        self._preview_view.page().runJavaScript(f"window.scrollTo(0, {int(y or 0)});")
+                    except (TypeError, RuntimeError):
+                        pass
+                self._preview_view.loadFinished.connect(_after)
+                self._preview_view.setHtml(html)
+            except RuntimeError:
+                pass
 
         self._preview_view.page().runJavaScript("window.scrollY", restore_scroll)
 
