@@ -336,7 +336,8 @@ def test_fuku_live_wizard_saves_and_generates_for_an_open_signal(screen, qapp):
 
     saved = report_store.load_all()
     assert len(saved) == 1
-    assert saved[0]["subject_config"] == {"strategy_id": "strat-1", "symbol": "INFY"}
+    assert saved[0]["subject_config"] == {"strategy_id": "strat-1", "symbol": "INFY",
+                                          "indicator_ids": [], "indicator_days": 60}
     assert screen._stack.currentWidget() is screen._preview_page
     assert "INFY" in screen._last_rendered_html
     assert "Fuku Score" in screen._last_rendered_html
@@ -473,6 +474,7 @@ def test_fuku_strategy_scope_wizard_saves_options_and_starts_refresh_timer(scree
     assert cfg == {
         "scope": "strategy", "strategy_id": "strat-1", "include_stopped": False,
         "include_cancelled": True, "include_achieved": False, "refresh_minutes": 3,
+        "indicator_ids": [], "indicator_days": 60,
     }
     assert "INFY" in screen._last_rendered_html and "TCS" in screen._last_rendered_html
     assert screen._refresh_timer.isActive() and screen._refresh_timer.interval() == 3 * 60_000

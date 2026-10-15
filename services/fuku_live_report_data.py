@@ -231,10 +231,14 @@ def timeline_events(data: dict) -> list:
     return events
 
 
-def build_report_data(strategy_id: str, symbol: str, signal: dict | None = None) -> dict:
+def build_report_data(strategy_id: str, symbol: str, signal: dict | None = None,
+                      indicator_ids: list | None = None, indicator_days: int = 60,
+                      compact_indicators: bool = False) -> dict:
     """*signal* lets a caller that already holds the signal (Live Alerts'
     backend-sourced row, or the strategy-wide report's own scan) bypass the
-    local state_store lookup."""
+    local state_store lookup. *indicator_ids* (Indicator Library entries) adds
+    "indicator_sections" — charts of those indicators on the stock's last
+    *indicator_days* trading days (compact for a strategy-report card)."""
     strategies_by_id = {s["id"]: s for s in strategy_store.load_all()}
     signal = signal or get_signal(strategy_id, symbol)
     if signal is None:
@@ -269,7 +273,23 @@ def build_report_data(strategy_id: str, symbol: str, signal: dict | None = None)
         "stop_loss": _stop_loss(signal),
     }
     data["timeline"] = timeline_events(data)
+    data["indicator_sections"] = _indicator_sections(signal, symbol, indicator_ids, indicator_days, compact_indicators)
     return data
+
+
+def _indicator_sections(signal: dict, symbol: str, indicator_ids, days: int, compact: bool) -> list:
+    """[(title, svg)] for the chosen indicators, ending on the signal's
+    resolution day (or today while it is open). Never lets a chart problem
+    break the report — the stock just shows no indicator charts."""
+    if not indicator_ids:
+        return []
+    from services import indicator_charts
+    end = _parse_dt(signal.get("resolved_at")) if signal.get("resolved_at") else None
+    try:
+        return indicator_charts.sections_for_symbol(
+            symbol, (end or datetime.now()).date(), days, indicator_ids, compact=compact)
+    except Exception:
+        return []
 
 
 # ── Strategy-wide report ─────────────────────────────────────────────────
@@ -310,14 +330,17 @@ def _sort_key(card: dict):
 
 def build_strategy_report_data(strategy_id: str, include_stopped: bool = False,
                                include_cancelled: bool = False, include_achieved: bool = False,
-                               new_since: datetime | None = None, refresh_minutes: int = 0) -> dict:
+                               new_since: datetime | None = None, refresh_minutes: int = 0,
+                               indicator_ids: list | None = None, indicator_days: int = 60) -> dict:
     """The whole-strategy report: one card per stock. *new_since* marks a
     signal "recently added" when it was entered after that time (the caller
     passes the previous generation time, so a refresh highlights exactly the
     stocks that matched since)."""
     cards = []
     for signal in strategy_signals(strategy_id, include_stopped, include_cancelled, include_achieved):
-        card = build_report_data(strategy_id, signal.get("symbol"), signal=signal)
+        card = build_report_data(strategy_id, signal.get("symbol"), signal=signal,
+                                 indicator_ids=indicator_ids, indicator_days=indicator_days,
+                                 compact_indicators=True)
         entered = _parse_dt(signal.get("entry_time"))
         card["is_new"] = bool(new_since and entered and entered > new_since)
         card["sector_name"] = (signal.get("sector") or "Unclassified")
@@ -392,8 +415,17 @@ def _kpi(label: str, value: str, cls: str = "") -> str:
     return f'<div class="fk-kpi {cls}"><div class="l">{templates.esc(label)}</div><div class="v">{templates.esc(value)}</div></div>'
 
 
-def card_html(data: dict, generated_at: datetime | None = None) -> tuple:
-    """One stock's dashboard card -> (html, estimated_height_px)."""
+def _svg_height(svg: str) -> int:
+    import re
+    m = re.search(r'<svg[^>]*\sheight="(\d+(?:\.\d+)?)"', svg)
+    return int(float(m.group(1))) if m else 150
+
+
+def card_html(data: dict, generated_at: datetime | None = None, embed_indicators: bool = True) -> tuple:
+    """One stock's dashboard card -> (html, estimated_height_px). With
+    *embed_indicators* the card also carries the stock's indicator charts
+    (the strategy-wide report); the single-stock report passes False and lays
+    them out as full-size sections of their own."""
     direction = data["direction"]
     side = "buy" if direction == "BUY" else "sell"
     new_badge = ""
@@ -443,6 +475,15 @@ def card_html(data: dict, generated_at: datetime | None = None) -> tuple:
             f'<span class="p">{note}</span></div>'
         )
 
+    indicator_html, indicator_px = "", 0
+    if embed_indicators and data.get("indicator_sections"):
+        parts = []
+        for title, svg in data["indicator_sections"]:
+            parts.append(f'<div class="fk-note" style="margin-top:6px;font-weight:700;">{templates.esc(title)}</div>{svg}')
+            indicator_px += _svg_height(svg) + 22
+        indicator_html = '<div class="fk-h" style="margin-top:10px">Indicators</div>' + "".join(parts)
+        indicator_px += 24
+
     sub = " · ".join(x for x in (
         data.get("sector") or "—", data["strategy_name"], data["alert_mode"].title(),
         f'opened {_fmt_time(data["signal"].get("entry_time"))}', f'age {data["elapsed"]}',
@@ -458,11 +499,12 @@ def card_html(data: dict, generated_at: datetime | None = None) -> tuple:
         f'<div class="fk-col-side"><div class="fk-h">Why this signal triggered</div><div class="fk-chips">{chips}</div>'
         f'<div class="fk-h">Signal timeline</div><div class="fk-tl">{tl}</div></div></div>'
         f'<div class="fk-h" style="margin-top:8px">Target progress</div>{progress or "<div class=fk-note>No targets configured.</div>"}'
-        f'</div>'
+        f'{indicator_html}</div>'
     )
     n_tl = len(data["timeline"]) + len(data["trigger"])
     height = (_CARD_BASE_PX + max(len(rows) * _LADDER_ROW_PX, n_tl * 20 + 30)
-              + max(len([t for t in data["targets"] if t["value"] is not None]), 1) * _PROGRESS_ROW_PX)
+              + max(len([t for t in data["targets"] if t["value"] is not None]), 1) * _PROGRESS_ROW_PX
+              + indicator_px)
     return html_, height
 
 
@@ -601,7 +643,7 @@ def build_report_pages(data: dict) -> list:
         return [page]
 
     now = datetime.now()
-    card, _ = card_html(data, now)
+    card, _ = card_html(data, now, embed_indicators=False)
     page1 = (
         templates.report_header(
             "Fuku Live Report",
@@ -632,7 +674,13 @@ def build_report_pages(data: dict) -> list:
         templates.section("Target / Stop-Loss Metrics", metrics_table)
         + templates.section(f'Fuku Score Breakdown — {templates.esc(data["score"].get("config_name", ""))}', breakdown_table)
     )
-    return [page1, page2]
+    indicator_blocks = [
+        (templates.section(f"Indicator — {title}", svg), _svg_height(svg) + 40)
+        for title, svg in data.get("indicator_sections") or []
+    ]
+    if not indicator_blocks:
+        return [page1, page2]
+    return [page1] + emv_report_data._flow_pages(page2, 74 + 160 + 60 * 3, indicator_blocks, "", [], [], set())
 
 
 def build_report_html(data: dict, doc_title: str = "Fuku Live Report") -> str:

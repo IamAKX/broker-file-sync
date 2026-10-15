@@ -1173,6 +1173,51 @@ def test_variables_manager_lists_existing(qapp, var_store):
     assert items == ["{Threshold}"]
 
 
+def _names(dlg):
+    return [dlg._list.item(i).text() for i in range(dlg._list.count())]
+
+
+def test_variables_manager_search_filters_by_name_and_formula_text(qapp, var_store):
+    """Issue #70: a search box, like Formula Builder / Strategy Builder have."""
+    from screens.formula_editor import VariablesManagerDialog
+    for name, formula in (("WeekGap", [{"type": "col", "value": "PWC"}]),
+                          ("Threshold", [{"type": "num", "value": "5"}]),
+                          ("NiftyRatio", [{"type": "col", "value": "CLOSE", "of": "NIFTY"}])):
+        v = var_store.new_variable(name)
+        v["formula"] = formula
+        var_store.save_variable(v)
+    dlg = VariablesManagerDialog([], {})
+    assert len(_names(dlg)) == 3 and dlg._title.text() == "Formula Variables"
+
+    dlg._search_box.setText("thresh")                              # by name, case-insensitive
+    assert _names(dlg) == ["{Threshold}"] and dlg._title.text() == "Formula Variables (1 of 3)"
+    dlg._search_box.setText("PWC")                                 # by the columns its formula uses
+    assert _names(dlg) == ["{WeekGap}"]
+    dlg._search_box.setText("nifty")                               # ... including a row reference ("of")
+    assert _names(dlg) == ["{NiftyRatio}"]
+    dlg._search_box.setText("zzz-none")
+    assert _names(dlg) == [] and dlg._title.text() == "Formula Variables (0 of 3)"
+    dlg._search_box.setText("")                                    # clearing restores everything
+    assert len(_names(dlg)) == 3 and dlg._title.text() == "Formula Variables"
+
+
+def test_variables_manager_search_keeps_selection_and_actions_work_on_filtered_rows(qapp, var_store, monkeypatch):
+    from screens.formula_editor import VariablesManagerDialog
+    from PySide6.QtWidgets import QMessageBox
+    for name in ("Alpha", "Beta", "Gamma"):
+        var_store.save_variable(var_store.new_variable(name))
+    dlg = VariablesManagerDialog([], {})
+    dlg._search_box.setText("beta")
+    dlg._list.setCurrentRow(0)
+    assert dlg._selected_variable()["name"] == "Beta"
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.StandardButton.Yes)
+    dlg._delete_selected()                                         # deletes the filtered row's variable, not row 0 of all
+    assert sorted(v["name"] for v in var_store.load_all()) == ["Alpha", "Gamma"]
+    assert _names(dlg) == []                                       # filter still applied (nothing matches "beta" now)
+    dlg._search_box.setText("")
+    assert _names(dlg) == ["{Alpha}", "{Gamma}"]
+
+
 def test_variables_manager_delete_removes_variable(qapp, var_store, monkeypatch):
     from screens.formula_editor import VariablesManagerDialog
     from PySide6.QtWidgets import QMessageBox

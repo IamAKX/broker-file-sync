@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from screens.report_column_picker import ColumnPickerWidget
+from screens.report_indicator_picker import IndicatorPickerWidget
 from services import (
     emv_report_data, fuku_live_report_data, lmv_report_data, report_columns,
     report_metrics, report_recipients, report_store, sector_report_data, strategy_store,
@@ -122,6 +123,8 @@ def _build_lmv_html(report: dict) -> str:
         # (best-effort: failures just fall back to local history).
         include_backend=True,
         compare=subject.get("compare"),
+        indicator_ids=subject.get("indicator_ids"), indicator_symbols=subject.get("indicator_symbols"),
+        indicator_days=int(subject.get("indicator_days") or 60),
     )
     return lmv_report_data.build_report_html(
         data, doc_title=report.get("name", "LMV EOD Report"), columns=report.get("columns")
@@ -223,12 +226,14 @@ def _build_fuku_live_html(report: dict, new_since: datetime | None = None) -> st
             include_cancelled=bool(subject.get("include_cancelled")),
             include_achieved=bool(subject.get("include_achieved")),
             new_since=new_since, refresh_minutes=int(subject.get("refresh_minutes") or 0),
+            indicator_ids=subject.get("indicator_ids"), indicator_days=int(subject.get("indicator_days") or 60),
         )
         return fuku_live_report_data.build_strategy_report_html(
             data, doc_title=report.get("name", "Fuku Live Report"))
     data = fuku_live_report_data.build_report_data(
         subject.get("strategy_id"), subject.get("symbol", ""),
         signal=report.get("_signal"),
+        indicator_ids=subject.get("indicator_ids"), indicator_days=int(subject.get("indicator_days") or 60),
     )
     return fuku_live_report_data.build_report_html(data, doc_title=report.get("name", "Fuku Live Report"))
 
@@ -555,6 +560,8 @@ class ReportsScreen(QWidget):
         self._investment_edit = QLineEdit(str(int(lmv_report_data.DEFAULT_INVESTMENT_AMOUNT)))
         layout.addWidget(self._investment_edit)
 
+        self._add_indicator_fields(layout, with_symbols=True)
+
         layout.addWidget(self._field_label("Cross-Compare — compare two assets under Strategy A"))
         self._compare_mode_combo = QComboBox()
         self._compare_mode_combo.addItem("Stock vs Stock", "stock")
@@ -880,6 +887,42 @@ class ReportsScreen(QWidget):
 
         self._on_emv_subtype_changed()
 
+    def _add_indicator_fields(self, layout, with_symbols: bool):
+        """The "plot indicators" controls shared by the LMV and Fuku Live
+        wizards (issue #71): which Indicator Library entries, how many trading
+        days, and (LMV only) which stocks."""
+        layout.addWidget(self._field_label("Plot indicators (from the Indicator Library, optional)"))
+        self._report_indicator_picker = IndicatorPickerWidget(self._controller.theme)
+        layout.addWidget(self._report_indicator_picker)
+        layout.addWidget(self._field_label("Indicator chart period (trading days)"))
+        self._report_indicator_days = QSpinBox()
+        self._report_indicator_days.setRange(10, 500)
+        self._report_indicator_days.setValue(60)
+        layout.addWidget(self._report_indicator_days)
+        self._report_indicator_symbols = None
+        if with_symbols:
+            layout.addWidget(self._field_label(
+                "Indicator stocks (comma separated; blank = the 5 most-traded stocks of Strategy A)"))
+            self._report_indicator_symbols = QLineEdit()
+            self._report_indicator_symbols.setPlaceholderText("e.g. HAL, ABB, TCS")
+            layout.addWidget(self._report_indicator_symbols)
+
+    def _indicator_settings(self) -> dict:
+        symbols = []
+        if self._report_indicator_symbols is not None:
+            symbols = [x.strip() for x in self._report_indicator_symbols.text().split(",") if x.strip()]
+        out = {"indicator_ids": self._report_indicator_picker.selected_ids(),
+               "indicator_days": self._report_indicator_days.value()}
+        if self._report_indicator_symbols is not None:
+            out["indicator_symbols"] = symbols
+        return out
+
+    def _prefill_indicator_fields(self, cfg: dict):
+        self._report_indicator_picker.set_selected(cfg.get("indicator_ids") or [])
+        self._report_indicator_days.setValue(int(cfg.get("indicator_days") or 60))
+        if self._report_indicator_symbols is not None:
+            self._report_indicator_symbols.setText(", ".join(cfg.get("indicator_symbols") or []))
+
     def _populate_fuku_live_fields(self):
         layout = self._type_fields_layout
         layout.addWidget(self._field_label("Report scope"))
@@ -935,6 +978,7 @@ class ReportsScreen(QWidget):
         single_lay.addWidget(self._fuku_signal_combo)
         layout.addWidget(self._fuku_single_frame)
         self._on_fuku_scope_changed()
+        self._add_indicator_fields(layout, with_symbols=False)
 
         if not signals:
             layout.addWidget(self._field_label(
@@ -1158,6 +1202,7 @@ class ReportsScreen(QWidget):
                     edit.setDate(d)
             if cfg.get("investment_amount") is not None:
                 self._investment_edit.setText(str(int(cfg["investment_amount"])))
+            self._prefill_indicator_fields(cfg)
             compare = cfg.get("compare") or {}
             self._select_data(self._compare_mode_combo, compare.get("mode", "stock"))
             self._compare_asset_1.setText(compare.get("asset_1") or "")
@@ -1216,6 +1261,7 @@ class ReportsScreen(QWidget):
                 self._sector_column_combo.setCurrentText(metric.get("column", ""))
         elif rtype == report_store.REPORT_TYPE_FUKU_LIVE:
             scope = cfg.get("scope", "single")
+            self._prefill_indicator_fields(cfg)
             self._select_data(self._fuku_scope_combo, scope)
             if scope == "strategy":
                 self._select_data(self._fuku_strategy_combo, cfg.get("strategy_id"))
@@ -1266,6 +1312,7 @@ class ReportsScreen(QWidget):
                     "asset_1": self._compare_asset_1.text().strip(),
                     "asset_2": self._compare_asset_2.text().strip(),
                 },
+                **self._indicator_settings(),
             }
             self._active_report["timeframe"] = {
                 "mode": mode,
@@ -1354,6 +1401,7 @@ class ReportsScreen(QWidget):
                     "include_cancelled": self._fuku_inc_cancelled.isChecked(),
                     "include_achieved": self._fuku_inc_achieved.isChecked(),
                     "refresh_minutes": self._fuku_refresh_spin.value(),
+                    **self._indicator_settings(),
                 }
             else:
                 if self._fuku_signal_combo.count() == 0:
@@ -1363,7 +1411,8 @@ class ReportsScreen(QWidget):
                     )
                     return
                 strategy_id, symbol = self._fuku_signal_combo.currentData()
-                self._active_report["subject_config"] = {"strategy_id": strategy_id, "symbol": symbol}
+                self._active_report["subject_config"] = {"strategy_id": strategy_id, "symbol": symbol,
+                                                         **self._indicator_settings()}
 
         self._active_report["name"] = name
         self._active_report.setdefault("visuals", {})["theme"] = self._report_theme_combo.currentData()

@@ -287,7 +287,9 @@ def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
                        timeframe: str, date_from: date | None, date_to: date | None,
                        investment_amount: float = DEFAULT_INVESTMENT_AMOUNT,
                        include_backend: bool = False,
-                       compare: dict | None = None) -> dict:
+                       compare: dict | None = None,
+                       indicator_ids: list | None = None, indicator_symbols: list | None = None,
+                       indicator_days: int = 60) -> dict:
     """*compare*: optional {"mode": "stock"|"sector", "asset_1", "asset_2"}
     for the Cross-Compare section. *timeframe* is the CURVE'S bucketing granularity (daily/weekly/
     monthly/quarterly — how the comparative performance curve groups
@@ -322,8 +324,11 @@ def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
         bucket_keys = []
 
     investment = report_metrics.investment_simulation(investment_amount, summary_a["blended_yield"])
+    indicator_charts_by_symbol = _indicator_charts(
+        summary_a, indicator_ids, indicator_symbols, indicator_days, date_to)
 
     return {
+        "indicator_charts": indicator_charts_by_symbol,
         "summary_a": summary_a,
         "summary_b": summary_b,
         "bucket_keys": bucket_keys,
@@ -336,6 +341,33 @@ def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
         "date_from": date_from,
         "date_to": date_to,
     }
+
+
+def most_traded_symbols(summary: dict, limit: int = 5) -> list:
+    counts: dict = {}
+    for r in summary["rows"]:
+        counts[r["symbol"]] = counts.get(r["symbol"], 0) + 1
+    return [sym for sym, _n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit] if sym]
+
+
+def _indicator_charts(summary: dict, indicator_ids, symbols, days: int, date_to) -> list:
+    """[(symbol, [(title, svg), ...])] — the chosen indicators for each
+    chosen stock; a stock with no synced history or chart problem is just
+    skipped, never breaks the report."""
+    if not indicator_ids:
+        return []
+    from services import indicator_charts
+    chosen = [s.strip() for s in (symbols or []) if s and s.strip()] or most_traded_symbols(summary)
+    end = date_to or date.today()
+    out = []
+    for symbol in chosen:
+        try:
+            sections = indicator_charts.sections_for_symbol(symbol, end, days, indicator_ids)
+        except Exception:
+            sections = []
+        if sections:
+            out.append((symbol, sections))
+    return out
 
 
 def _fmt_pct(value) -> str:
@@ -480,6 +512,10 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
     )
     blocks.append((templates.section(
         f'₹{data["investment_amount"]:,.0f} Investment Simulation', inv_html), 38 + 78 + 24))
+
+    for symbol, sections in data.get("indicator_charts") or []:
+        for title, svg in sections:
+            blocks.append((templates.section(f"{title} — {symbol}", svg), emv_report_data._section_height(svg)))
 
     if not all_rows:
         blocks.append((templates.section(

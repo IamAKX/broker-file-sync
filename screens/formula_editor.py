@@ -1934,6 +1934,19 @@ class VariablesManagerDialog(QDialog):
         hint.setStyleSheet(f"color:{txts};")
         root.addWidget(hint)
 
+        self._title = title
+        self._search_box = QLineEdit()
+        self._search_box.setPlaceholderText("Search variables…")
+        self._search_box.setClearButtonEnabled(True)
+        self._search_box.setFixedHeight(30)
+        self._search_box.setStyleSheet(
+            f"QLineEdit{{background:{_t(t,'input_bg')};color:{txt};border:1px solid {bd};"
+            f"border-radius:6px;padding:0 8px;}}"
+            f"QLineEdit:focus{{border-color:{acc};}}"
+        )
+        self._search_box.textChanged.connect(lambda _: self._refresh_list())
+        root.addWidget(self._search_box)
+
         self._list = QListWidget()
         self._list.itemDoubleClicked.connect(lambda _: self._edit_selected())
         root.addWidget(self._list, 1)
@@ -2014,12 +2027,31 @@ class VariablesManagerDialog(QDialog):
         if current is not None:
             selected_id = current.data(Qt.ItemDataRole.UserRole)["id"]
         self._list.clear()
-        for v in var_store.load_all():
+        variables = var_store.load_all()
+        shown = [v for v in variables if self._variable_matches(v)]
+        for v in shown:
             item = QListWidgetItem(f"{{{v['name']}}}")
             item.setData(Qt.ItemDataRole.UserRole, v)
             self._list.addItem(item)
             if v["id"] == selected_id:
                 self._list.setCurrentItem(item)
+        self._title.setText(
+            "Formula Variables" if len(shown) == len(variables)
+            else f"Formula Variables ({len(shown)} of {len(variables)})"
+        )
+
+    def _variable_matches(self, variable: dict) -> bool:
+        """The search box's text, case-insensitively, against the variable's
+        name or the text of its formula (the columns/functions it uses);
+        everything matches while the box is empty."""
+        query = self._search_box.text().strip().lower()
+        if not query:
+            return True
+        formula_text = " ".join(
+            f'{tok.get("value", "")} {tok.get("of", "")}' for tok in (variable.get("formula") or [])
+            if isinstance(tok, dict)
+        )
+        return query in f'{variable.get("name", "")} {formula_text}'.lower()
 
     def _selected_variable(self):
         item = self._list.currentItem()

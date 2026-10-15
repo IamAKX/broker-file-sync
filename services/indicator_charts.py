@@ -18,11 +18,14 @@ def _label_of(instance: dict) -> str:
     return il.instance_label(instance["key"], instance.get("params"))
 
 
-def build_indicator_sections(bars: list, report_dates: list, instances: list) -> list:
+def build_indicator_sections(bars: list, report_dates: list, instances: list,
+                             width: int = 680, overlay_height: int = 260, panel_height: int = 180) -> list:
     """[(title, svg_html)] — one price-panel chart (Close + every overlay
     output) if any overlay indicator is selected, then one chart per
     sub-panel indicator. *bars* ascending, each with "trade_date"; only
-    bars whose date is in *report_dates* are plotted."""
+    bars whose date is in *report_dates* are plotted. *width*/*overlay_height*/
+    *panel_height* size the charts (smaller for the per-stock cards of a
+    strategy-wide report)."""
     if not bars or not report_dates or not instances:
         return []
     wanted = set(report_dates)
@@ -70,12 +73,37 @@ def build_indicator_sections(bars: list, report_dates: list, instances: list) ->
                                      "color": "#94a3b8", "dashed": True})
             sections.append((
                 f'{_label_of(inst)} — {defn["name"]}',
-                charts.line_chart(panel_series, x_labels=x_labels, height=180, y_label=defn["key"]),
+                charts.line_chart(panel_series, x_labels=x_labels, width=width, height=panel_height, y_label=defn["key"]),
             ))
 
     if overlay_titles:
         sections.insert(0, (
             "Price with " + ", ".join(overlay_titles),
-            charts.line_chart(overlay_series, x_labels=x_labels, y_label="Price"),
+            charts.line_chart(overlay_series, x_labels=x_labels, width=width, height=overlay_height, y_label="Price"),
         ))
     return sections
+
+
+DEFAULT_PERIODS = 60
+
+
+def sections_for_symbol(symbol: str, date_to, n_periods: int, instance_ids: list | None,
+                        compact: bool = False) -> list:
+    """[(title, svg)] for the chosen Indicator Library entries on *symbol*
+    (a display name like "HAL" or a stored one like "HAL_I") over its last
+    *n_periods* trading days up to *date_to*. Empty when nothing is chosen, the
+    stock has no synced bars, or no chosen indicator still exists. *compact*
+    draws smaller charts, for embedding in a per-stock card."""
+    if not instance_ids:
+        return []
+    from services import emv_report_data, inception_bars_store
+
+    wanted = set(instance_ids)
+    chosen = [i for i in il.load_instances() if i.get("id") in wanted]
+    if not chosen:
+        return []
+    bars = inception_bars_store.bars_for_symbol(emv_report_data.resolve_symbol(symbol), date_to=date_to)
+    window = [b["trade_date"] for b in bars[-max(int(n_periods or DEFAULT_PERIODS), 2):]]
+    if compact:
+        return build_indicator_sections(bars, window, chosen, width=640, overlay_height=190, panel_height=130)
+    return build_indicator_sections(bars, window, chosen)
