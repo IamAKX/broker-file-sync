@@ -476,7 +476,7 @@ def test_fuku_strategy_scope_wizard_saves_options_and_starts_refresh_timer(scree
         "include_cancelled": True, "include_achieved": False, "refresh_minutes": 3,
         "indicator_ids": [], "indicator_days": 60,
     }
-    assert "INFY" in screen._last_rendered_html and "TCS" in screen._last_rendered_html
+    assert 'fk-sym">INFY<' in screen._last_rendered_html and 'fk-sym">TCS<' in screen._last_rendered_html
     assert screen._refresh_timer.isActive() and screen._refresh_timer.interval() == 3 * 60_000
     screen._leave_preview()
     assert not screen._refresh_timer.isActive()
@@ -491,14 +491,14 @@ def test_fuku_auto_refresh_adds_newly_matched_stock_and_flags_it(screen, qapp):
     report = report_store.new_report(report_store.REPORT_TYPE_FUKU_LIVE, "Live")
     report["subject_config"] = {"scope": "strategy", "strategy_id": "strat-1", "refresh_minutes": 5}
     screen._generate_and_preview(report)
-    assert "TCS" not in screen._last_rendered_html
+    assert 'fk-sym">TCS<' not in screen._last_rendered_html
     first_run = screen._last_generated_at
 
     _seed_open(state_store, "TCS", entry_time=datetime.now().isoformat())   # matched after first run
     screen._auto_refresh_tick()
     qapp.processEvents()
 
-    assert "TCS" in screen._last_rendered_html
+    assert 'fk-sym">TCS<' in screen._last_rendered_html
     assert "RECENTLY ADDED" in screen._last_rendered_html
     assert screen._last_generated_at > first_run
 

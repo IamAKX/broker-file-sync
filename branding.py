@@ -5,7 +5,8 @@ files (issue #80).
 The artwork lives in ``assets/branding/`` — drop the files in under these
 names and they are picked up everywhere (no code change):
 
-  fuku_lens_logo.png   wide logo: Dashboard header + every report's header
+  fuku_lens_logo.png   stacked logo: Dashboard
+  fuku_lens_header.png wide banner (3:1): header of every report
   fuku_lens_icon.png   app icon (taskbar / window); .ico (Windows) and
                        .icns (macOS) variants of the same name are preferred
                        on those platforms
@@ -38,6 +39,11 @@ def logo_path() -> str | None:
     return _existing("fuku_lens_logo.png", "fuku_lens_logo.jpg", "fuku_lens_logo.jpeg")
 
 
+def header_path() -> str | None:
+    """The wide banner for report headers (falls back to the stacked logo)."""
+    return _existing("fuku_lens_header.png", "fuku_lens_header.jpg") or logo_path()
+
+
 def icon_path() -> str:
     """The app icon file: the Fuku Lens one when supplied, else the previous
     app logo."""
@@ -64,11 +70,11 @@ def prefixed_report_title(title: str) -> str:
 _MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg"}
 
 
-def report_logo_html(height_px: int = 40) -> str:
+def report_logo_html(height_px: int = 64) -> str:
     """An <img> of the logo for a report header, embedded as a data URI (the
     report HTML must stay self-contained). Height-bound with width:auto so the
     aspect ratio is kept at any size; "" when there is no logo file."""
-    path = logo_path()
+    path = header_path()
     if not path:
         return ""
     try:
@@ -78,10 +84,10 @@ def report_logo_html(height_px: int = 40) -> str:
         return ""
     mime = _MIME.get(os.path.splitext(path)[1].lower(), "image/png")
     return (f'<img class="brand-logo" alt="{APP_NAME}" src="data:{mime};base64,{encoded}" '
-            f'style="height:{int(height_px)}px;width:auto;max-width:200px;object-fit:contain;"/>')
+            f'style="height:{int(height_px)}px;width:auto;max-width:260px;object-fit:contain;border-radius:4px;"/>')
 
 
-def make_logo_label(max_height: int = 56, max_width: int = 260):
+def make_logo_label(max_height: int = 110, max_width: int = 330):
     """A QLabel showing the logo scaled to fit max_width x max_height with its
     aspect ratio kept, re-fitted whenever it is resized (e.g. by a layout or a
     different DPI). None when there is no logo file."""

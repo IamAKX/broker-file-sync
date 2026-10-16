@@ -1,6 +1,7 @@
-Fuku Lens artwork (see branding.py). Drop the files here under these names:
+Fuku Lens artwork (see branding.py):
 
-- `fuku_lens_logo.png`  — wide logo: Dashboard header and every report header (aspect ratio is kept)
-- `fuku_lens_icon.png`  — app icon; `fuku_lens_icon.ico` (Windows) / `fuku_lens_icon.icns` (macOS) are preferred on those platforms
+- `fuku_lens_header.png` — wide banner, top-left of every report
+- `fuku_lens_logo.png`   — stacked logo, Dashboard
+- `fuku_lens_icon.png` / `.ico` / `.icns` — app icon (window / taskbar / Dock)
 
-Missing files fall back gracefully (no logo in reports, previous window icon).
+Files are shown with their aspect ratio kept. A missing file falls back gracefully.

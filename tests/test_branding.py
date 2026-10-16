@@ -21,7 +21,7 @@ def test_report_titles_get_the_fuku_lens_prefix_once():
 
 
 def test_report_header_uses_prefixed_title_and_has_no_logo_without_artwork(monkeypatch):
-    monkeypatch.setattr(branding, "logo_path", lambda: None)
+    monkeypatch.setattr(branding, "header_path", lambda: None)
     from datetime import datetime
     html = templates.report_header("EMV EOD Stock Report", "x", datetime(2026, 1, 1))
     assert "<h1>Fuku Lens EMV EOD Stock Report</h1>" in html
@@ -36,7 +36,7 @@ def _write_png(path):
 
 
 def test_logo_is_embedded_in_reports_with_aspect_ratio_kept(tmp_path, monkeypatch, qapp):
-    png = tmp_path / "fuku_lens_logo.png"
+    png = tmp_path / "fuku_lens_header.png"
     _write_png(png)
     monkeypatch.setattr(branding, "_BRANDING_DIR", str(tmp_path))
     html = branding.report_logo_html(40)
@@ -70,3 +70,14 @@ def test_no_logo_file_means_no_label(tmp_path, monkeypatch):
 def test_icon_falls_back_to_the_existing_app_logo(tmp_path, monkeypatch):
     monkeypatch.setattr(branding, "_BRANDING_DIR", str(tmp_path))
     assert os.path.basename(branding.icon_path()).startswith("app_logo")
+
+
+def test_shipped_artwork_is_present_and_has_the_expected_shapes():
+    """The three Fuku Lens images from issue #80 ship in assets/branding."""
+    from PySide6.QtGui import QImage
+    header = QImage(branding.header_path())
+    logo = QImage(branding.logo_path())
+    assert not header.isNull() and abs(header.width() / header.height() - 3.0) < 0.05
+    assert not logo.isNull() and logo.width() == logo.height()
+    icon = branding.icon_path()
+    assert "fuku_lens_icon" in os.path.basename(icon) and os.path.isfile(icon)
