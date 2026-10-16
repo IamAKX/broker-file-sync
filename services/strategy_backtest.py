@@ -23,7 +23,8 @@ row per stock per day, every LMV column):
 Approximations, stated in the report itself: entries use the closing price (no
 intraday trigger time), exits use the level touched (or the day's open when the day gapped through a stop), an intraday-mode strategy
 is replayed as positional, and a formula that needs live-only data (Sector
-aside, which is filled in from the sector map) reads blank. History reaches back
+aside, which is filled in from the sector map) reads blank, and a fixed-date lookup (VALUE_ON_DATE)
+resolves only for days after that date. History reaches back
 only as far as the backend's stored LMV days (at most 90 trading days).
 """
 
@@ -102,6 +103,9 @@ def _invalid_levels(direction: str, entry_price, metrics: dict) -> list:
     return _invalid_metrics(direction, entry_price, metrics)
 
 
+_NO_LEVELS = "no_levels"
+
+
 def _entry(strategy, config, row, grid, sym_index, agg_cache, history, symbol, direction, day):
     entry_price = _price(row)
     if entry_price is None:
@@ -115,6 +119,11 @@ def _entry(strategy, config, row, grid, sym_index, agg_cache, history, symbol, d
             entry["achieved"] = False
             entry["achieved_at"] = None
         metrics[m["id"]] = entry
+    # A Stop Loss / Target that can't be computed yet (a formula needing more
+    # stored days than exist at this point of the replay) would leave a trade
+    # that can only ever stop out — don't open it; it's counted and reported.
+    if any(m.get("value") is None for m in metrics.values() if m.get("role") in (ROLE_STOP_LOSS, ROLE_TARGET)):
+        return _NO_LEVELS
     when = f"{day}T{_CLOSE_TIME}"
     signal = {
         "id": str(uuid.uuid4()), "state": "open", "backtest": True,
@@ -198,7 +207,14 @@ def _step_open(config, signal, raw, grid_row, grid, sym_index, agg_cache, histor
 
 def backtest_trades(strategy: dict, config: dict, range_response: dict,
                     date_from: date, date_to: date) -> list:
-    """Resolved trades (alert-history shaped; resolution all_targets_achieved /
+    """See backtest(); just the trades."""
+    return backtest(strategy, config, range_response, date_from, date_to)[0]
+
+
+def backtest(strategy: dict, config: dict, range_response: dict,
+             date_from: date, date_to: date) -> tuple:
+    """(trades, stats) — stats = {"skipped_no_levels": entries not opened because
+    a Stop Loss/Target couldn't be computed yet}. Resolved trades (alert-history shaped; resolution all_targets_achieved /
     stopped_out / trade_cancelled) the strategy would have produced with entries
     on days within [date_from, date_to], replayed over *range_response*'s days
     (the api.lmv_snapshot_api.get_range shape). See the module docstring."""
@@ -219,6 +235,7 @@ def backtest_trades(strategy: dict, config: dict, range_response: dict,
     open_signals: dict = {}
     cooling: set = set()
     trades: list = []
+    stats = {"skipped_no_levels": 0}
 
     for day in range_response.get("days", []):
         d = day["trade_date"]
@@ -234,25 +251,35 @@ def backtest_trades(strategy: dict, config: dict, range_response: dict,
             raw_rows.append(row)
             raw_by_symbol[symbol] = row
 
-        history = None
-        if track_history:
-            merged: dict = {}
-            for symbol, row in raw_by_symbol.items():
-                hist = hist_by_symbol.setdefault(symbol, [])
-                hist.append((d, row))
-                for key, value in fse._self_contained_day_history(hist, int_specs, date_specs, symbol).items():
-                    merged.setdefault(key, {}).update(value)
-            history = merged
-
         if d > hi:
             break
         if not raw_rows:
             continue
         headers = [SYMBOL_COLUMN] + sorted({k for r in raw_rows for k in r} - {SYMBOL_COLUMN})
+        raw_data = [[r.get(h) for h in headers] for r in raw_rows]
+
+        # Like live LMV, "history" is the saved days BEFORE today (today's row is
+        # the live one): VALUE_DAYS_AGO(x, 0) is the previous stored day, and an
+        # N-day average/max covers the N days before today. A formula can average
+        # a strategy COLUMN over those days (ATR = average of TR ...), so each
+        # stored day keeps its computed strategy columns (row filter off).
+        history = None
+        if track_history:
+            history = {}
+            for symbol, hist in hist_by_symbol.items():
+                for key, value in fse._self_contained_day_history(hist, int_specs, date_specs, symbol).items():
+                    history.setdefault(key, {}).update(value)
+        if track_history:
+            full_headers, full_data = apply_strategies(
+                [dict(runnable, row_filter=[])], headers, raw_data, day_history=history,
+                include_streak_columns=False)
+            todays = {r.get(SYMBOL_COLUMN): r for r in (dict(zip(full_headers, x)) for x in full_data)}
+        else:
+            todays = raw_by_symbol
+        for symbol, row in todays.items():
+            hist_by_symbol.setdefault(symbol, []).append((d, row))
         new_headers, new_data = apply_strategies(
-            [runnable], headers, [[r.get(h) for h in headers] for r in raw_rows],
-            day_history=history, include_streak_columns=False,
-        )
+            [runnable], headers, raw_data, day_history=history, include_streak_columns=False)
         grid = [dict(zip(new_headers, r)) for r in new_data]
         grid_by_symbol = {g.get(SYMBOL_COLUMN): g for g in grid}
         sym_index, agg_cache = build_symbol_index(grid), {}
@@ -285,12 +312,15 @@ def backtest_trades(strategy: dict, config: dict, range_response: dict,
             signal = _entry(strategy, config, row, grid, sym_index, agg_cache, history, symbol, direction, d)
             if signal is None:
                 continue
+            if signal == _NO_LEVELS:
+                stats["skipped_no_levels"] += 1
+                continue
             if signal["state"] == "resolved":      # cancelled at entry
                 trades.append(signal)
                 cooling.add(symbol)
             else:
                 open_signals[symbol] = signal
-    return trades
+    return trades, stats
 
 
 def _safe_compiled(tokens):
@@ -325,6 +355,15 @@ def run(strategy: dict, config: dict, date_from: date, date_to: date) -> tuple:
         notes.append(f"stored LMV data only reaches back to {first.strftime('%d-%b-%Y')}; "
                      f"{date_from.strftime('%d-%b-%Y')} to {(first - timedelta(days=1)).strftime('%d-%b-%Y')} is not covered")
     try:
-        return backtest_trades(strategy, config, response, date_from, date_to), notes
+        trades, stats = backtest(strategy, config, response, date_from, date_to)
     except BacktestUnavailable as exc:
         return [], notes + [str(exc)]
+    cancelled = sum(1 for t in trades if t.get("resolution") == "trade_cancelled")
+    if cancelled:
+        notes.append(f"{cancelled} entr{'y was' if cancelled == 1 else 'ies were'} left out as cancelled trades: "
+                     "at the closing price a stop-loss/target was already on the wrong side of the entry")
+    if stats["skipped_no_levels"]:
+        notes.append(f"{stats['skipped_no_levels']} entr{'y was' if stats['skipped_no_levels'] == 1 else 'ies were'} "
+                     "skipped because its stop-loss/target could not be computed yet (not enough stored days "
+                     "for the formula early in the range)")
+    return trades, notes

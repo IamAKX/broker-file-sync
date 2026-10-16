@@ -123,9 +123,9 @@ def test_row_filter_is_applied_before_the_trigger():
 def test_n_day_history_functions_resolve_from_the_stored_days():
     """VALUE_DAYS_AGO in the trigger is answered from the stored days (each day
     is its own 'today'), including days before the range."""
-    days_ago = {"type": "func", "value": "VALUE_DAYS_AGO(", "col_arg": "Current", "days_arg": 1}
+    days_ago = {"type": "func", "value": "VALUE_DAYS_AGO(", "col_arg": "Current", "days_arg": 0}
     cfg = _config(stop=100, target=106)
-    cfg["trigger_condition"] = [_col("Current"), {"type": "op", "value": ">"}, days_ago]   # today's close > yesterday's
+    cfg["trigger_condition"] = [_col("Current"), {"type": "op", "value": ">"}, days_ago]   # today's close > the previous stored day's (0 = most recent saved day, as in live)
     days = [
         _day("2026-10-01", [("INFY", 0, 100, 100, 100)]),
         _day("2026-10-02", [("INFY", 0, 99, 99, 99)]),         # fell: no entry
@@ -208,3 +208,75 @@ def test_wizard_offers_the_backtest_source_and_saves_it(monkeypatch):
     saved = report_store.load_all()[0]
     assert saved["subject_config"]["source"] == "backtest"
     assert captured.get("backtest") is True
+
+
+def _hl_day(d, close, high, low, signal=0):
+    return {"trade_date": d, "stocks": [{"symbol": "INFY", "display_name": "INFY", "metrics": {
+        "Signal": signal, "Current": close, "High": high, "Low": low, "Open": close}}]}
+
+
+def _atr_strategy():
+    """TR2 = High - Low; ATR2 = average of TR2 over the 2 days before today — a
+    strategy column averaged over past days of ANOTHER strategy column (like ATR)."""
+    return dict(
+        STRATEGY,
+        columns=[
+            {"name": "TR2", "formula": [_col("High"), {"type": "op", "value": "-"}, _col("Low")]},
+            {"name": "ATR2", "formula": [{"type": "func", "value": "AVG_DAYS(", "col_arg": "TR2", "days_arg": 2}]},
+        ])
+
+
+def _atr_config():
+    cfg = _config(stop=50)
+    cfg["metrics"] = [
+        new_metric("Stop Loss", "stop_loss", [_num(50)]),
+        new_metric("Target 1", "target", [_col("Current"), {"type": "op", "value": "+"}, _col("ATR2")]),
+    ]
+    return cfg
+
+
+def test_strategy_column_history_feeds_n_day_averages_in_targets():
+    days = [
+        _hl_day("2026-10-01", 100, 105, 95),                 # TR2 = 10
+        _hl_day("2026-10-02", 100, 110, 90),                 # TR2 = 20
+        _hl_day("2026-10-05", 100, 115, 85, signal=1),       # entry; ATR2 = avg(10, 20) = 15
+        _hl_day("2026-10-06", 100, 120, 99),                 # high 120 >= target 115
+    ]
+    trades, stats = bt.backtest(_atr_strategy(), _atr_config(), {"days": days}, date(2026, 10, 1), date(2026, 10, 30))
+    assert stats["skipped_no_levels"] == 0 and len(trades) == 1
+    target = next(m for m in trades[0]["metrics"].values() if m["name"] == "Target 1")
+    assert target["value"] == pytest.approx(115.0)
+    assert trades[0]["resolution"] == "all_targets_achieved" and trades[0]["exit_price"] == pytest.approx(115.0)
+
+
+def test_entry_is_skipped_while_levels_cannot_be_computed_yet():
+    days = [_hl_day("2026-10-01", 100, 105, 95, signal=1),   # no prior days -> ATR2 blank -> no target
+            _hl_day("2026-10-02", 100, 110, 90, signal=1)]
+    trades, stats = bt.backtest(_atr_strategy(), _atr_config(), {"days": days}, date(2026, 10, 1), date(2026, 10, 30))
+    assert trades == [] and stats["skipped_no_levels"] >= 1
+
+
+def test_history_is_the_days_before_today_like_live():
+    """'today's close above the highest close of the previous 2 days' can only be
+    true if today is NOT part of its own history window."""
+    cfg = _config(stop=90, target=130)
+    cfg["trigger_condition"] = [_col("Current"), {"type": "op", "value": ">"},
+                                {"type": "func", "value": "MAX_DAYS(", "col_arg": "Current", "days_arg": 2}]
+    days = [
+        _day("2026-10-01", [("INFY", 0, 100, 100, 100)]),
+        _day("2026-10-02", [("INFY", 0, 101, 101, 101)]),
+        _day("2026-10-05", [("INFY", 0, 105, 105, 105)]),     # 105 > max(100, 101): entry
+        _day("2026-10-06", [("INFY", 0, 131, 131, 120)]),     # target 130 hit
+    ]
+    trades = _run(days, cfg, lo="2026-10-01")
+    assert [(t["entry_time"][:10], t["resolution"]) for t in trades] == [("2026-10-05", "all_targets_achieved")]
+
+
+def test_report_notes_cancelled_and_skipped_entries(monkeypatch):
+    monkeypatch.setattr(bt, "fetch_range", lambda date_from: {"days": [
+        _day("2026-10-05", [("INFY", 1, 100, 100, 100)]),
+        _day("2026-10-06", [("INFY", 0, 100, 100, 100)]),
+    ]})
+    trades, notes = bt.run(STRATEGY, _config(stop=95, target=90), date(2026, 10, 5), date(2026, 10, 9))
+    assert [t["resolution"] for t in trades] == ["trade_cancelled"]
+    assert any("cancelled trades" in n for n in notes)
