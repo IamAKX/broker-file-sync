@@ -236,9 +236,37 @@ def resolved_trades_for_strategy(strategy_id: str, date_from: date | None = None
     return trades
 
 
+def backtest_trades_for_strategy(strategy_id: str, date_from: date | None, date_to: date | None) -> tuple:
+    """(trades, notes): the trades *strategy_id* would have produced over the
+    range, replayed from stored end-of-day LMV data (services.strategy_backtest)
+    — whether or not the strategy was active in LMV then. Cancelled/unresolved
+    trades are dropped, like for recorded alerts."""
+    from services import strategy_backtest
+    from services.strategy_alerts import config_store as alerts_config_store
+
+    if date_from is None or date_to is None:
+        return [], ["a date range is required for a back-test"]
+    strategy = next((s for s in strategy_store.load_all() if s.get("id") == strategy_id), None)
+    if strategy is None:
+        return [], ["the strategy was not found"]
+    config = alerts_config_store.load_config(strategy_id) or {}
+    trades, notes = strategy_backtest.run(strategy, config, date_from, date_to)
+    lo = datetime.combine(date_from, datetime.min.time())
+    hi = datetime.combine(date_to, datetime.max.time())
+    kept = [t for t in trades
+            if t.get("resolution") not in (None, "trade_cancelled") and t.get("resolved_at")
+            and lo <= _resolved_dt(t) <= hi]
+    kept.sort(key=_resolved_dt)
+    return kept, notes
+
+
 def compute_strategy_summary(strategy_id: str, date_from: date | None, date_to: date | None,
-                              include_backend: bool = False) -> dict:
-    trades = resolved_trades_for_strategy(strategy_id, date_from, date_to, include_backend=include_backend)
+                              include_backend: bool = False, backtest: bool = False) -> dict:
+    notes: list = []
+    if backtest:
+        trades, notes = backtest_trades_for_strategy(strategy_id, date_from, date_to)
+    else:
+        trades = resolved_trades_for_strategy(strategy_id, date_from, date_to, include_backend=include_backend)
 
     rows = []
     yields = []
@@ -270,6 +298,7 @@ def compute_strategy_summary(strategy_id: str, date_from: date | None, date_to: 
 
     return {
         "strategy_id": strategy_id,
+        "backtest": backtest, "backtest_notes": notes,
         "trades": trades,
         "rows": rows,
         "yields": yields,
@@ -289,8 +318,10 @@ def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
                        include_backend: bool = False,
                        compare: dict | None = None,
                        indicator_ids: list | None = None, indicator_symbols: list | None = None,
-                       indicator_days: int = 60) -> dict:
-    """*compare*: optional {"mode": "stock"|"sector", "asset_1", "asset_2"}
+                       indicator_days: int = 60, backtest: bool = False) -> dict:
+    """*backtest*: replay the strategies' alert rules over stored end-of-day LMV
+    data instead of reading the alerts they actually recorded (see
+    services.strategy_backtest). *compare*: optional {"mode": "stock"|"sector", "asset_1", "asset_2"}
     for the Cross-Compare section. *timeframe* is the CURVE'S bucketing granularity (daily/weekly/
     monthly/quarterly — how the comparative performance curve groups
     trades), independent of *date_from*/*date_to* (the lookback window
@@ -302,12 +333,12 @@ def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
     normal Daily/Weekly/Monthly/Quarterly report generates fast and works
     fully offline."""
     strategies_by_id = {s["id"]: s for s in strategy_store.load_all()}
-    summary_a = compute_strategy_summary(strategy_a_id, date_from, date_to, include_backend)
+    summary_a = compute_strategy_summary(strategy_a_id, date_from, date_to, include_backend, backtest)
     summary_a["name"] = strategies_by_id.get(strategy_a_id, {}).get("name", "Strategy A")
 
     summary_b = None
     if strategy_b_id:
-        summary_b = compute_strategy_summary(strategy_b_id, date_from, date_to, include_backend)
+        summary_b = compute_strategy_summary(strategy_b_id, date_from, date_to, include_backend, backtest)
         summary_b["name"] = strategies_by_id.get(strategy_b_id, {}).get("name", "Strategy B")
 
     curve_a = curve_b = None
@@ -328,6 +359,7 @@ def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
         summary_a, indicator_ids, indicator_symbols, indicator_days, date_to)
 
     return {
+        "backtest": backtest,
         "indicator_charts": indicator_charts_by_symbol,
         "summary_a": summary_a,
         "summary_b": summary_b,
@@ -382,6 +414,25 @@ def _fmt_ratio(value) -> str:
     return f"{value:.2f}" if value is not None else "—"
 
 
+def _backtest_note_block(data: dict, summaries: list) -> tuple:
+    """(html, height) — says plainly that the trades are simulated, how, and
+    anything that limited the run."""
+    notes = []
+    for summary in summaries:
+        for note in summary.get("backtest_notes") or []:
+            notes.append(f'{summary["name"]}: {note}')
+    body = (
+        '<p class="fk-note">Back-test — these trades are <b>simulated</b>, not recorded alerts. The strategy\'s '
+        "Strategy Notifications rules are replayed over the stored end-of-day LMV data whether or not the strategy "
+        "was active in LMV: a stock enters at the day's closing price when its trigger turns true, and from the next "
+        "day the day's High/Low decide the outcome (all targets reached, or stop-loss touched; if one day touches both, "
+        "the stop-loss counts). Open trades at the end of the range are not counted. Intraday-mode strategies are "
+        "replayed as positional.</p>"
+        + "".join(f'<p class="fk-note"><b>Note:</b> {templates.esc(n)}.</p>' for n in notes)
+    )
+    return templates.section("About this back-test", body), 150 + 24 * len(notes)
+
+
 def build_report_pages(data: dict, columns: list | None = None) -> list:
     """Builds the report's physical pages (see services.report_engine.
     templates' docstring for why pagination is decided here, in Python, not
@@ -433,7 +484,8 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
     page1 = (
         templates.report_header(
             "LMV Based Strategy EOD Report",
-            f'{summary_a["name"]}' + (f' vs {summary_b["name"]}' if comparing else ""),
+            f'{summary_a["name"]}' + (f' vs {summary_b["name"]}' if comparing else "")
+            + (" — Back-test" if data.get("backtest") else ""),
             datetime.now(),
         )
         + f'<div class="kpi-row">{kpis}</div>'
@@ -453,6 +505,8 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
                 + f'</div>{charts.donut_legend(segments)}</div>'
             )
     blocks = []
+    if data.get("backtest"):
+        blocks.append(_backtest_note_block(data, [summary_a] + ([summary_b] if comparing else [])))
     if sector_html:
         n_donuts = 2 if comparing else 1
         blocks.append((templates.section("Sector Distribution", sector_html), 40 + 215 * n_donuts))

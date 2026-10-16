@@ -122,6 +122,7 @@ def _build_lmv_html(report: dict) -> str:
         # didn't fire the alerts — always supplement from the backend
         # (best-effort: failures just fall back to local history).
         include_backend=True,
+        backtest=subject.get("source") == "backtest",
         compare=subject.get("compare"),
         indicator_ids=subject.get("indicator_ids"), indicator_symbols=subject.get("indicator_symbols"),
         indicator_days=int(subject.get("indicator_days") or 60),
@@ -575,6 +576,14 @@ class ReportsScreen(QWidget):
         date_row.addStretch()
         layout.addLayout(date_row)
         self._sync_lmv_date_range()
+
+        layout.addWidget(self._field_label("Trades from"))
+        self._lmv_source_combo = QComboBox()
+        self._lmv_source_combo.addItem("Recorded alerts (what the strategy actually fired)", "recorded")
+        self._lmv_source_combo.addItem(
+            "Back-test — replay the strategy over stored daily LMV data (works even if it was not active)",
+            "backtest")
+        layout.addWidget(self._lmv_source_combo)
 
         layout.addWidget(self._field_label("Investment Simulation Amount (₹) — used with Strategy A"))
         self._investment_edit = QLineEdit(str(int(lmv_report_data.DEFAULT_INVESTMENT_AMOUNT)))
@@ -1241,6 +1250,7 @@ class ReportsScreen(QWidget):
                 if d.isValid():
                     edit.setDate(d)
             self._sync_lmv_date_range()
+            self._select_data(self._lmv_source_combo, cfg.get("source", "recorded"))
             if cfg.get("investment_amount") is not None:
                 self._investment_edit.setText(str(int(cfg["investment_amount"])))
             self._prefill_indicator_fields(cfg)
@@ -1348,6 +1358,7 @@ class ReportsScreen(QWidget):
                 "strategy_a_id": strategy_a_id,
                 "strategy_b_id": strategy_b_id,
                 "investment_amount": investment_amount,
+                "source": self._lmv_source_combo.currentData(),
                 "compare": {
                     "mode": self._compare_mode_combo.currentData(),
                     "asset_1": self._compare_asset_1.text().strip(),
