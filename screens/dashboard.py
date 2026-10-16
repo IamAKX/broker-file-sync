@@ -101,12 +101,6 @@ class DashboardScreen(QWidget):
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(20)
 
-        # Brand logo (Fuku Lens artwork, when supplied) — aspect ratio kept
-        import branding
-        logo = branding.make_logo_label()
-        if logo is not None:
-            layout.addWidget(logo)
-
         # Header
         title = QLabel("Dashboard")
         title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
