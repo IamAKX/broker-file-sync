@@ -7,6 +7,7 @@ through (see services/notifications/).
 from PySide6.QtWidgets import QSystemTrayIcon, QMenu
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import QObject
+from branding import APP_NAME
 
 
 class AppTray(QObject):
@@ -14,10 +15,10 @@ class AppTray(QObject):
         super().__init__(parent)
         self._controller = controller
         self.icon = QSystemTrayIcon(QIcon(icon_path))
-        self.icon.setToolTip("Broker Sync")
+        self.icon.setToolTip(APP_NAME)
 
         menu = QMenu()
-        menu.addAction("Open Broker Sync", self._show)
+        menu.addAction(f"Open {APP_NAME}", self._show)
         menu.addSeparator()
         menu.addAction("Quit", self._controller.request_quit)
         self.icon.setContextMenu(menu)

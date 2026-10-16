@@ -520,7 +520,12 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
     if not all_rows:
         blocks.append((templates.section(
             "Directional Stock Performance",
-            '<p style="color:#64748b;font-size:11px;">No closed trades in the selected period.</p>'), 70))
+            '<p style="color:#64748b;font-size:11px;">No closed trades in the selected period'
+            + (f' ({data["date_from"].strftime("%d-%b-%Y")} to {data["date_to"].strftime("%d-%b-%Y")})'
+               if data.get("date_from") and data.get("date_to") else "")
+            + ". Trades come from the alerts the strategy fired (Strategy Notifications) and "
+              "appear once they have resolved — a target hit, stop-loss or close. A trade still "
+              "open is not counted yet.</p>"), 96))
 
     # Page 1 (header, KPIs, donut(s), curve) is measured; the rest flows —
     # the trade table can be hundreds of rows, so it continues across pages.

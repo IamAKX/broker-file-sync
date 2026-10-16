@@ -31,3 +31,21 @@ def test_builder_field_list_offers_sector_and_symbol_first(monkeypatch):
     isb.InceptionStrategyBuilderScreen._reload_all(stub)
     assert stub._fields[:2] == ["Sector", "Symbol"]
     assert stub._fields.count("Sector") == 1 and stub._fields.count("Symbol") == 1
+
+
+def test_builder_field_list_offers_synced_oi_marketprofile_and_opening_range_fields(monkeypatch):
+    """#73: VAH/VAL/POC, Max Pain, the OI strikes and O.R High/Low were
+    missing from the EMV Strategy Builder's field list."""
+    import sys
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication(sys.argv)
+    from screens import inception_strategy_builder as isb
+    class _Stub:
+        _fields = []
+    monkeypatch.setattr(isb.store, "load_all", lambda: [])
+    stub = _Stub()
+    stub._refresh_list = lambda: None
+    isb.InceptionStrategyBuilderScreen._reload_all(stub)
+    for name in ("VAH", "VAL", "POC", "Max Pain", "callstrikehighestoi", "Callstrikewithsecondhighestoi",
+                 "PutStrikeWithsecondHighestOI", "TodayPutHighestStrike", "OR.High", "OR.Low"):
+        assert stub._fields.count(name) == 1, name

@@ -406,6 +406,63 @@ def _level_rows(data: dict) -> list:
     return rows
 
 
+_PRICE_CHART_DAYS = 30
+_PRICE_CHART_PX = 190
+
+
+def price_chart_svg(data: dict, days: int = _PRICE_CHART_DAYS, width: int = 700,
+                    height: int = _PRICE_CHART_PX) -> str:
+    """Line chart of the stock's daily close over its last *days* trading days
+    (Inception's synced history) plus a final "live" point at the current
+    price, with the trade's entry, stop loss, first targets and the nearby
+    resistance (BUY) / support (SELL) levels as dashed horizontal lines (#76).
+    "" when the stock has no synced history — the card then just says so."""
+    from services import emv_report_data, inception_bars_store
+
+    bars = inception_bars_store.bars_for_symbol(emv_report_data.resolve_symbol(data["symbol"]))[-days:]
+    closes = [b["close"] for b in bars if b.get("close") is not None]
+    if len(closes) < 2:
+        return ""
+    labels = [b["trade_date"].strftime("%d-%b") for b in bars if b.get("close") is not None]
+    current = data.get("current_price")
+    if current is not None:
+        closes.append(current)
+        labels.append("live")
+    n = len(closes)
+
+    def flat(value):
+        return [value] * n
+
+    series = [{"label": "Close", "points": closes, "color": "#2979FF"}]
+    if data.get("entry_price") is not None:
+        series.append({"label": "Entry", "points": flat(data["entry_price"]), "color": "#D97706", "dashed": True})
+    if data.get("stop_loss") is not None:
+        series.append({"label": "Stop loss", "points": flat(data["stop_loss"]), "color": "#dc2626", "dashed": True})
+    shown = [t for t in data["targets"] if t["value"] is not None and t["valid"]][:2]
+    for t in shown:
+        series.append({"label": t["name"], "points": flat(t["value"]), "color": "#16a34a", "dashed": True})
+    prefix = "R" if data["direction"] == "BUY" else "S"
+    for i, lvl in enumerate(data["sr"]["levels"][:2], start=1):
+        series.append({"label": f'{prefix}{i} {lvl["label"]}', "points": flat(lvl["price"]),
+                       "color": "#8250df", "dashed": True})
+    return charts.line_chart(series, width=width, height=height, x_labels=labels, y_label="Price")
+
+
+def _levels_note(data: dict) -> str:
+    """Plain-text list of the possible resistance (BUY) / support (SELL)
+    levels, so they are stated outright rather than only as ladder rows."""
+    kind = "resistance" if data["direction"] == "BUY" else "support"
+    levels = data["sr"]["levels"]
+    if not levels:
+        return (f'<div class="fk-note">No possible {kind} levels to show — none beyond the current price, '
+                "or no synced price history for this stock.</div>")
+    parts = []
+    for lvl in levels:
+        pct = f' ({lvl["distance_pct"]:+.2f}%)' if lvl.get("distance_pct") is not None else ""
+        parts.append(f'{templates.esc(lvl["label"])} {_fmt_price(lvl["price"])}{pct}')
+    return f'<div class="fk-note"><b>Possible {kind}:</b> {" · ".join(parts)}</div>'
+
+
 def _status_badge(data: dict) -> str:
     kind = {"TARGETS ACHIEVED": "win", "STOPPED OUT": "loss", "TRADE CANCELLED": "cancel"}.get(data["status"], "open")
     return f'<span class="fk-badge {kind}">{templates.esc(data["status"])}</span>'
@@ -451,6 +508,11 @@ def card_html(data: dict, generated_at: datetime | None = None, embed_indicators
 
     rows = _level_rows(data)
     ladder = charts.price_ladder(rows, data["current_price"], width=430)
+    price_chart = price_chart_svg(data)
+    chart_html = (
+        f'<div class="fk-h" style="margin-top:8px">Price — last {_PRICE_CHART_DAYS} trading days</div>{price_chart}'
+        if price_chart else ""
+    ) + _levels_note(data)
 
     chips = "".join(
         f'<div class="fk-chip {"ok" if t["satisfied"] else "no"}">{"✓" if t["satisfied"] else "✕"} {templates.esc(t["label"])}</div>'
@@ -498,13 +560,14 @@ def card_html(data: dict, generated_at: datetime | None = None, embed_indicators
         f'{"possible resistance" if direction == "BUY" else "possible support"}</div>{ladder}</div>'
         f'<div class="fk-col-side"><div class="fk-h">Why this signal triggered</div><div class="fk-chips">{chips}</div>'
         f'<div class="fk-h">Signal timeline</div><div class="fk-tl">{tl}</div></div></div>'
+        f'{chart_html}'
         f'<div class="fk-h" style="margin-top:8px">Target progress</div>{progress or "<div class=fk-note>No targets configured.</div>"}'
         f'{indicator_html}</div>'
     )
     n_tl = len(data["timeline"]) + len(data["trigger"])
     height = (_CARD_BASE_PX + max(len(rows) * _LADDER_ROW_PX, n_tl * 20 + 30)
               + max(len([t for t in data["targets"] if t["value"] is not None]), 1) * _PROGRESS_ROW_PX
-              + indicator_px)
+              + indicator_px + (_svg_height(price_chart) + 30 if price_chart else 0) + 26)
     return html_, height
 
 

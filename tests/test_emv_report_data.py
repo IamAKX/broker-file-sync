@@ -46,7 +46,7 @@ def test_build_stock_report_data_has_series_and_stats():
 def test_build_stock_report_pages_flows_short_series_onto_one_page():
     _seed("DIVISLAB_I", date(2026, 1, 1), 30)
     data = emv_report_data.build_stock_report_data(
-        "DIVISLAB_I", "CLOSE", date(2026, 1, 23), date(2026, 1, 30)
+        "DIVISLAB_I", "CLOSE", date(2026, 1, 23), date(2026, 1, 26)
     )
     pages = emv_report_data.build_stock_report_pages(data)
     assert len(pages) == 1
@@ -56,7 +56,7 @@ def test_build_stock_report_pages_flows_short_series_onto_one_page():
 def test_build_stock_report_html_is_a_full_document():
     _seed("DIVISLAB_I", date(2026, 1, 1), 15)
     data = emv_report_data.build_stock_report_data(
-        "DIVISLAB_I", "CLOSE", date(2026, 1, 12), date(2026, 1, 16)
+        "DIVISLAB_I", "CLOSE", date(2026, 1, 12), date(2026, 1, 13)
     )
     html = emv_report_data.build_stock_report_html(data)
     assert "<!DOCTYPE html>" in html
@@ -469,3 +469,55 @@ def test_stock_report_draws_a_right_axis_for_an_rsc_like_extra_series():
     assert "RSC [RSC] (right axis)" in html                       # legend says which scale it is on
     # the right-hand tick labels run on RSC's own scale (~100-105), not the price's (~4800)
     assert ">100.0<" in html or ">100.5<" in html or ">101.0<" in html or ">104.5<" in html
+
+
+def test_trend_report_names_strategies_since_date_and_sector_split(monkeypatch):
+    """#74: the trend report lists which strategies made each stock qualify,
+    the date its Days True streak began, and a sector pie of the stocks."""
+    strategies = _trend_setup(monkeypatch)
+    as_of = date(2026, 2, 20)
+    result = emv_report_data.classify_trend(None, "Daily", as_of)
+    abb = next(r for r in result["rows"] if r["symbol"] == "ABB")
+    assert abb["strategies"] and all(isinstance(n, str) and n for n in abb["strategies"])
+    assert abb["days_true"] == emv_report_data.DAYS_TRUE_LOOKBACK
+    bars = inception_bars_store.bars_for_symbol("ABB_I", date_to=as_of)
+    assert abb["days_true_since"] == bars[-emv_report_data.DAYS_TRUE_LOOKBACK]["trade_date"]
+    # capped streak -> the date is a bound, not the real start
+    assert emv_report_data._trend_cell("Since", abb, []).startswith("on or before ")
+    assert emv_report_data._trend_cell("Strategies", abb, []) == ", ".join(abb["strategies"])
+
+    s130 = {"id": "s130", "name": "Above 130", "active": True, "category": "Daily", "columns": [],
+            "row_filter": _cond_close_above(130)}
+    days, since = emv_report_data.trailing_streak("SBIN", s130, as_of)
+    sbin_bars = inception_bars_store.bars_for_symbol("SBIN_I", date_to=as_of)
+    assert 0 < days < emv_report_data.DAYS_TRUE_LOOKBACK
+    assert since == sbin_bars[-days]["trade_date"]
+    assert emv_report_data.trailing_streak("NOPE", s130, as_of) == (0, None)
+
+    html = "".join(emv_report_data.build_trend_report_pages(result, show_days_true=True))
+    assert "<th>Strategies</th>" in html and "<th>Since</th>" in html
+    assert "Sector Distribution" in html and "Stocks by Sector" in html
+    plain = "".join(emv_report_data.build_trend_report_pages(result, show_days_true=False))
+    assert "<th>Since</th>" not in plain
+
+
+def test_stock_report_table_shows_plotted_columns_pct_vs_close_and_days_below_summary(monkeypatch):
+    """#77: the table carries every plotted column's value, Close's % distance
+    from each price-scale column (none for a right-axis column), and a
+    days-below/above summary answering "for how many days was X below Y"."""
+    _seed("DIVISLAB_I", date(2026, 1, 1), 30)
+    monkeypatch.setattr(emv_report_data, "pick_axes", lambda base, extras: ["left", "right"][:len(extras)])
+    data = emv_report_data.build_stock_report_data(
+        "DIVISLAB_I", "CLOSE", date(2026, 1, 20), date(2026, 1, 30),
+        extra_fields=[{"field": "HIGH", "color": "#ff0000"}, {"field": "LOW", "color": "#00ff00"}],
+    )
+    html = "".join(emv_report_data.build_stock_report_pages(data))
+    for header in ("<th>HIGH</th>", "<th>LOW</th>", "<th>Close vs CLOSE</th>", "<th>Close vs HIGH</th>"):
+        assert header in html
+    assert "<th>Close vs LOW</th>" not in html        # LOW is on the right axis here: no price-level %
+    assert "Days below" in html and "% days below" in html
+    assert "Close vs each column" in html
+    high_series = data["extras"][0]["series"]
+    below = sum(1 for e in high_series if e["close"] is not None and e["value"] is not None and e["close"] < e["value"])
+    cs = emv_report_data.condition_stats_for({"series": high_series, "by_date": {e["date"]: e["value"] for e in high_series}})
+    assert cs["periods_below"] == below

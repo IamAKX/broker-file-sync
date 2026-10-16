@@ -353,7 +353,10 @@ def _audit_table(data: dict) -> str:
 
 
 def _stock_items(stocks: list, key: str) -> list:
-    return [{"name": s["symbol"], "value": s.get(key)} for s in sorted(stocks, key=lambda s: s["symbol"])]
+    """Strongest first (a missing value last), ties by symbol — the same
+    descending order as the sector heatmaps (#75)."""
+    ordered = sorted(stocks, key=lambda s: (s.get(key) is None, -(s.get(key) or 0), s["symbol"]))
+    return [{"name": s["symbol"], "value": s.get(key)} for s in ordered]
 
 
 def build_sector_report_pages(data: dict) -> list:

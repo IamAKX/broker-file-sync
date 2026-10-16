@@ -1022,6 +1022,12 @@ class InceptionStrategyBuilderScreen(QWidget):
         # LMV's own (unrelated) Formula Builder field list.
         if "Avg Rate" not in self._fields:
             self._fields.append("Avg Rate")
+        # Options-OI / Max Pain / Market Profile / Opening Range columns
+        # copied from LMV by Inception Sync (VAH, VAL, POC, Max Pain, OI
+        # strikes, OR.High/OR.Low): compute_for_bars puts them on every row
+        # too, so a formula must be able to pick them (#73).
+        from services import inception_formula_builder_columns as _ifbc
+        self._fields += [c for c in _ifbc._LMV_SYNCED_NEW_FIELD_MAP if c not in self._fields]
         # Configured Indicator Library entries (RSI(14), ...) — computed per
         # row by compute_for_bars alongside the built-ins above.
         self._indicator_field_codes = indicator_library.field_codes()

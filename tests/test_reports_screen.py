@@ -832,7 +832,7 @@ def test_sector_report_gallery_entry_and_live_wizard_generates_from_the_lmv_snap
     assert cfg["mode"] == "live" and cfg["refresh_minutes"] == 2 and cfg["primary_timeframe"] == "Weekly"
     assert cfg["metric"] == {"kind": "pair", "from": "MT", "to": "Close"} and cfg["sector"] is None
     html = screen._last_rendered_html
-    assert "Fuku Live Sector Report" in html and "MT vs Close % Change" in html
+    assert "Fuku Lens Live Sector Report" in html and "MT vs Close % Change" in html
     assert "IT" in html and "BANK" in html
     assert "+0.50%" in html                                                 # IT daily = 1.0 + (-0.5)
     assert "+3.00%" in html                                                 # IT weekly = 2.0 + 1.0 (a SUM, not an average)
@@ -885,7 +885,7 @@ def test_eod_sector_wizard_saves_options_generates_and_prefills(screen, qapp):
 
     report = report_store.load_all()[0]
     assert report["subject_config"]["mode"] == "eod" and report["subject_config"]["heat_step"] == 1.5
-    assert "Fuku EOD Sector Report" in screen._last_rendered_html and "OPEN vs CLOSE % Change" in screen._last_rendered_html
+    assert "Fuku Lens EOD Sector Report" in screen._last_rendered_html and "OPEN vs CLOSE % Change" in screen._last_rendered_html
     assert not screen._refresh_timer.isActive()                             # EOD reports never auto-refresh
 
     screen._edit_report(report)
@@ -905,3 +905,44 @@ def test_sector_wizard_rejects_identical_pair_fields(screen, monkeypatch):
     screen._name_edit.setText("x")
     screen._save_and_generate()
     assert warned and "two different fields" in warned[0] and report_store.load_all() == []
+
+
+def test_lmv_wizard_date_pickers_only_apply_to_custom_range(screen):
+    """#78/#79: From/To were editable but silently ignored for Daily/Weekly/...
+    (a 06-Oct..15-Oct range reported just 'today'). They now show the range a
+    preset really uses and unlock only for Custom Range."""
+    from services import report_metrics, report_store
+
+    screen._start_new_report(report_store.REPORT_TYPE_LMV)
+    screen._select_data(screen._timeframe_combo, report_metrics.TIMEFRAME_WEEKLY)
+    lo, hi = report_metrics.resolve_preset_range(report_metrics.TIMEFRAME_WEEKLY)
+    assert not screen._from_date.isEnabled() and not screen._to_date.isEnabled()
+    assert screen._from_date.date().toPython() == lo and screen._to_date.date().toPython() == hi
+
+    screen._select_data(screen._timeframe_combo, report_metrics.TIMEFRAME_CUSTOM)
+    assert screen._from_date.isEnabled() and screen._to_date.isEnabled()
+
+
+def test_wizard_card_is_scrollable_so_fields_keep_their_height(screen):
+    from PySide6.QtWidgets import QScrollArea
+    from services import report_store
+
+    screen._start_new_report(report_store.REPORT_TYPE_LMV)
+    scrolls = screen._wizard_page.findChildren(QScrollArea)
+    assert any(s.widget() is not None and s.widget().objectName() == "brokerPanel" and s.widgetResizable()
+               for s in scrolls)
+
+
+def test_fuku_wizard_strategy_dropdown_lists_every_strategy_and_is_searchable(screen):
+    """#72: only strategies with a local alert were offered (often none), so
+    nothing could be selected."""
+    from services import report_store, strategy_store
+
+    strategy_store.save_strategy(strategy_store.new_strategy("Alpha Strategy"))
+    strategy_store.save_strategy(strategy_store.new_strategy("Beta Strategy"))
+    screen._start_new_report(report_store.REPORT_TYPE_FUKU_LIVE)
+    names = [screen._fuku_strategy_combo.itemText(i) for i in range(screen._fuku_strategy_combo.count())]
+    assert "Alpha Strategy" in names and "Beta Strategy" in names
+    assert screen._fuku_strategy_combo.isEditable()
+    assert screen._fuku_strategy_combo.completer() is not None
+    assert screen._fuku_signal_combo.isEditable()

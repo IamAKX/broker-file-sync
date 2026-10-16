@@ -133,7 +133,7 @@ def test_report_pages_hold_heatmaps_rankings_bars_custom_and_audit_from_one_data
     for part in ("Sector Heatmap — Daily % Change", "Sector Heatmap — Weekly % Change", "Sector Heatmap — Monthly % Change",
                  "Strongest &amp; Weakest Sectors", "Sector Performance — Daily / Weekly / Monthly",
                  "Custom Metric Heatmap — MT vs CLOSE % Change", "Sector Values Used (audit)",
-                 "EOD 13-Oct-2026", "Fuku EOD Sector Report"):
+                 "EOD 13-Oct-2026", "Fuku Lens EOD Sector Report"):
         assert part in html, part
     assert "-1.76%" in html and "-4.70%" in html and "+5.30%" in html       # Technology's spec totals appear
     assert "Daily %</th>" in html and "Monthly %</th>" in html
@@ -156,7 +156,7 @@ def test_primary_timeframe_orders_the_heatmaps_and_live_header_and_empty_state()
     live = _report_data(refresh_minutes=5)
     live["mode"] = "live"
     live_html = "".join(sr.build_sector_report_pages(live))
-    assert "Fuku Live Sector Report" in live_html and "Auto-refresh every 5 min" in live_html
+    assert "Fuku Lens Live Sector Report" in live_html and "Auto-refresh every 5 min" in live_html
     empty = sr.build_sector_report_data({"stocks": [], "as_of": date(2026, 1, 1), "source": "Live"}, "live")
     assert "open the Live Master View first" in "".join(sr.build_sector_report_pages(empty))
 
@@ -205,3 +205,13 @@ def test_heat_legend_labels_match_the_actual_colour_bins():
     assert sr.heat_color(4.0, step) == "#15803d"
     top = 94.09
     assert sr.heat_color(top, sr.auto_step([top, -50.1])) == "#15803d"               # the largest value gets the darkest colour
+
+
+def test_stock_heatmap_items_are_descending_with_missing_last():
+    """#75: a single sector's stock heatmap was alphabetical, not strongest-first."""
+    stocks = [
+        {"symbol": "AAA", "daily": 1.0}, {"symbol": "BBB", "daily": None},
+        {"symbol": "CCC", "daily": 3.5}, {"symbol": "DDD", "daily": -2.0}, {"symbol": "EEE", "daily": 3.5},
+    ]
+    items = sr._stock_items(stocks, "daily")
+    assert [i["name"] for i in items] == ["CCC", "EEE", "AAA", "DDD", "BBB"]

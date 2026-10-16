@@ -17,6 +17,7 @@ class IndicatorPickerWidget(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
         self._list = QListWidget()
+        self._list.setMinimumHeight(150)
         self._list.setMaximumHeight(140)
         if theme is not None:
             self._list.setStyleSheet(

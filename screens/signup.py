@@ -10,13 +10,14 @@ from api import auth_api
 from api.exceptions import ApiError, NetworkError
 from api.token_store import token_manager
 from components.error_popup import show_api_error
+from branding import APP_NAME
 
 
 class SignupScreen(QWidget):
     def __init__(self, controller):
         super().__init__()
         self._controller = controller
-        self.setWindowTitle("Broker Sync — Sign Up")
+        self.setWindowTitle(f"{APP_NAME} — Sign Up")
         self.resize(1000, 700)
         self.setMinimumSize(800, 600)
         self._build()
@@ -47,7 +48,7 @@ class SignupScreen(QWidget):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(title)
 
-        subtitle = QLabel("Broker Sync")
+        subtitle = QLabel(APP_NAME)
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")

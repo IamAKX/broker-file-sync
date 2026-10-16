@@ -10,13 +10,14 @@ from api import auth_api
 from api.exceptions import ApiError, NetworkError
 from api.token_store import token_manager
 from components.error_popup import show_api_error
+from branding import APP_NAME
 
 
 class LoginScreen(QWidget):
     def __init__(self, controller):
         super().__init__()
         self._controller = controller
-        self.setWindowTitle("Broker Sync — Login")
+        self.setWindowTitle(f"{APP_NAME} — Login")
         self.resize(1000, 650)
         self.setMinimumSize(800, 550)
         self._build()

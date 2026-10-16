@@ -11,6 +11,7 @@ pointing at the built executable instead.
 
 import os
 import sys
+from branding import APP_NAME
 
 _APP_NAME = "BrokerSync"
 _MAIN_PY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "main.py")
@@ -108,7 +109,7 @@ def _linux_set_enabled(enabled: bool) -> None:
     exec_cmd = " ".join(_launch_command())
     desktop = f"""[Desktop Entry]
 Type=Application
-Name=Broker Sync
+Name={APP_NAME}
 Exec={exec_cmd}
 X-GNOME-Autostart-enabled=true
 """

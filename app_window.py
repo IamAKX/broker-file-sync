@@ -3,6 +3,7 @@ from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QVBoxLayout, QS
 from PySide6.QtCore import Qt
 from components.sidebar import Sidebar
 from components.topbar import TopBar
+from branding import APP_NAME
 
 
 class MainWindow(QMainWindow):
@@ -10,7 +11,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self._controller = controller
         self._navigation_locked = False
-        self.setWindowTitle("Broker Sync")
+        self.setWindowTitle(APP_NAME)
         self.resize(1280, 800)
         self.setMinimumSize(1100, 700)
         self._build()

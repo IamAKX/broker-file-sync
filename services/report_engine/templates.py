@@ -276,9 +276,13 @@ def report_header(title: str, subtitle: str, generated_at: datetime, extra_meta:
     meta = f'Generated: {esc(when)}'
     if extra_meta:
         meta += f'<br/>{esc(extra_meta)}'
+    import branding
+    logo = branding.report_logo_html()
+    text = (f'<div><h1>{esc(branding.prefixed_report_title(title))}</h1>'
+            f'<p class="subtitle">{esc(subtitle)}</p></div>')
+    left = f'<div style="display:flex;align-items:center;gap:12px;">{logo}{text}</div>' if logo else text
     return (
-        f'<div class="report-header"><div><h1>{esc(title)}</h1>'
-        f'<p class="subtitle">{esc(subtitle)}</p></div>'
+        f'<div class="report-header">{left}'
         f'<div class="meta">{meta}</div></div>'
     )
 
@@ -290,6 +294,8 @@ def render_report(pages: list, doc_title: str = "Report") -> str:
     HTML document (CSS inlined, no external asset references) ready for
     pdf_export.render_to_pdf() or a QWebEngineView preview.
     """
+    import branding
+    doc_title = branding.prefixed_report_title(doc_title)
     total = len(pages)
     page_blocks = []
     for i, inner in enumerate(pages, start=1):

@@ -295,3 +295,38 @@ def test_timeline_lists_target_achievement_time_and_outcome():
     assert any("TARGET 1 ACHIEVED" in d for d in details)
     assert details[-1] == "TARGETS ACHIEVED"
     assert any(e["title"].endswith("10:48") for e in data["timeline"])
+
+
+def _card_data(symbol="INFY", direction="BUY", current=125.0):
+    return {
+        "symbol": symbol, "direction": direction, "entry_price": 100.0, "current_price": current,
+        "stop_loss": 95.0,
+        "targets": [{"name": "TARGET 1", "value": 130.0, "valid": True, "achieved": False, "progress": 0.5},
+                    {"name": "TARGET 2", "value": 140.0, "valid": True, "achieved": False, "progress": 0.2}],
+        "sr": fl.support_resistance_data(symbol, direction, current),
+    }
+
+
+def test_price_chart_is_a_line_chart_of_closes_with_levels_and_a_live_point():
+    """#76: the Fuku card carries a price line chart (daily closes + live point)
+    with entry / stop loss / targets / resistance drawn on it."""
+    _seed_bars("INFY", date(2026, 1, 1), 40, base=100)
+    svg = fl.price_chart_svg(_card_data())
+    assert svg.startswith("<svg") and ("<path" in svg or "<polyline" in svg)
+    for label in ("Close", "Entry", "Stop loss", "TARGET 1"):
+        assert label in svg
+    assert "live" in svg or "Close" in svg
+
+
+def test_price_chart_empty_without_synced_history():
+    assert fl.price_chart_svg(_card_data("NOPE")) == ""
+
+
+def test_levels_note_names_resistance_for_buy_and_support_for_sell_or_explains_absence():
+    _seed_bars("INFY", date(2026, 1, 1), 40, base=100)
+    buy = fl._levels_note(_card_data("INFY", "BUY", current=90.0))
+    assert "Possible resistance:" in buy
+    sell = fl._levels_note(_card_data("INFY", "SELL", current=500.0))
+    assert "Possible support:" in sell
+    none = fl._levels_note(_card_data("NOPE", "BUY"))
+    assert "No possible resistance levels" in none

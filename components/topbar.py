@@ -11,6 +11,7 @@ from PySide6.QtSvg import QSvgRenderer
 from theme import ThemeManager
 from version import APP_VERSION
 from api.token_store import token_manager
+from branding import APP_NAME
 
 # The one account Admin Controls > Inception Sync is shown for — matches
 # the backend's own app.core.deps._ADMIN_EMAIL (broker-sync-api repo)
@@ -238,8 +239,8 @@ class TopBar(QWidget):
 
     def _show_about(self):
         box = QMessageBox(self)
-        box.setWindowTitle("About Broker Sync")
-        box.setText(f"Broker Sync\nVersion {APP_VERSION}")
+        box.setWindowTitle(f"About {APP_NAME}")
+        box.setText(f"{APP_NAME}\nVersion {APP_VERSION}")
         box.setStyleSheet(
             f"QMessageBox{{background:{self._theme.get('background')};"
             f"color:{self._theme.get('text_primary')};}}"

@@ -27,7 +27,7 @@ from PySide6.QtCore import QDate, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox, QColorDialog, QComboBox, QCompleter, QDateEdit, QDoubleSpinBox, QFileDialog, QFrame, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSpinBox, QStackedWidget,
+    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QScrollArea, QSpinBox, QStackedWidget,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -253,6 +253,18 @@ def _build_report_html(report: dict, new_since: datetime | None = None, lmv_snap
     # Light/Dark chosen in the wizard — applied here so every report type
     # (and the live auto-refresh) gets it, both in the preview and the PDF.
     return templates.apply_theme(html, (report.get("visuals") or {}).get("theme"))
+
+
+def _make_searchable(combo: QComboBox) -> QComboBox:
+    """Dropdown with type-ahead filtering (contains, case-insensitive) that
+    still only accepts the listed items — for long strategy/alert lists."""
+    combo.setEditable(True)
+    combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+    completer = combo.completer()
+    completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+    completer.setFilterMode(Qt.MatchFlag.MatchContains)
+    combo.setMaxVisibleItems(20)
+    return combo
 
 
 class _SymbolCombo(QComboBox):
@@ -487,8 +499,14 @@ class ReportsScreen(QWidget):
         self._type_fields_layout.setSpacing(10)
         card_lay.addLayout(self._type_fields_layout)
 
-        layout.addWidget(card)
-        layout.addStretch()
+        # Scrollable: with the many per-type fields (indicator picker, column
+        # picker, ...) a plain layout squeezed every widget below its usable
+        # height on a normal window (#79).
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidget(card)
+        layout.addWidget(scroll, 1)
 
         btn_row = QHBoxLayout()
         back_btn = QPushButton("Cancel")
@@ -538,6 +556,7 @@ class ReportsScreen(QWidget):
         for key, label in _TIMEFRAME_OPTIONS:
             self._timeframe_combo.addItem(label, key)
         layout.addWidget(self._timeframe_combo)
+        self._timeframe_combo.currentIndexChanged.connect(self._sync_lmv_date_range)
 
         date_row = QHBoxLayout()
         today = QDate.currentDate()
@@ -555,6 +574,7 @@ class ReportsScreen(QWidget):
         date_row.addWidget(self._to_date)
         date_row.addStretch()
         layout.addLayout(date_row)
+        self._sync_lmv_date_range()
 
         layout.addWidget(self._field_label("Investment Simulation Amount (₹) — used with Strategy A"))
         self._investment_edit = QLineEdit(str(int(lmv_report_data.DEFAULT_INVESTMENT_AMOUNT)))
@@ -588,6 +608,19 @@ class ReportsScreen(QWidget):
         if not strategies:
             note = self._field_label("No strategies configured yet — create one in Strategy Builder first.")
             layout.addWidget(note)
+
+    def _sync_lmv_date_range(self):
+        """From/To only apply to Custom Range — for Daily/Weekly/... they were
+        silently ignored while still looking editable (#78: a 06-Oct..15-Oct
+        range produced a report of just 'today'). Show the range the preset
+        really uses and lock the pickers."""
+        custom = self._timeframe_combo.currentData() == report_metrics.TIMEFRAME_CUSTOM
+        if not custom:
+            lo, hi = report_metrics.resolve_preset_range(self._timeframe_combo.currentData())
+            self._from_date.setDate(QDate(lo.year, lo.month, lo.day))
+            self._to_date.setDate(QDate(hi.year, hi.month, hi.day))
+        self._from_date.setEnabled(custom)
+        self._to_date.setEnabled(custom)
 
     def _refresh_indicator_choices(self):
         checked = {
@@ -939,13 +972,20 @@ class ReportsScreen(QWidget):
         strat_lay = QVBoxLayout(self._fuku_strategy_frame)
         strat_lay.setContentsMargins(0, 0, 0, 0)
         strat_lay.addWidget(self._field_label("Strategy"))
-        self._fuku_strategy_combo = QComboBox()
+        self._fuku_strategy_combo = _make_searchable(QComboBox())
+        # Every configured strategy, not only those with an alert on this
+        # machine (local alert history is per-machine and capped, so the
+        # list was often empty or missing the strategy being asked for).
         seen = set()
-        for s_ in signals:
-            if s_["strategy_id"] in seen:
-                continue
-            seen.add(s_["strategy_id"])
-            self._fuku_strategy_combo.addItem(s_["strategy_name"] or s_["strategy_id"], s_["strategy_id"])
+        names_by_id = {s_["strategy_id"]: s_["strategy_name"] for s_ in signals}
+        for st in strategy_store.load_all():
+            if st.get("id") and st["id"] not in seen:
+                seen.add(st["id"])
+                self._fuku_strategy_combo.addItem(st.get("name") or st["id"], st["id"])
+        for sid, sname in names_by_id.items():
+            if sid not in seen:
+                seen.add(sid)
+                self._fuku_strategy_combo.addItem(sname or sid, sid)
         strat_lay.addWidget(self._fuku_strategy_combo)
         strat_lay.addWidget(self._field_label("Also include (besides open trades)"))
         self._fuku_inc_stopped = QCheckBox("Stopped-out trades")
@@ -968,7 +1008,7 @@ class ReportsScreen(QWidget):
         single_lay = QVBoxLayout(self._fuku_single_frame)
         single_lay.setContentsMargins(0, 0, 0, 0)
         single_lay.addWidget(self._field_label("Alert (Strategy — Symbol)"))
-        self._fuku_signal_combo = QComboBox()
+        self._fuku_signal_combo = _make_searchable(QComboBox())
         for s_ in signals:
             state_label = "OPEN" if s_["state"] == "open" else (s_["resolution"] or "RESOLVED").replace("_", " ").upper()
             self._fuku_signal_combo.addItem(
@@ -1200,6 +1240,7 @@ class ReportsScreen(QWidget):
                 d = QDate.fromString(str(tf.get(key) or ""), Qt.DateFormat.ISODate)
                 if d.isValid():
                     edit.setDate(d)
+            self._sync_lmv_date_range()
             if cfg.get("investment_amount") is not None:
                 self._investment_edit.setText(str(int(cfg["investment_amount"])))
             self._prefill_indicator_fields(cfg)

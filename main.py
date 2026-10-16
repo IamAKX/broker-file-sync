@@ -8,14 +8,10 @@ from app import AppController
 import font_scale
 
 _ICONS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icons")
-APP_NAME = "Broker Sync"
+import branding
+APP_NAME = branding.APP_NAME
 
-if sys.platform == "win32":
-    APP_ICON_PATH = os.path.join(_ICONS_DIR, "app_logo.ico")
-elif sys.platform == "darwin":
-    APP_ICON_PATH = os.path.join(_ICONS_DIR, "app_logo.icns")
-else:
-    APP_ICON_PATH = os.path.join(_ICONS_DIR, "app_logo.png")
+APP_ICON_PATH = branding.icon_path()
 
 
 def _apply_app_icon(app: QApplication):

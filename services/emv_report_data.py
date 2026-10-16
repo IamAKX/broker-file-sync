@@ -212,6 +212,14 @@ def _level_change_basis(field: str, series: list) -> str:
     return f'{field}: {_fmt(values[0])} → {_fmt(values[-1])}'
 
 
+def condition_stats_for(compared: dict) -> dict:
+    """hfs.condition_stats of Close against one compared column (its own
+    value per date, Close from the primary series)."""
+    entries = [{"date": e["date"], "close": e["close"], "value": compared["by_date"].get(e["date"])}
+               for e in compared["series"]]
+    return hfs.condition_stats(entries)
+
+
 def build_stock_report_pages(data: dict) -> list:
     series, stats = data["series"], data["stats"]
 
@@ -230,17 +238,18 @@ def build_stock_report_pages(data: dict) -> list:
     )
 
     extras = data.get("extras") or []
+    aligned, axes = [], []
     if series:
-        n = len(series)
-        plotted = [{"label": data["field"], "points": [e["value"] for e in series],
-                    "color": data.get("field_color") or DEFAULT_FIELD_COLOR}]
-        aligned = []
         for extra in extras:
             # Same bars => same dates; align by date anyway so a column with a
             # gap can never shift against the others.
             by_date = {e["date"]: e["value"] for e in extra["series"]}
             aligned.append([by_date.get(e["date"]) for e in series])
         axes = pick_axes([e["value"] for e in series] + [e["close"] for e in series], aligned)
+    if series:
+        n = len(series)
+        plotted = [{"label": data["field"], "points": [e["value"] for e in series],
+                    "color": data.get("field_color") or DEFAULT_FIELD_COLOR}]
         for extra, points, axis in zip(extras, aligned, axes):
             plotted.append({"label": extra["field"], "color": extra["color"], "points": points, "axis": axis})
         plotted.append({"label": "Close", "points": [e["close"] for e in series],
@@ -274,10 +283,47 @@ def build_stock_report_pages(data: dict) -> list:
         above = entry["close"] >= entry["value"]
         return templates.status_pill("ABOVE" if above else "BELOW", "positive" if above else "negative")
 
-    rows = [
-        [e["date"].strftime("%d-%b-%Y"), _fmt(e["value"]), _fmt(e["close"]), _state_pill(e)]
-        for e in reversed(series)
-    ]
+    # Table: every plotted column's value next to Close, plus how far Close
+    # sits from each column in % ((Close - column) / column). A column on the
+    # right-hand axis (RSC-like, not a price level) has no such % (#77).
+    def _pct_vs(close, value):
+        if close is None or value in (None, 0):
+            return "—"
+        pct = (close - value) / abs(value) * 100
+        return templates.status_pill(f"{pct:+.2f}%", "positive" if pct >= 0 else "negative")
+
+    compare = [{"field": data["field"], "series": series, "by_date": {e["date"]: e["value"] for e in series}}]
+    for extra, points, axis in zip(extras, aligned, axes):
+        if axis != "right":
+            compare.append({"field": extra["field"], "series": extra["series"],
+                            "by_date": {e["date"]: v for e, v in zip(series, points)}})
+    extra_cols = [extra["field"] for extra in extras]
+    headers = ["Date", data["field"]] + extra_cols + ["Close"] + [f'Close vs {c["field"]}' for c in compare] + ["State"]
+    rows = []
+    for idx, e in enumerate(reversed(series)):
+        pos = len(series) - 1 - idx
+        rows.append(
+            [e["date"].strftime("%d-%b-%Y"), _fmt(e["value"])]
+            + [_fmt(points[pos]) for points in aligned]
+            + [_fmt(e["close"])]
+            + [_pct_vs(e["close"], c["by_date"].get(e["date"])) for c in compare]
+            + [_state_pill(e)]
+        )
+    pct_cols = {f'Close vs {c["field"]}' for c in compare}
+
+    # "How many days was Close below X?" — per plotted (price-scale) column:
+    # days above / below, current state and streak, longest streak.
+    summary_rows = []
+    for c in compare:
+        cs = condition_stats_for(c)
+        total = cs["periods_above"] + cs["periods_below"]
+        summary_rows.append([
+            c["field"], str(cs["periods_below"]), str(cs["periods_above"]),
+            f'{cs["periods_below"] / total * 100:.0f}%' if total else "—",
+            (cs["current_state"] or "—").title(),
+            f'{cs["current_streak"]} days' if cs["current_streak"] else "—",
+            f'{cs["longest_streak"]} days' if cs["longest_streak"] else "—",
+        ])
     blocks = [
         (templates.section(title, svg), _section_height(svg))
         for title, svg in data.get("indicator_sections", [])
@@ -289,8 +335,16 @@ def build_stock_report_pages(data: dict) -> list:
     ) if series else ""
     blocks.append((templates.section(f'Historical {data["field"]} — {len(series)} periods', bar + bar_caption),
                    _section_height(bar) + (22 if bar_caption else 0)))
+    if summary_rows and series:
+        blocks.append((
+            templates.section(
+                "Close vs each column — days below / above", templates.data_table(
+                    ["Column", "Days below", "Days above", "% days below", "Now", "Current streak", "Longest streak"],
+                    summary_rows),
+                subtitle="Counts the trading days in the report period on which Close was below / at-or-above the column"),
+            _SECTION_OVERHEAD_PX + 16 + _TABLE_HEAD_PX + len(summary_rows) * _TABLE_ROW_PX))
     return _flow_pages(page1, _PAGE1_USED_PX, blocks, "Historical Values",
-                       ["Date", data["field"], "Close", "State"], rows, {"State"}, table_empty=not rows)
+                       headers, rows, {"State"} | pct_cols, table_empty=not rows)
 
 
 def build_stock_report_html(data: dict, doc_title: str = "EMV EOD Report") -> str:
@@ -542,19 +596,21 @@ def _recent_rows(display_symbol: str, as_of_date: date, lookback: int, cache: di
     return result
 
 
-def trailing_days_true(display_symbol: str, strategy: dict, as_of_date: date,
-                       lookback: int = DAYS_TRUE_LOOKBACK, cache: dict | None = None) -> int:
-    """How many consecutive trading days, ending at *as_of_date*, *strategy*'s
-    row_filter has been true for this stock (capped at *lookback*). Each of
-    the last *lookback* days is run through the strategy; a filter that
-    depends on other stocks (an _ALL aggregate) or on live day-history reads
-    blank here, exactly as it does for the snapshot. Pass a shared *cache*
-    dict when checking several strategies for the same stock."""
+def trailing_streak(display_symbol: str, strategy: dict, as_of_date: date,
+                    lookback: int = DAYS_TRUE_LOOKBACK, cache: dict | None = None) -> tuple:
+    """(days, since) — how many consecutive trading days, ending at
+    *as_of_date*, *strategy*'s row_filter has been true for this stock
+    (capped at *lookback*), and the date that streak began (None when the
+    streak is 0). Each of the last *lookback* days is run through the
+    strategy; a filter that depends on other stocks (an _ALL aggregate) or on
+    live day-history reads blank here, exactly as it does for the snapshot.
+    Pass a shared *cache* dict when checking several strategies for the same
+    stock."""
     from services import inception_formula_variable_store
 
     window, headers, rows = _recent_rows(display_symbol, as_of_date, lookback, cache)
     if not window:
-        return 0
+        return 0, None
     new_headers, new_data = apply_strategies(
         [dict(strategy, active=True)], headers, [[r.get(h) for h in headers] for r in rows],
         day_history={}, include_streak_columns=False, symbol_col="Symbol",
@@ -562,13 +618,20 @@ def trailing_days_true(display_symbol: str, strategy: dict, as_of_date: date,
     )
     date_idx = new_headers.index("__date__")
     true_dates = {row[date_idx] for row in new_data}
-    streak = 0
+    streak, since = 0, None
     for bar in reversed(window):
         if bar["trade_date"].isoformat() in true_dates:
             streak += 1
+            since = bar["trade_date"]
         else:
             break
-    return streak
+    return streak, since
+
+
+def trailing_days_true(display_symbol: str, strategy: dict, as_of_date: date,
+                       lookback: int = DAYS_TRUE_LOOKBACK, cache: dict | None = None) -> int:
+    """The day count of trailing_streak (see there)."""
+    return trailing_streak(display_symbol, strategy, as_of_date, lookback, cache)[0]
 
 
 def classify_trend(category_id: str | None, timeframe: str, as_of_date: date,
@@ -634,15 +697,23 @@ def classify_trend(category_id: str | None, timeframe: str, as_of_date: date,
             "categories": categories_in(symbol, timeframe, selected),
             "tf_labels": ({tf: categories_in(symbol, tf, all_cats) for tf in trend_categories.TIMEFRAMES}
                           if multi_timeframe else {}),
-            "days_true": None,
+            "days_true": None, "days_true_since": None,
+            # The strategies that put the stock in the selected categories
+            # (names, so the reader can open them under the EMV strategy report).
+            "strategies": sorted({
+                strategies[sid].get("name", sid)
+                for cat in selected for sid in trend_categories.strategies_for(cat, timeframe)
+                if sid in strategies and symbol in passing.get(sid, {})
+            }),
         }
         if with_days_true:
             streaks = [
-                trailing_days_true(symbol, strategies[sid], as_of_date, cache=rows_cache)
+                trailing_streak(symbol, strategies[sid], as_of_date, cache=rows_cache)
                 for cat in selected for sid in trend_categories.strategies_for(cat, timeframe)
                 if sid in strategies and symbol in passing.get(sid, {})
             ]
-            row["days_true"] = max(streaks) if streaks else 0
+            best = max(streaks, key=lambda t: t[0]) if streaks else (0, None)
+            row["days_true"], row["days_true_since"] = best
         result["rows"].append(row)
     return result
 
@@ -670,6 +741,14 @@ def _trend_cell(column: str, row: dict, timeframes: list) -> str:
         if days is None:
             return "—"
         return f"{days}+" if days >= DAYS_TRUE_LOOKBACK else str(days)
+    if column == "Since":
+        since = row.get("days_true_since")
+        if since is None:
+            return "—"
+        label = since.strftime("%d-%b-%Y")
+        return f"on or before {label}" if (row.get("days_true") or 0) >= DAYS_TRUE_LOOKBACK else label
+    if column == "Strategies":
+        return ", ".join(row.get("strategies") or []) or "—"
     if column in timeframes:
         return ", ".join(row["tf_labels"].get(column, [])) or "—"
     value = (row.get("values") or {}).get(column)
@@ -714,7 +793,7 @@ def build_trend_report_pages(classification: dict, columns: list | None = None,
         return [page1 + templates.section("Stocks", empty)]
 
     timeframes = trend_categories.TIMEFRAMES
-    fixed = ["Stock", "Sector", "Category"] + (["Days True"] if show_days_true else []) \
+    fixed = ["Stock", "Sector", "Category", "Strategies"] + (["Days True", "Since"] if show_days_true else []) \
         + (timeframes if multi_timeframe else [])
     extra = [c for c in (columns or []) if c not in fixed and c in (classification.get("headers") or [])]
     cols = fixed + extra
@@ -726,7 +805,22 @@ def build_trend_report_pages(classification: dict, columns: list | None = None,
     order = {name: i for i, (name, _n) in enumerate(sorted(sector_counts.items(), key=lambda kv: (-kv[1], kv[0])))}
     ordered = sorted(rows, key=lambda r: (order[r["sector"]], r["symbol"]))
     table_rows = [[_trend_cell(c, r, timeframes) for c in cols] for r in ordered]
-    return _flow_pages(page1, _STRATEGY_PAGE1_USED_PX, [], f"Stocks — {title_cat} ({timeframe})", cols, table_rows, set())
+
+    # Sector split of the stocks in the report (donut + counts table).
+    sector_rank = sorted(sector_counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    sector_segments = [{"label": name, "value": n, "color": _SECTOR_PALETTE[i % len(_SECTOR_PALETTE)]}
+                       for i, (name, n) in enumerate(sector_rank)]
+    sector_donut = charts.donut_chart(sector_segments, center_label=str(len(rows)), center_sublabel="Stocks")
+    sector_table = templates.data_table(
+        ["Sector", "Stocks", "% of report"],
+        [[name, str(n), f"{n / len(rows) * 100:.0f}%"] for name, n in sector_rank])
+    blocks = [
+        (templates.section("Sector Distribution", f'<div class="chart-row"><div>{sector_donut}</div>'
+                           f'{charts.donut_legend(sector_segments)}</div>'), _section_height(sector_donut) + 20),
+        (templates.section("Stocks by Sector", sector_table),
+         _SECTION_OVERHEAD_PX + _TABLE_HEAD_PX + len(sector_rank) * _TABLE_ROW_PX),
+    ]
+    return _flow_pages(page1, _STRATEGY_PAGE1_USED_PX, blocks, f"Stocks — {title_cat} ({timeframe})", cols, table_rows, set())
 
 
 def build_trend_report_html(classification: dict, doc_title: str = "EMV EOD Report", columns: list | None = None,
