@@ -24,6 +24,7 @@ from datetime import datetime
 from datetime import time as dtime
 
 import font_scale
+from components.page_header import page_header
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFrame, QScrollArea, QSizePolicy, QComboBox, QTableWidget,
@@ -251,7 +252,6 @@ class LiveAlertsScreen(QWidget):
 
         title = QLabel("Live Alerts")
         title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
-        layout.addWidget(title)
 
         subtitle = QLabel(
             "Strategy notification signals — entry alerts and Target / Stop Loss / "
@@ -262,7 +262,7 @@ class LiveAlertsScreen(QWidget):
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         subtitle.setWordWrap(True)
-        layout.addWidget(subtitle)
+        layout.addLayout(page_header(title, subtitle))
 
         # Pending strip — local, live, unfiltered (see module docstring).
         self._pending_lbl = QLabel("")

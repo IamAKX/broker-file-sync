@@ -81,3 +81,63 @@ def test_shipped_artwork_is_present_and_has_the_expected_shapes():
     assert not logo.isNull() and logo.width() == logo.height()
     icon = branding.icon_path()
     assert "fuku_lens_icon" in os.path.basename(icon) and os.path.isfile(icon)
+
+
+# ── #91: opening window + header logo on the main screens ────────────────
+
+def test_login_screen_is_fuku_lens_with_logo_and_tagline(qapp):
+    from PySide6.QtWidgets import QLabel
+    from app import AppController
+    from screens.login import LoginScreen
+
+    screen = LoginScreen(AppController(qapp))
+    texts = [lb.text() for lb in screen.findChildren(QLabel)]
+    assert "FUKU LENS" in texts
+    assert branding.TAGLINE == "Research. Technology. Systems." and branding.TAGLINE in texts
+    assert not any("BROKER FILE SYNC" in t.upper() for t in texts)
+    assert "Excel Processing Software" not in texts
+    assert any(lb.pixmap() is not None and not lb.pixmap().isNull() for lb in screen.findChildren(QLabel))
+
+
+def test_header_logo_keeps_aspect_ratio_and_is_fixed_height(qapp):
+    logo = branding.make_header_logo(56)
+    assert logo is not None and logo.height() == 56
+    src = branding.QPixmap(branding.header_path()) if hasattr(branding, "QPixmap") else None
+    from PySide6.QtGui import QPixmap
+    src = QPixmap(branding.header_path())
+    assert abs(logo.width() / 56 - src.width() / src.height()) < 0.02
+
+
+def test_header_logo_none_without_artwork(qapp, monkeypatch):
+    monkeypatch.setattr(branding, "header_path", lambda: None)
+    assert branding.make_header_logo() is None
+
+
+@pytest.mark.parametrize("module, cls", [
+    ("screens.dashboard", "DashboardScreen"),
+    ("screens.data_import", "DataImportScreen"),
+    ("screens.config_editor", "ConfigEditorScreen"),
+    ("screens.notifications", "NotificationsScreen"),
+    ("screens.live_alerts", "LiveAlertsScreen"),
+    ("screens.profile", "ProfileScreen"),
+])
+def test_main_screens_show_the_header_logo(qapp, module, cls):
+    import importlib
+    from PySide6.QtWidgets import QLabel
+    from app import AppController
+
+    screen = getattr(importlib.import_module(module), cls)(AppController(qapp))
+    logos = [lb for lb in screen.findChildren(QLabel) if lb.objectName() == "headerLogo"]
+    assert len(logos) == 1
+
+
+def test_windows_build_uses_fuku_lens_name_icon_and_metadata():
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    for rel in ("build_windows.ps1", "appveyor.yml", ".github/workflows/ci.yml"):
+        text = open(os.path.join(root, rel), encoding="utf-8").read()
+        assert '--name "FukuLens"' in text and "fuku_lens_icon.ico" in text, rel
+        assert "windows_version_info.txt" in text, rel
+        # existing installs self-update by this exact asset name
+        assert "BrokerFileSync-windows.zip" in text, rel
+    info = open(os.path.join(root, "windows_version_info.txt"), encoding="utf-8").read()
+    assert "'FileDescription', 'Fuku Lens'" in info

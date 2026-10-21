@@ -108,8 +108,9 @@ jobs:
       - name: Build Windows
         shell: pwsh
         run: |
-          pyinstaller --windowed --onedir --name "BrokerFileSync" `
-            --icon "assets\icons\app_logo.ico" `
+          pyinstaller --windowed --onedir --name "FukuLens" `
+            --icon "assets\branding\fuku_lens_icon.ico" `
+            --version-file "windows_version_info.txt" `
             --add-data "assets;assets" `
             --add-data "screens;screens" `
             --add-data "services;services" `
@@ -131,8 +132,10 @@ jobs:
       - name: Zip Windows Build
         shell: pwsh
         run: |
+          # The zip keeps its original name: installed copies look for exactly
+          # "BrokerFileSync-windows.zip" when self-updating.
           Compress-Archive `
-            -Path dist/BrokerFileSync/* `
+            -Path dist/FukuLens/* `
             -DestinationPath dist/BrokerFileSync-windows.zip
 
       - name: Upload Windows Artifact

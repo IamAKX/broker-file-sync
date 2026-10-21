@@ -30,8 +30,9 @@ build_script:
   # signal for a native command.
   - ps: |
       $ErrorActionPreference = "Continue"
-      & "$env:PYTHON\python.exe" -m PyInstaller --windowed --onedir --name "BrokerFileSync" `
-        --icon "assets\icons\app_logo.ico" `
+      & "$env:PYTHON\python.exe" -m PyInstaller --windowed --onedir --name "FukuLens" `
+        --icon "assets\branding\fuku_lens_icon.ico" `
+        --version-file "windows_version_info.txt" `
         --add-data "assets;assets" `
         --add-data "screens;screens" `
         --add-data "services;services" `
@@ -55,7 +56,7 @@ build_script:
       $ErrorActionPreference = "Stop"
 
 after_build:
-  - ps: Compress-Archive -Path dist\BrokerFileSync\* -DestinationPath dist\BrokerFileSync-windows.zip
+  - ps: Compress-Archive -Path dist\FukuLens\* -DestinationPath dist\BrokerFileSync-windows.zip
 
 artifacts:
   - path: dist\BrokerFileSync-windows.zip

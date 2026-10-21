@@ -1,4 +1,5 @@
 import font_scale
+from components.page_header import page_header
 import re
 import os
 from PySide6.QtWidgets import (
@@ -104,12 +105,11 @@ class DashboardScreen(QWidget):
         # Header
         title = QLabel("Dashboard")
         title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
-        layout.addWidget(title)
 
         subtitle = QLabel("File import overview and processing activity")
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
-        layout.addWidget(subtitle)
+        layout.addLayout(page_header(title, subtitle))
 
         # Stat cards
         cards_row = QHBoxLayout()

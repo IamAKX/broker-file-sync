@@ -10,7 +10,7 @@ from api import auth_api
 from api.exceptions import ApiError, NetworkError
 from api.token_store import token_manager
 from components.error_popup import show_api_error
-from branding import APP_NAME
+from branding import APP_NAME, TAGLINE, make_logo_label
 
 
 class LoginScreen(QWidget):
@@ -43,12 +43,20 @@ class LoginScreen(QWidget):
         card_layout.setContentsMargins(40, 40, 40, 40)
         card_layout.setSpacing(16)
 
-        title = QLabel("BROKER FILE SYNC")
+        # Stacked Fuku Lens logo (aspect ratio kept), product name, tagline.
+        logo = make_logo_label(max_height=150, max_width=150)
+        if logo is not None:
+            logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            card_layout.addWidget(logo, alignment=Qt.AlignmentFlag.AlignHCenter)
+
+        title = QLabel(APP_NAME.upper())
+        title.setObjectName("loginTitle")
         title.setFont(font_scale.font(font_scale.DISPLAY_LG, True))
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         card_layout.addWidget(title)
 
-        subtitle = QLabel("Excel Processing Software")
+        subtitle = QLabel(TAGLINE)
+        subtitle.setObjectName("loginTagline")
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")

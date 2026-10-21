@@ -239,7 +239,16 @@ if not errorlevel 1 (
 if exist "%INSTALL_DIR%.old" rmdir /s /q "%INSTALL_DIR%.old"
 move "%INSTALL_DIR%" "%INSTALL_DIR%.old"
 move "%STAGED_DIR%" "%INSTALL_DIR%"
-start "" "%INSTALL_DIR%\\%EXE_NAME%"
+if exist "%INSTALL_DIR%\\%EXE_NAME%" (
+    start "" "%INSTALL_DIR%\\%EXE_NAME%"
+) else (
+    rem the new build's exe was renamed (BrokerFileSync.exe -> FukuLens.exe)
+    for %%F in ("%INSTALL_DIR%\\*.exe") do (
+        start "" "%%F"
+        goto launched
+    )
+)
+:launched
 
 del "%~f0"
 """

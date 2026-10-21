@@ -1,4 +1,5 @@
 import font_scale
+from components.page_header import page_header
 import re
 import os
 from datetime import time as dtime
@@ -498,12 +499,11 @@ class NotificationsScreen(QWidget):
         # Title
         title = QLabel("Notification Management")
         title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
-        layout.addWidget(title)
 
         subtitle = QLabel("Receive alerts via System, Email, or Slack when files are imported or processing completes")
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
-        layout.addWidget(subtitle)
+        layout.addLayout(page_header(title, subtitle))
 
         # Channel rows — compact, config fields live behind the "Configure" popup
         channels_col = QVBoxLayout()

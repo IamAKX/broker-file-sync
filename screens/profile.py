@@ -1,4 +1,5 @@
 import font_scale
+from components.page_header import page_header
 import re
 import os
 from datetime import datetime, timezone
@@ -94,16 +95,11 @@ class ProfileScreen(QWidget):
         layout.setSpacing(20)
 
         # ── Header row ──────────────────────────────────────────────────────
-        header_row = QHBoxLayout()
-        title_col = QVBoxLayout()
-        title_col.setSpacing(4)
         title = QLabel("My Profile")
         title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
         subtitle = QLabel("Manage account details and application preferences")
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
-        title_col.addWidget(title)
-        title_col.addWidget(subtitle)
 
         save_btn = QPushButton("  Save Changes")
         save_btn.setFixedHeight(38)
@@ -118,9 +114,7 @@ class ProfileScreen(QWidget):
         save_btn.clicked.connect(self._save_profile)
         self._save_btn = save_btn
 
-        header_row.addLayout(title_col, 1)
-        header_row.addWidget(save_btn, alignment=Qt.AlignmentFlag.AlignVCenter)
-        layout.addLayout(header_row)
+        layout.addLayout(page_header(title, subtitle, trailing=save_btn))
 
         # ── Two-column body ──────────────────────────────────────────────────
         body = QHBoxLayout()

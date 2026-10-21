@@ -39,8 +39,9 @@ if ($Version) {
 }
 
 Write-Host "Building (PyInstaller)..."
-pyinstaller --windowed --onedir --name "BrokerFileSync" `
-    --icon "assets\icons\app_logo.ico" `
+pyinstaller --windowed --onedir --name "FukuLens" `
+    --icon "assets\branding\fuku_lens_icon.ico" `
+    --version-file "windows_version_info.txt" `
     --add-data "assets;assets" `
     --add-data "screens;screens" `
     --add-data "services;services" `
@@ -62,17 +63,17 @@ pyinstaller --windowed --onedir --name "BrokerFileSync" `
 Write-Host "Zipping build..."
 $zipPath = "dist\BrokerFileSync-windows.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath }
-Compress-Archive -Path "dist\BrokerFileSync\*" -DestinationPath $zipPath
+Compress-Archive -Path "dist\FukuLens\*" -DestinationPath $zipPath
 
 Write-Host "Copying to Desktop..."
 $Desktop = [Environment]::GetFolderPath("Desktop")
-$DestFolder = Join-Path $Desktop "BrokerFileSync"
+$DestFolder = Join-Path $Desktop "FukuLens"
 if (Test-Path $DestFolder) { Remove-Item -Recurse -Force $DestFolder }
-Copy-Item -Recurse "dist\BrokerFileSync" $DestFolder
+Copy-Item -Recurse "dist\FukuLens" $DestFolder
 Copy-Item $zipPath (Join-Path $Desktop "BrokerFileSync-windows.zip") -Force
 
 Write-Host ""
 Write-Host "Done." -ForegroundColor Green
 Write-Host "  App folder: $DestFolder"
-Write-Host "  Exe:        $DestFolder\BrokerFileSync.exe"
+Write-Host "  Exe:        $DestFolder\FukuLens.exe"
 Write-Host "  Zip:        $Desktop\BrokerFileSync-windows.zip"

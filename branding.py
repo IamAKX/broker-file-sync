@@ -123,3 +123,33 @@ def make_logo_label(max_height: int = 110, max_width: int = 330):
             return pm.size() if pm is not None and not pm.isNull() else super().sizeHint()
 
     return _LogoLabel()
+
+
+TAGLINE = "Research. Technology. Systems."
+
+
+def make_header_logo(height: int = 56):
+    """The wide banner as a fixed-height QLabel (width follows the artwork's
+    aspect ratio) for the top-right corner of every main screen (#91). None
+    when there is no artwork. The pixmap is scaled once, at device-pixel
+    resolution, so it stays crisp on HiDPI."""
+    path = header_path()
+    if not path:
+        return None
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QGuiApplication, QPixmap
+    from PySide6.QtWidgets import QLabel
+
+    src = QPixmap(path)
+    if src.isNull():
+        return None
+    screen = QGuiApplication.primaryScreen()
+    dpr = screen.devicePixelRatio() if screen is not None else 1.0
+    scaled = src.scaledToHeight(int(height * dpr), Qt.TransformationMode.SmoothTransformation)
+    scaled.setDevicePixelRatio(dpr)
+    label = QLabel()
+    label.setObjectName("headerLogo")
+    label.setPixmap(scaled)
+    label.setFixedSize(int(scaled.width() / dpr), height)
+    label.setStyleSheet("background: transparent; border: none;")
+    return label

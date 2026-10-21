@@ -1,4 +1,5 @@
 import font_scale
+from components.page_header import page_header
 import re
 import os
 import sys
@@ -750,7 +751,6 @@ class DataImportScreen(QWidget):
 
         title = QLabel("Data Import")
         title.setFont(font_scale.font(font_scale.DISPLAY_MD, True))
-        layout.addWidget(title)
 
         subtitle = QLabel(
             "Upload all five files to start the watcher. "
@@ -760,7 +760,7 @@ class DataImportScreen(QWidget):
         subtitle.setFont(font_scale.font(font_scale.MEDIUM, False))
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         subtitle.setWordWrap(True)
-        layout.addWidget(subtitle)
+        layout.addLayout(page_header(title, subtitle))
 
         # Compact vertical list of broker cards — all 5 fit without scrolling.
         cards_col = QVBoxLayout()
