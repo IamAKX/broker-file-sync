@@ -786,3 +786,95 @@ def test_close_intraday_signals_ignores_signal_with_no_matching_config():
 
     assert events == []
     assert len(state_store.get_open_signals()) == 1
+
+
+# ── #95: targets / stop-loss crossed between two ticks ──────────────────────
+
+def _open_buy(stop_loss=95, target=110, entry=100, high=None, low=None, direction="BUY"):
+    cfg = _make_config(debounce_minutes=0, stop_loss=stop_loss, target=target, direction=direction)
+    configs = {"strat-1": cfg}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=entry, high=high, low=low)], now=T0)
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=entry, high=high, low=low)], now=T0 + timedelta(seconds=1))
+    assert next(iter(state_store.get_open_signals().values()))["state"] == "open"
+    return configs
+
+
+def test_target_is_achieved_when_a_new_high_crosses_it_between_ticks():
+    configs = _open_buy(target=110)
+    # the tick price (105) never reached 110 but the day's High did (spike)
+    events = evaluate_tick([STRATEGY], configs, [_row(signal=1, price=105, high=112, low=100)],
+                           now=T0 + timedelta(minutes=5))
+    kinds = [e.kind for e in events]
+    assert kinds == [EVENT_TARGET]
+    assert events[0].payload["price"] == 110                 # the level itself, not the 105 tick
+    assert events[0].payload["_signal"]["resolution"] == "all_targets_achieved"
+    assert state_store.get_open_signals() == {}
+
+
+def test_high_printed_before_the_signal_does_not_achieve_a_target():
+    """The row's day High includes the minutes before entry — it must not count."""
+    configs = _open_buy(target=110, high=120, low=99)        # day High is already 120 at entry
+    events = evaluate_tick([STRATEGY], configs, [_row(signal=1, price=105, high=120, low=99)],
+                           now=T0 + timedelta(minutes=5))
+    assert events == []
+    assert next(iter(state_store.get_open_signals().values()))["state"] == "open"
+
+
+def test_stop_loss_is_hit_when_a_new_low_crosses_it_between_ticks_and_exits_at_the_stop():
+    configs = _open_buy(stop_loss=95, target=130)
+    events = evaluate_tick([STRATEGY], configs, [_row(signal=1, price=99, high=101, low=93)],
+                           now=T0 + timedelta(minutes=5))
+    assert [e.kind for e in events] == [EVENT_STOP_OUT]
+    assert events[0].payload["price"] == 95
+    history = state_store.get_alert_history()
+    assert history[-1]["resolution"] == "stopped_out"
+    assert history[-1]["exit_price"] == 95                    # filled at the stop, not at the 99 tick
+    assert state_store.get_open_signals() == {}
+
+
+def test_gap_through_the_stop_still_exits_at_the_tick_price():
+    configs = _open_buy(stop_loss=95, target=130)
+    events = evaluate_tick([STRATEGY], configs, [_row(signal=1, price=90, high=100, low=90)],
+                           now=T0 + timedelta(minutes=5))
+    assert [e.kind for e in events] == [EVENT_STOP_OUT]
+    assert state_store.get_alert_history()[-1]["exit_price"] == 90
+
+
+def test_sell_signal_uses_the_new_low_for_targets_and_the_new_high_for_the_stop():
+    configs = _open_buy(stop_loss=105, target=90, direction="SELL")
+    hit = evaluate_tick([STRATEGY], configs, [_row(signal=1, price=96, high=100, low=88)],
+                        now=T0 + timedelta(minutes=5))
+    assert [e.kind for e in hit] == [EVENT_TARGET]
+
+    state_store.clear_all()
+    configs = _open_buy(stop_loss=105, target=80, direction="SELL")
+    stop = evaluate_tick([STRATEGY], configs, [_row(signal=1, price=101, high=107, low=100)],
+                         now=T0 + timedelta(minutes=5))
+    assert [e.kind for e in stop] == [EVENT_STOP_OUT]
+    assert state_store.get_alert_history()[-1]["exit_price"] == 105
+
+
+def test_signal_saved_before_extreme_tracking_baselines_on_its_first_tick():
+    configs = _open_buy(target=110)
+    signal = next(iter(state_store.get_open_signals().values()))
+    signal.pop("last_seen_high"), signal.pop("last_seen_low")      # an older, persisted signal
+    events = evaluate_tick([STRATEGY], configs, [_row(signal=1, price=105, high=120, low=100)],
+                           now=T0 + timedelta(minutes=5))
+    assert events == []                                           # can't tell when 120 happened
+    events = evaluate_tick([STRATEGY], configs, [_row(signal=1, price=105, high=125, low=100)],
+                           now=T0 + timedelta(minutes=6))
+    assert [e.kind for e in events] == [EVENT_TARGET]              # a NEW high after that does count
+
+
+def test_multiple_targets_are_each_achieved_by_the_same_spike():
+    cfg = _make_config(debounce_minutes=0, stop_loss=95, target=105)
+    cfg["metrics"].append(new_metric("Target 2", "target", [_num(108)]))
+    cfg["metrics"].append(new_metric("Target 3", "target", [_num(120)]))
+    configs = {"strat-1": cfg}
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0)
+    evaluate_tick([STRATEGY], configs, [_row(signal=1, price=100)], now=T0 + timedelta(seconds=1))
+    events = evaluate_tick([STRATEGY], configs, [_row(signal=1, price=101, high=110, low=100)],
+                           now=T0 + timedelta(minutes=2))
+    assert sorted(e.payload["metric_name"] for e in events) == ["Target 1", "Target 2"]   # not Target 3 (120)
+    signal = next(iter(state_store.get_open_signals().values()))
+    assert signal["state"] == "open"                                # Target 3 still pending

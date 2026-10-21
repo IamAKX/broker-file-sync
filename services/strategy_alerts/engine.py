@@ -240,6 +240,9 @@ def _fire_entry(
         "last_tick_time": now.isoformat(),
         "running_high": high,
         "running_low": low,
+        # The row's High/Low as of the previous tick — see _new_extremes.
+        "last_seen_high": high,
+        "last_seen_low": low,
     }
 
     # Issue #32: a Target/Stop Loss on the wrong side of the entry price for
@@ -341,6 +344,33 @@ def _pct_move(entry_price, extreme) -> float | None:
     return (extreme - entry_price) / entry_price * 100
 
 
+def _new_extremes(signal: dict, high, low) -> tuple:
+    """(new_high, new_low) — a High/Low the stock printed SINCE the previous
+    tick (None when the row's High/Low didn't move). Target / stop-loss hits
+    are judged on these as well as on the tick price (issue #95): ticks are
+    samples, so a spike through a target or the stop-loss between two polls
+    never showed in the price column, and the alert stayed open although the
+    day's High/Low plainly crossed the level.
+
+    Only an extreme that moved after the last tick counts — the row's day
+    High/Low also contains prices from BEFORE the signal fired, which must
+    not achieve a target the trade never saw. The baseline (last_seen_*) is
+    refreshed every tick, so a new trading day (High/Low restart) re-baselines
+    harmlessly; a signal saved before this field existed baselines on its
+    first tick."""
+    new_high = new_low = None
+    seen_high, seen_low = signal.get("last_seen_high"), signal.get("last_seen_low")
+    if high is not None:
+        if seen_high is not None and high > seen_high:
+            new_high = high
+        signal["last_seen_high"] = high
+    if low is not None:
+        if seen_low is not None and low < seen_low:
+            new_low = low
+        signal["last_seen_low"] = low
+    return new_high, new_low
+
+
 def _update_open_signal(
     config: dict, signal: dict, row: dict, all_dicts: list, sym_index, agg_cache,
     now: datetime, key: str, day_history: dict | None = None,
@@ -349,6 +379,7 @@ def _update_open_signal(
     price = _to_float(row.get(_PRICE_COLUMN))
     high = _to_float(row.get(_HIGH_COLUMN))
     low = _to_float(row.get(_LOW_COLUMN))
+    new_high, new_low = _new_extremes(signal, high, low)
     if price is not None:
         # Latest live price + when it was seen — the Fuku Live Report's
         # "Current" (a signal otherwise only stores entry/high/low).
@@ -440,21 +471,40 @@ def _update_open_signal(
         elif not repeat_is_true:
             signal["repeat_armed"] = True
 
-    if price is not None:
+    stop_fill = None   # set when the stop-loss was hit only by a High/Low between ticks
+    if price is not None or new_high is not None or new_low is not None:
+        # The extreme a target / stop-loss is also tested against: a BUY's
+        # target is above entry (the High matters), its stop below (the Low).
+        up_extreme = new_high if direction == DIRECTION_BUY else new_low     # towards the targets
+        down_extreme = new_low if direction == DIRECTION_BUY else new_high   # towards the stop
+
+        def _crossed(level, by_price, extreme, upward: bool) -> bool:
+            if upward:   # BUY target / SELL stop-loss: price must rise to the level
+                return (price is not None and by_price(price, level)) or (
+                    extreme is not None and extreme >= level)
+            return (price is not None and by_price(price, level)) or (extreme is not None and extreme <= level)
+
         for metric_id, m in signal["metrics"].items():
             if m.get("role") != ROLE_TARGET or m.get("achieved") or m.get("value") is None:
                 continue
-            hit = price >= m["value"] if direction == DIRECTION_BUY else price <= m["value"]
+            if direction == DIRECTION_BUY:
+                hit = _crossed(m["value"], lambda p, v: p >= v, up_extreme, upward=True)
+            else:
+                hit = _crossed(m["value"], lambda p, v: p <= v, up_extreme, upward=False)
             if not hit:
                 continue
             m["achieved"] = True
             m["achieved_at"] = now.isoformat()
+            # Hit between ticks: report the level itself, not a price that
+            # hadn't reached it at this tick.
+            by_price = price is not None and (
+                price >= m["value"] if direction == DIRECTION_BUY else price <= m["value"])
             event = AlertEvent(
                 kind=EVENT_TARGET, strategy_id=strategy_id, strategy_name=strategy_name,
                 symbol=symbol, timestamp=now,
                 payload={
-                    "metric_name": m["name"], "price": price, "achieved_at": now,
-                    "elapsed": _elapsed_str(entry_time, now),
+                    "metric_name": m["name"], "price": price if by_price else m["value"],
+                    "achieved_at": now, "elapsed": _elapsed_str(entry_time, now),
                 },
             )
             event.payload["title"] = messages.render_title(event)
@@ -464,15 +514,23 @@ def _update_open_signal(
         for metric_id, m in signal["metrics"].items():
             if m.get("role") not in (ROLE_STOP_LOSS, ROLE_TRAILING_EXIT) or m.get("value") is None:
                 continue
-            hit = price <= m["value"] if direction == DIRECTION_BUY else price >= m["value"]
-            if not hit:
+            by_price = price is not None and (
+                price <= m["value"] if direction == DIRECTION_BUY else price >= m["value"])
+            # Only the frozen stop-loss is also tested against a High/Low
+            # printed between ticks; a trailing exit is re-evaluated each tick
+            # against the current price, so an old extreme says nothing about it.
+            by_extreme = (m.get("role") == ROLE_STOP_LOSS and down_extreme is not None and (
+                down_extreme <= m["value"] if direction == DIRECTION_BUY else down_extreme >= m["value"]))
+            if not (by_price or by_extreme):
                 continue
             stopped_out = True
+            if not by_price:
+                stop_fill = m["value"]
             event = AlertEvent(
                 kind=EVENT_STOP_OUT, strategy_id=strategy_id, strategy_name=strategy_name,
                 symbol=symbol, timestamp=now,
                 payload={
-                    "metric_name": m["name"], "price": price, "time": now,
+                    "metric_name": m["name"], "price": price if by_price else m["value"], "time": now,
                     "running_high": signal.get("running_high"), "running_low": signal.get("running_low"),
                     "pct_move": _pct_move(
                         signal.get("entry_price"),
@@ -498,7 +556,7 @@ def _update_open_signal(
         # own "Current price as the exit" below. None only if this tick's
         # row had no parseable price at all (see `price = _to_float(...)`
         # above) — reports fall back to the target/SL threshold value then.
-        signal["exit_price"] = price
+        signal["exit_price"] = stop_fill if stop_fill is not None else price
         state_store.append_alert_history(signal)
         state_store.clear_open_signal(key)
         # Don't let this symbol/strategy re-arm into a brand new signal
