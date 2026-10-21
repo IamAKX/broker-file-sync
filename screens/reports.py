@@ -66,6 +66,7 @@ _TIMEFRAME_OPTIONS = [
     (report_metrics.TIMEFRAME_MONTHLY, "Monthly"),
     (report_metrics.TIMEFRAME_QUARTERLY, "Quarterly"),
     (report_metrics.TIMEFRAME_CUSTOM, "Custom Range"),
+    (report_metrics.TIMEFRAME_SINCE_START, "Since LMV saving began (to today)"),
 ]
 
 
@@ -107,7 +108,24 @@ def _build_lmv_html(report: dict, today: date | None = None) -> str:
     mode = tf.get("mode", report_metrics.TIMEFRAME_DAILY)
     custom_from = date.fromisoformat(tf["from"]) if tf.get("from") else None
     custom_to = date.fromisoformat(tf["to"]) if tf.get("to") else None
-    date_from, date_to = report_metrics.resolve_preset_range(mode, custom_from, custom_to, today=today)
+    if mode == report_metrics.TIMEFRAME_SINCE_START:
+        # Every stored LMV day up to "today": the first day the backend saved a
+        # snapshot (falling back to the longest window a back-test can read).
+        from services import strategy_backtest
+        end = today or date.today()
+        date_from = strategy_backtest.earliest_saved_day(end) or (
+            end - timedelta(days=strategy_backtest.MAX_SNAPSHOT_DAYS - 1))
+        date_to = end
+    else:
+        date_from, date_to = report_metrics.resolve_preset_range(mode, custom_from, custom_to, today=today)
+
+    stock = (subject.get("stock") or "").strip() or None
+    if subject.get("source") == "backtest":
+        from services import backtest_report
+        result = lmv_report_data.backtest_result(
+            subject.get("strategy_a_id"), date_from, date_to,
+            subject.get("investment_amount", lmv_report_data.DEFAULT_INVESTMENT_AMOUNT), stock)
+        return backtest_report.build_html(result, doc_title=report.get("name", "LMV Back-test Report"))
 
     data = lmv_report_data.build_report_data(
         subject.get("strategy_a_id"), subject.get("strategy_b_id"),
@@ -123,7 +141,7 @@ def _build_lmv_html(report: dict, today: date | None = None) -> str:
         # didn't fire the alerts — always supplement from the backend
         # (best-effort: failures just fall back to local history).
         include_backend=True,
-        backtest=subject.get("source") == "backtest",
+        backtest=False, stock=stock,
         compare=subject.get("compare"),
         indicator_ids=subject.get("indicator_ids"), indicator_symbols=subject.get("indicator_symbols"),
         indicator_days=int(subject.get("indicator_days") or 60),
@@ -560,6 +578,16 @@ class ReportsScreen(QWidget):
             self._strategy_b_combo.addItem(s.get("name", ""), s.get("id"))
         layout.addWidget(self._strategy_b_combo)
 
+        layout.addWidget(self._field_label("Report on"))
+        self._lmv_scope_combo = QComboBox()
+        self._lmv_scope_combo.addItem("The entire strategy", "strategy")
+        self._lmv_scope_combo.addItem("One specific stock under the strategy (no sector distribution)", "stock")
+        self._lmv_scope_combo.currentIndexChanged.connect(self._on_lmv_scope_changed)
+        layout.addWidget(self._lmv_scope_combo)
+        self._lmv_stock_combo = _SymbolCombo(self._emv_symbol_choices())
+        layout.addWidget(self._lmv_stock_combo)
+        self._on_lmv_scope_changed()
+
         layout.addWidget(self._field_label("Timeframe"))
         self._timeframe_combo = QComboBox()
         for key, label in _TIMEFRAME_OPTIONS:
@@ -626,14 +654,18 @@ class ReportsScreen(QWidget):
             note = self._field_label("No strategies configured yet — create one in Strategy Builder first.")
             layout.addWidget(note)
 
+    def _on_lmv_scope_changed(self):
+        self._lmv_stock_combo.setVisible(self._lmv_scope_combo.currentData() == "stock")
+
     def _sync_lmv_date_range(self):
         """From/To only apply to Custom Range — for Daily/Weekly/... they were
         silently ignored while still looking editable (#78: a 06-Oct..15-Oct
         range produced a report of just 'today'). Show the range the preset
         really uses and lock the pickers."""
-        custom = self._timeframe_combo.currentData() == report_metrics.TIMEFRAME_CUSTOM
-        if not custom:
-            lo, hi = report_metrics.resolve_preset_range(self._timeframe_combo.currentData())
+        mode = self._timeframe_combo.currentData()
+        custom = mode == report_metrics.TIMEFRAME_CUSTOM
+        if not custom and mode != report_metrics.TIMEFRAME_SINCE_START:
+            lo, hi = report_metrics.resolve_preset_range(mode)
             self._from_date.setDate(QDate(lo.year, lo.month, lo.day))
             self._to_date.setDate(QDate(hi.year, hi.month, hi.day))
         self._from_date.setEnabled(custom)
@@ -1306,6 +1338,8 @@ class ReportsScreen(QWidget):
                     edit.setDate(d)
             self._sync_lmv_date_range()
             self._select_data(self._lmv_source_combo, cfg.get("source", "recorded"))
+            self._select_data(self._lmv_scope_combo, "stock" if cfg.get("stock") else "strategy")
+            self._lmv_stock_combo.setText(cfg.get("stock") or "")
             if cfg.get("investment_amount") is not None:
                 self._investment_edit.setText(str(int(cfg["investment_amount"])))
             self._prefill_indicator_fields(cfg)
@@ -1412,6 +1446,12 @@ class ReportsScreen(QWidget):
                 return
             strategy_a_id = self._strategy_a_combo.currentData()
             strategy_b_id = self._strategy_b_combo.currentData()
+            stock_symbol = None
+            if self._lmv_scope_combo.currentData() == "stock":
+                stock_symbol = self._lmv_stock_combo.text().strip().upper()
+                if not stock_symbol:
+                    QMessageBox.warning(self, "Stock Required", "Enter or pick the stock to report on.")
+                    return
             mode = self._timeframe_combo.currentData()
             investment_amount = _parse_float(
                 self._investment_edit.text(), lmv_report_data.DEFAULT_INVESTMENT_AMOUNT
@@ -1421,6 +1461,7 @@ class ReportsScreen(QWidget):
                 "strategy_b_id": strategy_b_id,
                 "investment_amount": investment_amount,
                 "source": self._lmv_source_combo.currentData(),
+                "stock": stock_symbol,
                 "compare": {
                     "mode": self._compare_mode_combo.currentData(),
                     "asset_1": self._compare_asset_1.text().strip(),

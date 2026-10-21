@@ -75,6 +75,20 @@ def _all_formulas(strategy: dict, config: dict) -> list:
     return [f for f in out if f]
 
 
+def earliest_saved_day(today: date | None = None) -> date | None:
+    """The first trading day the backend holds a stored LMV snapshot for, within
+    the window a back-test can read (MAX_SNAPSHOT_DAYS back) — "since LMV saving
+    began" (#82). None when the lookup fails or nothing is stored."""
+    from api import lmv_snapshot_api
+    today = today or date.today()
+    try:
+        response = lmv_snapshot_api.get_availability(today - timedelta(days=MAX_SNAPSHOT_DAYS), today)
+        days = sorted(date.fromisoformat(d["trade_date"]) for d in response.get("dates", []) if d.get("has_data"))
+    except Exception:
+        return None
+    return days[0] if days else None
+
+
 def fetch_range(date_from: date) -> dict:
     """The stored LMV days reaching back to *date_from* (plus a lookback
     margin), via the backend. Raises ApiError/NetworkError on failure."""

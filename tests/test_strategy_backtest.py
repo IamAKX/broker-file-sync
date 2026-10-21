@@ -201,13 +201,14 @@ def test_wizard_offers_the_backtest_source_and_saves_it(monkeypatch):
     screen._select_data(screen._lmv_source_combo, "backtest")
     screen._name_edit.setText("BT report")
     captured = {}
-    monkeypatch.setattr(lmv_report_data, "build_report_data",
-                        lambda *a, **k: captured.update(k) or (_ for _ in ()).throw(RuntimeError("stop")))
+    # a back-test report goes through the shared Back-test design (#82)
+    monkeypatch.setattr(lmv_report_data, "backtest_result",
+                        lambda *a, **k: captured.update(args=a) or (_ for _ in ()).throw(RuntimeError("stop")))
     monkeypatch.setattr("PySide6.QtWidgets.QMessageBox.warning", staticmethod(lambda *a, **k: None))
     screen._save_and_generate()
     saved = report_store.load_all()[0]
     assert saved["subject_config"]["source"] == "backtest"
-    assert captured.get("backtest") is True
+    assert captured.get("args")
 
 
 def _hl_day(d, close, high, low, signal=0):
@@ -280,3 +281,132 @@ def test_report_notes_cancelled_and_skipped_entries(monkeypatch):
     trades, notes = bt.run(STRATEGY, _config(stop=95, target=90), date(2026, 10, 5), date(2026, 10, 9))
     assert [t["resolution"] for t in trades] == ["trade_cancelled"]
     assert any("cancelled trades" in n for n in notes)
+
+
+# ── #82: new Back-test design, one stock, "since LMV saving began" ──────────
+
+def _two_stock_response():
+    def day(d, infy, tcs):
+        return {"trade_date": d, "stocks": [
+            {"symbol": "INFY", "display_name": "INFY", "metrics": dict(zip(("Signal", "Current", "High", "Low"), infy))},
+            {"symbol": "TCS", "display_name": "TCS", "metrics": dict(zip(("Signal", "Current", "High", "Low"), tcs))},
+        ]}
+    return {"days": [
+        day("2026-10-05", (1, 100, 100, 100), (1, 200, 200, 200)),
+        day("2026-10-06", (1, 105, 111, 100), (1, 190, 195, 180)),      # INFY target 110; TCS: stop 190? see config
+        day("2026-10-07", (1, 105, 106, 100), (1, 190, 195, 180)),
+    ]}
+
+
+def _patch_backtest(monkeypatch, response):
+    from services import strategy_store
+    from services.strategy_alerts import config_store as alerts_config_store
+    monkeypatch.setattr(strategy_store, "load_all", lambda: [STRATEGY])
+    monkeypatch.setattr(alerts_config_store, "load_config", lambda sid: _config(stop=95, target=110))
+    monkeypatch.setattr(bt, "fetch_range", lambda date_from: response)
+
+
+def test_backtest_result_is_the_shared_report_shape(monkeypatch):
+    _patch_backtest(monkeypatch, _two_stock_response())
+    result = lmv_report_data.backtest_result("s-bt", date(2026, 10, 5), date(2026, 10, 9), 7500.0)
+    assert result["kind"] == "LMV" and result["name"] == "BT Strategy" and result["symbol"] is None
+    assert result["investment_amount"] == 7500.0
+    infy = next(t for t in result["trades"] if t["symbol"] == "INFY")
+    assert infy["entry"] == 100 and infy["exit"] == 110 and infy["yield"] == pytest.approx(10.0)
+    assert infy["entry_date"] == date(2026, 10, 5) and infy["exit_date"] == date(2026, 10, 6)
+    assert infy["outcome"] == "Target Hit" and infy["kind"] == "positive"
+    assert "simulated" in result["method"]
+
+
+def test_single_stock_backtest_and_recorded_report_drop_the_sector_distribution(monkeypatch):
+    from services import backtest_report
+    _patch_backtest(monkeypatch, _two_stock_response())
+    whole = backtest_report.build_html(lmv_report_data.backtest_result("s-bt", date(2026, 10, 5), date(2026, 10, 9)))
+    one_result = lmv_report_data.backtest_result("s-bt", date(2026, 10, 5), date(2026, 10, 9), stock="infy")
+    one = backtest_report.build_html(one_result)
+    assert {t["symbol"] for t in one_result["trades"]} == {"INFY"} and one_result["symbol"] == "INFY"
+    assert "Sector Distribution" in whole
+    assert "Sector Distribution" not in one and "BT Strategy — INFY" in one
+    assert "Investment Simulation" in one and "Efficiency Ratios" in one
+
+    # the recorded-alerts report: same single-stock rule
+    from services.strategy_alerts import state_store
+    for sym in ("INFY", "TCS"):
+        state_store.append_alert_history({
+            "id": sym, "state": "open", "strategy_id": "s-rec", "strategy_name": "Rec", "symbol": sym, "sector": "IT",
+            "direction": "BUY", "entry_time": "2026-10-05T09:30:00", "entry_price": 100.0, "exit_price": 105.0,
+            "metrics": {}, "resolved_at": "2026-10-06T10:00:00", "resolution": "all_targets_achieved",
+            "running_high": 105.0, "running_low": 99.0})
+    d_from, d_to = date(2026, 10, 5), date(2026, 10, 9)
+    full = lmv_report_data.build_report_data("s-rec", None, "daily", d_from, d_to)
+    solo = lmv_report_data.build_report_data("s-rec", None, "daily", d_from, d_to, stock="tcs")
+    assert full["summary_a"]["closed_trades"] == 2 and solo["summary_a"]["closed_trades"] == 1
+    assert [r["symbol"] for r in solo["summary_a"]["rows"]] == ["TCS"] and solo["stock"] == "TCS"
+    assert "Sector Distribution" in lmv_report_data.build_report_html(full)
+    solo_html = lmv_report_data.build_report_html(solo)
+    assert "Sector Distribution" not in solo_html and "Cross-Compare" not in solo_html and "TCS" in solo_html
+
+
+def test_since_lmv_saving_began_starts_at_the_first_stored_day(monkeypatch):
+    from api import lmv_snapshot_api
+    from screens import reports
+    from services import report_store
+
+    calls = {}
+    monkeypatch.setattr(lmv_snapshot_api, "get_availability", lambda a, b: calls.update(span=(a, b)) or {"dates": [
+        {"trade_date": "2026-07-23", "has_data": True}, {"trade_date": "2026-07-25", "has_data": False},
+        {"trade_date": "2026-08-03", "has_data": True}]})
+    assert bt.earliest_saved_day(date(2026, 10, 21)) == date(2026, 7, 23)
+    assert calls["span"] == (date(2026, 7, 23), date(2026, 10, 21))      # looks back as far as a back-test can read
+
+    seen = {}
+    monkeypatch.setattr(lmv_report_data, "backtest_result",
+                        lambda sid, d_from, d_to, amount, stock: seen.update(a=(d_from, d_to, stock))
+                        or {"kind": "LMV", "name": "x", "symbol": stock, "date_from": d_from, "date_to": d_to,
+                            "trades": [], "notes": [], "method": "", "investment_amount": amount})
+    report = report_store.new_report(report_store.REPORT_TYPE_LMV, "since start")
+    report["subject_config"] = {"strategy_a_id": "s-bt", "source": "backtest", "stock": "INFY", "investment_amount": 5000}
+    report["timeframe"] = {"mode": "since_start", "from": None, "to": None}
+    html = reports._build_lmv_html(report, today=date(2026, 10, 21))
+    assert seen["a"] == (date(2026, 7, 23), date(2026, 10, 21), "INFY") and "Back-test" in html
+
+    # no availability -> the longest window a back-test can read
+    monkeypatch.setattr(bt, "earliest_saved_day", lambda today=None: None)
+    reports._build_lmv_html(report, today=date(2026, 10, 21))
+    assert seen["a"][0] == date(2026, 10, 21) - __import__("datetime").timedelta(days=bt.MAX_SNAPSHOT_DAYS - 1)
+
+
+def test_wizard_lmv_stock_scope_is_saved_validated_and_restored(monkeypatch):
+    import sys
+    from PySide6.QtWidgets import QApplication
+    app = QApplication.instance() or QApplication(sys.argv)
+    from app import AppController
+    from screens.reports import ReportsScreen
+    from services import report_store, strategy_store
+
+    strategy_store.save_strategy(strategy_store.new_strategy("Alpha"))
+    screen = ReportsScreen(AppController(app))
+    screen._async_generation = False
+    screen._start_new_report(report_store.REPORT_TYPE_LMV)
+    assert screen._lmv_scope_combo.currentData() == "strategy" and screen._lmv_stock_combo.isHidden()
+    labels = [screen._timeframe_combo.itemText(i) for i in range(screen._timeframe_combo.count())]
+    assert "Since LMV saving began (to today)" in labels
+
+    warned = []
+    monkeypatch.setattr("PySide6.QtWidgets.QMessageBox.warning", staticmethod(lambda *a, **k: warned.append(a[1])))
+    screen._name_edit.setText("one stock")
+    screen._select_data(screen._lmv_scope_combo, "stock")
+    assert not screen._lmv_stock_combo.isHidden()
+    screen._save_and_generate()                                   # no stock chosen
+    assert warned == ["Stock Required"] and report_store.load_all() == []
+
+    monkeypatch.setattr(lmv_report_data, "build_report_data",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("stop")))
+    screen._lmv_stock_combo.setText("infy")
+    screen._save_and_generate()
+    saved = report_store.load_all()[0]
+    assert saved["subject_config"]["stock"] == "INFY"
+
+    screen._start_new_report(report_store.REPORT_TYPE_LMV)
+    screen._prefill_fields(saved)
+    assert screen._lmv_scope_combo.currentData() == "stock" and screen._lmv_stock_combo.text() == "INFY"

@@ -17,6 +17,9 @@ TIMEFRAME_WEEKLY = "weekly"
 TIMEFRAME_MONTHLY = "monthly"
 TIMEFRAME_QUARTERLY = "quarterly"
 TIMEFRAME_CUSTOM = "custom"
+# From the first day LMV started saving daily snapshots to today (#82) — the
+# caller resolves the start (it needs the backend); see screens.reports.
+TIMEFRAME_SINCE_START = "since_start"
 
 
 def directional_yield(entry_price, exit_price, direction: str) -> float | None:

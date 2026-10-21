@@ -377,8 +377,17 @@ def backtest_trades_for_strategy(strategy_id: str, date_from: date | None, date_
     return kept, notes
 
 
+def _only_symbol(trades: list, stock: str | None) -> list:
+    if not stock:
+        return trades
+    wanted = stock.strip().upper()
+    return [t for t in trades if str(t.get("symbol", "")).strip().upper() == wanted]
+
+
 def compute_strategy_summary(strategy_id: str, date_from: date | None, date_to: date | None,
-                              include_backend: bool = False, backtest: bool = False) -> dict:
+                              include_backend: bool = False, backtest: bool = False,
+                              stock: str | None = None) -> dict:
+    """*stock* limits the summary to one symbol's trades (#82)."""
     notes: list = []
     if backtest:
         trades, notes = backtest_trades_for_strategy(strategy_id, date_from, date_to)
@@ -387,6 +396,7 @@ def compute_strategy_summary(strategy_id: str, date_from: date | None, date_to: 
         partial = partial_open_trades(strategy_id, date_to, include_backend=include_backend,
                                       date_from=date_from)
         trades = sorted(trades + partial, key=_resolved_dt)
+    trades = _only_symbol(trades, stock)
 
     rows = []
     yields = []
@@ -458,7 +468,7 @@ def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
                        include_backend: bool = False,
                        compare: dict | None = None,
                        indicator_ids: list | None = None, indicator_symbols: list | None = None,
-                       indicator_days: int = 60, backtest: bool = False) -> dict:
+                       indicator_days: int = 60, backtest: bool = False, stock: str | None = None) -> dict:
     """*backtest*: replay the strategies' alert rules over stored end-of-day LMV
     data instead of reading the alerts they actually recorded (see
     services.strategy_backtest). *compare*: optional {"mode": "stock"|"sector", "asset_1", "asset_2"}
@@ -473,12 +483,12 @@ def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
     normal Daily/Weekly/Monthly/Quarterly report generates fast and works
     fully offline."""
     strategies_by_id = {s["id"]: s for s in strategy_store.load_all()}
-    summary_a = compute_strategy_summary(strategy_a_id, date_from, date_to, include_backend, backtest)
+    summary_a = compute_strategy_summary(strategy_a_id, date_from, date_to, include_backend, backtest, stock)
     summary_a["name"] = strategies_by_id.get(strategy_a_id, {}).get("name", "Strategy A")
 
     summary_b = None
     if strategy_b_id:
-        summary_b = compute_strategy_summary(strategy_b_id, date_from, date_to, include_backend, backtest)
+        summary_b = compute_strategy_summary(strategy_b_id, date_from, date_to, include_backend, backtest, stock)
         summary_b["name"] = strategies_by_id.get(strategy_b_id, {}).get("name", "Strategy B")
 
     curve_a = curve_b = None
@@ -500,6 +510,7 @@ def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
 
     return {
         "backtest": backtest,
+        "stock": (stock or "").strip().upper() or None,
         "indicator_charts": indicator_charts_by_symbol,
         "summary_a": summary_a,
         "summary_b": summary_b,
@@ -512,6 +523,43 @@ def build_report_data(strategy_a_id: str, strategy_b_id: str | None,
         "compare": compare or {},
         "date_from": date_from,
         "date_to": date_to,
+    }
+
+
+def backtest_result(strategy_id: str, date_from: date | None, date_to: date | None,
+                    investment_amount: float = DEFAULT_INVESTMENT_AMOUNT, stock: str | None = None) -> dict:
+    """The shared Back-test report's input (services.backtest_report) for an LMV
+    strategy: the strategy's alert rules replayed over the stored daily LMV days
+    (services.strategy_backtest), optionally for one stock (#82)."""
+    from services import backtest_report
+
+    strategies_by_id = {s["id"]: s for s in strategy_store.load_all()}
+    summary = compute_strategy_summary(strategy_id, date_from, date_to, backtest=True, stock=stock)
+    trades = []
+    for row in summary["rows"]:
+        t = row["trade"]
+        try:
+            entry_date = datetime.fromisoformat(t["entry_time"]).date()
+        except (KeyError, TypeError, ValueError):
+            continue
+        trades.append({
+            "symbol": row["symbol"], "sector": t.get("sector"), "direction": row["direction"],
+            "entry_date": entry_date, "exit_date": row["date"].date(), "entry": row["entry"], "exit": row["exit"],
+            "yield": row["yield"], "outcome": row["status_label"].title(), "kind": row["status_kind"], "extra": {},
+        })
+    method = (
+        '<p class="fk-note">These trades are <b>simulated</b>, not recorded alerts. The strategy\'s Strategy '
+        "Notifications rules are replayed over the stored end-of-day LMV data, whether or not the strategy was active "
+        "in LMV at the time: a stock enters at the day's closing price when its trigger turns true, with its Stop Loss / "
+        "Targets / Trailing Exit computed from that day's row; from the next day the day's High / Low decide the "
+        "outcome (every target reached, or the stop-loss touched — if one day touches both, the stop-loss counts). "
+        "Intraday-mode strategies are replayed as positional. Yield is the directional % from entry to exit.</p>"
+    )
+    return {
+        "kind": "LMV", "name": strategies_by_id.get(strategy_id, {}).get("name", "Strategy"),
+        "symbol": (stock or "").strip().upper() or None, "date_from": date_from, "date_to": date_to,
+        "investment_amount": investment_amount, "trades": trades,
+        "open_trades": 0, "notes": list(summary.get("backtest_notes") or []), "method": method,
     }
 
 
@@ -628,6 +676,7 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
         templates.report_header(
             "LMV Based Strategy EOD Report",
             f'{summary_a["name"]}' + (f' vs {summary_b["name"]}' if comparing else "")
+            + (f' — {data["stock"]}' if data.get("stock") else "")
             + (" — Back-test" if data.get("backtest") else ""),
             datetime.now(),
         )
@@ -637,7 +686,8 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
     )
 
     sector_html = ""
-    for summary in [summary_a] + ([summary_b] if comparing else []):
+    # One stock has no sector spread to show (#82).
+    for summary in ([] if data.get("stock") else [summary_a] + ([summary_b] if comparing else [])):
         segments = sector_distribution(summary)
         total = sum(seg["value"] for seg in segments)
         if segments:
@@ -667,7 +717,8 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
     all_rows = _table_rows(summary_a) + (_table_rows(summary_b) if comparing else [])
 
     cfg = data.get("compare") or {}
-    cmp = compare_assets(summary_a, cfg.get("mode", "stock"), cfg.get("asset_1"), cfg.get("asset_2"))
+    cmp = None if data.get("stock") else compare_assets(
+        summary_a, cfg.get("mode", "stock"), cfg.get("asset_1"), cfg.get("asset_2"))
     if cmp:
         cmp_rows = cmp["rows"]
         noun = "Sector" if cmp["mode"] == "sector" else "Stock"
