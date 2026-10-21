@@ -402,7 +402,28 @@ def universe_snapshot(as_of_date: date) -> tuple:
     for row in snap_rows:
         bars = inception_bars_store.bars_for_symbol(row["symbol"], date_to=as_of_date)
         row["values"].update(compute_for_bars(row["symbol"], bars))
+    return _snapshot_table(snap_rows)
 
+
+def universe_snapshot_with_history(as_of_date: date, strategies: list) -> tuple:
+    """(headers, rows, day_history) — universe_snapshot plus the day-history
+    View by Date builds for *strategies*, so a strategy whose columns look
+    back (Prev MT = VALUE_DAYS_AGO, AVG_DAYS, VALUE_BEFORE_CHANGE, ...) gets
+    the same values here as in the EMV table (#93: such a strategy matched 28
+    stocks in View by Date but none in the report, because day_history was
+    empty and every lookback evaluated blank). The merge is the View's own
+    (it also adds the Formula Builder columns), restricted to *strategies*."""
+    from services import inception_compute_service
+    from screens.inception_view_by_date import _SnapshotLoadWorker
+
+    snap_rows = inception_compute_service.snapshot(as_of_date)
+    day_history = _SnapshotLoadWorker._merge_formula_builder_columns_and_day_history(
+        snap_rows, as_of_date, strategies=strategies)
+    headers, data = _snapshot_table(snap_rows)
+    return headers, data, day_history
+
+
+def _snapshot_table(snap_rows: list) -> tuple:
     metric_keys = sorted({k for r in snap_rows for k in r.get("values", {})})
     headers = ["Symbol"] + metric_keys
     data = [
@@ -431,7 +452,7 @@ def classify_strategy(strategy_id: str, as_of_date: date) -> dict:
         return {"strategy": {"name": "Unknown Strategy", "id": strategy_id},
                 "as_of_date": as_of_date, "headers": [], "rows": []}
 
-    headers, data = universe_snapshot(as_of_date)
+    headers, data, day_history = universe_snapshot_with_history(as_of_date, [strategy])
     universe_sector_idx = headers.index("Sector") if "Sector" in headers else None
     sector_totals: dict = {}
     if universe_sector_idx is not None:
@@ -439,7 +460,7 @@ def classify_strategy(strategy_id: str, as_of_date: date) -> dict:
             name = universe_row[universe_sector_idx]
             sector_totals[name] = sector_totals.get(name, 0) + 1
     new_headers, new_data = apply_strategies(
-        [strategy], headers, data, day_history={}, include_streak_columns=False,
+        [strategy], headers, data, day_history=day_history, include_streak_columns=False,
         symbol_col="Symbol", variable_store=inception_formula_variable_store,
     )
 
@@ -583,13 +604,13 @@ def build_strategy_report_html(classification: dict, doc_title: str = "EMV EOD R
 DAYS_TRUE_LOOKBACK = 30   # trading days checked backwards for the "Days True" streak
 
 
-def _passing_rows(strategy: dict, headers: list, data: list) -> tuple:
+def _passing_rows(strategy: dict, headers: list, data: list, day_history: dict | None = None) -> tuple:
     """(new_headers, {symbol: row_dict}) for the rows of *data* that pass
     *strategy*'s row_filter (apply_strategies drops the rest)."""
     from services import inception_formula_variable_store
 
     new_headers, new_data = apply_strategies(
-        [dict(strategy, active=True)], headers, data, day_history={}, include_streak_columns=False,
+        [dict(strategy, active=True)], headers, data, day_history=day_history or {}, include_streak_columns=False,
         symbol_col="Symbol", variable_store=inception_formula_variable_store,
     )
     sym_idx = new_headers.index("Symbol")
@@ -696,7 +717,7 @@ def classify_trend(category_id: str | None, timeframe: str, as_of_date: date,
     if not needed:
         return result
 
-    headers, data = universe_snapshot(as_of_date)
+    headers, data, day_history = universe_snapshot_with_history(as_of_date, [strategies[sid] for sid in needed])
     sector_idx = headers.index("Sector") if "Sector" in headers else None
     if sector_idx is not None:
         for universe_row in data:
@@ -705,7 +726,7 @@ def classify_trend(category_id: str | None, timeframe: str, as_of_date: date,
 
     passing, out_headers = {}, headers
     for sid in needed:
-        new_headers, by_symbol = _passing_rows(strategies[sid], headers, data)
+        new_headers, by_symbol = _passing_rows(strategies[sid], headers, data, day_history)
         passing[sid] = by_symbol
         if len(new_headers) > len(out_headers):
             out_headers = new_headers

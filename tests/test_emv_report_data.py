@@ -558,3 +558,36 @@ def test_resolve_stock_window_periods_vs_custom_range():
         {"range_mode": "custom", "date_from": "2026-09-30", "date_to": "2026-08-03"}, today)
     assert f < t
     assert emv_report_data.resolve_stock_window({"range_mode": "custom", "n_periods": 7}, today)[2] == 7
+
+
+def test_classify_strategy_resolves_lookback_columns_like_view_by_date(monkeypatch):
+    """#93: a strategy whose columns look back (VALUE_ON_DATE / Prev X) matched
+    stocks in the EMV table but none in the report, because the report built
+    no day_history and every lookback read blank."""
+    from services import inception_strategy_store
+
+    _seed("ABB_I", date(2026, 1, 1), 10, start_price=200)            # rising
+    inception_bars_store.upsert_bars([                                 # falling
+        {"symbol": "TCS_I", "trade_date": date(2026, 1, 1) + timedelta(days=i), "open": 100 - i,
+         "high": 101 - i, "low": 99 - i, "close": 100 - i, "volume": 1000}
+        for i in range(10) if (date(2026, 1, 1) + timedelta(days=i)).weekday() < 5
+    ])
+    strategy = {
+        "id": "strat-lb", "name": "Rising vs 5-Jan", "active": True, "category": "Daily",
+        "columns": [{"name": "Prev Close", "fmt_rules": [], "formula": [
+            {"type": "func", "value": "Max("},
+            {"type": "func", "value": "VALUE_ON_DATE(", "col_arg": "CLOSE", "date_arg": "2026-01-05"},
+            {"type": "op", "value": ","},
+            {"type": "func", "value": "VALUE_ON_DATE(", "col_arg": "CLOSE", "date_arg": "2026-01-06"},
+            {"type": "paren", "value": ")"}]}],
+        "row_filter": [{"type": "col", "value": "CLOSE"}, {"type": "op", "value": ">"},
+                       {"type": "col", "value": "Prev Close"}],
+    }
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [strategy])
+
+    result = emv_report_data.classify_strategy("strat-lb", date(2026, 1, 9))
+
+    assert {r["symbol"] for r in result["rows"]} == {"ABB"}          # was: empty
+    assert "Prev Close" in result["headers"]
+    html = emv_report_data.build_strategy_report_html(result, columns=["Stock", "Sector", "CLOSE", "Prev Close"])
+    assert "No stocks currently qualify" not in html and "ABB" in html

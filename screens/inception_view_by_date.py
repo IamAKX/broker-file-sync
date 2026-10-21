@@ -147,8 +147,11 @@ class _SnapshotLoadWorker(QThread):
         self.succeeded.emit(rows, day_history)
 
     @staticmethod
-    def _merge_formula_builder_columns_and_day_history(rows: list, as_of_date: date) -> dict:
-        """Adds LMV's ~56 Formula Builder columns (MT, MB, DT, DB, PMH, the
+    def _merge_formula_builder_columns_and_day_history(rows: list, as_of_date: date,
+                                                       strategies: list | None = None) -> dict:
+        """*strategies* (default: every stored Inception strategy) limits which
+        strategies' day-history needs are built — the EMV EOD reports pass just
+        the strategy they run (#93). Adds LMV's ~56 Formula Builder columns (MT, MB, DT, DB, PMH, the
         camarilla pivot ladders, ...) to every row's values dict — same
         merge screens.inception_hmv._HmvLoadWorker does (see that module's
         docstring for the full rationale), now also here so those columns
@@ -176,7 +179,8 @@ class _SnapshotLoadWorker(QThread):
         bounded to once per View, not once per month scanned) so none of
         this ever blocks the GUI thread.
         """
-        strategies = inception_strategy_store.load_all()
+        if strategies is None:
+            strategies = inception_strategy_store.load_all()
         specs = inception_day_history.raw_day_specs(strategies)
         extreme_specs = inception_day_history.raw_extreme_specs(strategies)
         vbc_specs = inception_value_before_change.specs_for_strategies(strategies)
