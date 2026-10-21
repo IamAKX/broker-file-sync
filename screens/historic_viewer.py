@@ -9,6 +9,7 @@ from PySide6.QtGui import QBrush, QColor
 from components.column_filter_popup import ColumnFilterPopup
 from components.frozen_table_columns import FrozenColumns
 from components.popup_position import clamp_to_screen
+from components.color_filter import ColorColumnFilter
 from components.sortable_table import HeaderSorter, SortableItem
 
 _CATEGORIES = ["All", "Daily", "Weekly", "Monthly", "Common"]
@@ -223,6 +224,10 @@ class HistoricDataViewer(QWidget):
         # Click a header to sort (ascending, then descending) — row-hidden
         # state is per row POSITION, so filters are re-applied after a sort.
         self._sorter = HeaderSorter(self._table, self._freeze, on_sorted=self._apply_row_filters)
+        # Right-click a header -> Filter by colour (#99), on top of Symbol search + Sector.
+        self._color_filter = ColorColumnFilter(
+            self._table, lambda c: self._headers[c] if c < len(self._headers) else "",
+            on_changed=self._apply_row_filters, extra_headers=(self._freeze.overlay_header(),))
 
     def _freeze_style(self) -> str:
         t = self._theme
@@ -291,7 +296,8 @@ class HistoricDataViewer(QWidget):
             if self._sector_col >= 0 and sector_sel != "All":
                 item = self._table.item(row, self._sector_col)
                 sector_ok = item is not None and item.text() == sector_sel
-            self._table.setRowHidden(row, not (symbol_ok and sector_ok))
+            color_ok = self._color_filter.row_passes(row)
+            self._table.setRowHidden(row, not (symbol_ok and sector_ok and color_ok))
         # The frozen Sector/Symbol overlay (self._freeze) shares the table's
         # model but not its row-hidden view state — without this, filtering
         # out non-matching rows leaves the overlay showing its own
@@ -309,7 +315,8 @@ class HistoricDataViewer(QWidget):
             1 for r in range(self._table.rowCount())
             if not self._table.isRowHidden(r)
         )
-        self._stock_count_lbl.setText(f"Stocks : {visible}")
+        extra = self._color_filter.summary()
+        self._stock_count_lbl.setText(f"Stocks : {visible}" + (f"  ·  {extra}" if extra else ""))
 
     # ── Reset ─────────────────────────────────────────────────────────────────
 
@@ -327,6 +334,7 @@ class HistoricDataViewer(QWidget):
         self._search_box.blockSignals(True)
         self._search_box.clear()
         self._search_box.blockSignals(False)
+        self._color_filter.clear(notify=False)
 
         # Column order back to *headers*' own original (logical) order —
         # undoes any drag-reordering done in this popup, same convention

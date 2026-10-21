@@ -6,6 +6,7 @@ import sys
 import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
+from components.color_filter import ColorColumnFilter, fill_color
 from components.column_filter_popup import ColumnFilterPopup
 from components.popup_position import clamp_to_screen
 from services.master_generator import _build_script_name_lookup, _strip_rolling_suffix
@@ -1445,6 +1446,18 @@ class LiveViewerWindow(QWidget):
         root.addWidget(self._table, 1)
 
         self._setup_frozen_column()
+
+        # Right-click a header -> Filter by colour (#99). Evaluated inside
+        # _apply_sector_filter, so it composes with the sector filter and is
+        # re-applied after every render/tick.
+        self._color_filter = ColorColumnFilter(
+            self._table,
+            lambda c: self._header_name(self._table.horizontalHeaderItem(c)),
+            on_changed=self._apply_sector_filter,
+            base_colors=lambda: {QColor(self._theme.get("card_bg") if self._theme else "#1c2128").name()},
+            cell_color_fn=self._cell_fill_color,
+            extra_headers=(self._frozen_table.horizontalHeader(),),
+        )
 
         # ── Busy indicator ───────────────────────────────────────────────────
         # A thin, otherwise-invisible strip that appears only while a
@@ -3140,6 +3153,7 @@ class LiveViewerWindow(QWidget):
         # when a combo is already showing "All" — so the strategy/column
         # changes above wouldn't otherwise be reflected on screen. Force a
         # render regardless of what _clear_all_filters happens to trigger.
+        self._color_filter.clear(notify=False)
         self._clear_all_filters()
         self._populate_table(self._data, set())
         self._apply_sector_filter()
@@ -3272,15 +3286,32 @@ class LiveViewerWindow(QWidget):
         QMessageBox.information(self, "Export",
                                f"Exported {len(rows)} rows to:\n{path}")
 
+    def _cell_fill_color(self, r: int, c: int):
+        """A cell's conditional-format fill for the colour filter: the steady
+        colour, not a transient amber "changed" flash (its base brush is
+        stashed in self._highlights while the flash lasts)."""
+        item = self._table.item(r, c)
+        if item is None:
+            return None
+        stashed = self._highlights.get((r, c))
+        brush = stashed[1] if stashed else item.background()
+        base = {QColor(self._theme.get("card_bg") if self._theme else "#1c2128").name()}
+        return fill_color(brush, base)
+
     def _apply_sector_filter(self):
-        """Show/hide rows based on the selected sector. No table re-render."""
+        """Show/hide rows based on the selected sector (and any header colour
+        filter). No table re-render."""
         selected = self._sector_combo.currentText()
+        color_filter = getattr(self, "_color_filter", None)
+        color_active = color_filter is not None and color_filter.active
         for r in range(self._table.rowCount()):
             if selected == "All":
                 hidden = False
             else:
                 item = self._table.item(r, 0)   # Sector is always col 0
                 hidden = item is None or item.text() != selected
+            if color_active and not hidden:
+                hidden = not color_filter.row_passes(r)
             self._table.setRowHidden(r, hidden)
             # The frozen "Scrip Name" overlay shares the model but not view
             # state — row visibility has to be mirrored by hand.
@@ -3296,7 +3327,9 @@ class LiveViewerWindow(QWidget):
             1 for r in range(self._table.rowCount())
             if not self._table.isRowHidden(r)
         )
-        self._stock_count_lbl.setText(f"Stocks : {visible}")
+        color_filter = getattr(self, "_color_filter", None)
+        extra = color_filter.summary() if color_filter is not None else ""
+        self._stock_count_lbl.setText(f"Stocks : {visible}" + (f"  ·  {extra}" if extra else ""))
 
     # ── Controls ─────────────────────────────────────────────────────────────
 

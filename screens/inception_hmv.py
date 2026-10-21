@@ -76,6 +76,7 @@ from PySide6.QtGui import QBrush, QColor
 from api.exceptions import ApiError, NetworkError
 from components.column_filter_popup import ColumnFilterPopup
 from components.frozen_table_columns import FrozenColumns
+from components.color_filter import ColorColumnFilter
 from components.sortable_table import HeaderSorter, SortableItem
 from components.popup_position import clamp_to_screen
 from screens.inception_view_by_date import _display_symbol, _remap_to_display_symbols
@@ -393,7 +394,12 @@ class InceptionHmvScreen(QWidget):
         layout.addWidget(self._table, 1)
         self._freeze = FrozenColumns(self._table)
         # Click a header to sort asc/desc (same as LMV).
-        self._sorter = HeaderSorter(self._table, self._freeze)
+        self._sorter = HeaderSorter(self._table, self._freeze, on_sorted=lambda: self._apply_color_filter_rows())
+        # Right-click a header -> Filter by colour (#99).
+        self._color_filter = ColorColumnFilter(
+            self._table, lambda c: self._headers[c] if 0 <= c < len(self._headers) else "",
+            on_changed=lambda: self._apply_color_filter_rows(),
+            extra_headers=(self._freeze.overlay_header(),))
 
         bottom = QHBoxLayout()
         self._status_lbl = QLabel("")
@@ -746,6 +752,14 @@ class InceptionHmvScreen(QWidget):
         self._freeze.configure(self._headers, _FROZEN_HEADERS, self._freeze_style())
         # Keep the user's sort across re-populates (strategy toggle, colour change).
         self._sorter.reapply()
+        self._apply_color_filter_rows()
+
+    def _apply_color_filter_rows(self):
+        """Hide rows that fail the active header colour filter(s); the frozen
+        Sector/Symbol overlay shares the model but not row-hidden state."""
+        for r in range(self._table.rowCount()):
+            self._table.setRowHidden(r, not self._color_filter.row_passes(r))
+        self._freeze.sync_row_hidden()
 
     def _restore_saved_column_order(self):
         """Reorders columns to match the Config Editor > "Inception Column
