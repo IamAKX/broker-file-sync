@@ -215,3 +215,25 @@ def test_stock_heatmap_items_are_descending_with_missing_last():
     ]
     items = sr._stock_items(stocks, "daily")
     assert [i["name"] for i in items] == ["CCC", "EEE", "AAA", "DDD", "BBB"]
+
+
+def test_live_pair_metric_resolves_field_list_names_against_lmv_columns(monkeypatch):
+    """#81: "P.HIGH" -> "Current" (names from the field list) gave a blank live
+    report because LMV's own column is spelled "P.High"."""
+    headers = ["Sector", "Scrip Name", "% Change", "Current", "P.High", "P.Low", "Close"]
+    data = [["BANKING", "HDFCBANK", "1", "110", "100", "90", "105"],
+            ["BANKING", "SBIN", "1", "95", "100", "90", "99"]]
+    monkeypatch.setattr(sr, "_prior_closes", lambda *a: (None, None))
+    out = sr.live_stocks(headers, data, {"kind": "pair", "from": "P.HIGH", "to": "Current"})["stocks"]
+    assert [round(s["custom"], 2) for s in out] == [10.0, -5.0]
+    # either spelling, either side, and the CLOSE alias for a live price
+    for frm, to in (("p.high", "CURRENT"), ("P.High", "Current")):
+        again = sr.live_stocks(headers, data, {"kind": "pair", "from": frm, "to": to})["stocks"]
+        assert [round(s["custom"], 2) for s in again] == [10.0, -5.0]
+    assert sr._field_value({"Current": "7"}, "LTP") == "7"           # alias
+    assert sr._field_value({"Close": "5", "Current": "7"}, "close") == "5"   # exact (ci) wins over alias
+    assert sr._field_value({"A": 1}, "missing") is None
+
+
+def test_eod_pair_metric_accepts_lmv_spelling_too():
+    assert sr._pair_value({"CLOSE": 110, "P.HIGH": 100}, {"from": "P.High", "to": "Current"}) == pytest.approx(10.0)

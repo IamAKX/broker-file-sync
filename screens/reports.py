@@ -23,6 +23,7 @@ from datetime import date, datetime, timedelta
 import threading
 
 import font_scale
+from config_defaults import MAIN_COLUMN_NAME_DATA
 from PySide6.QtCore import QDate, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -1148,7 +1149,12 @@ class ReportsScreen(QWidget):
         self._sector_pair_to = QComboBox()
         for combo in (self._sector_pair_from, self._sector_pair_to):
             combo.setEditable(True)
-            for code in hfs.available_fields(include_gap_dates=False):
+            codes = hfs.available_fields(include_gap_dates=False)
+            known = {c.lower() for c in codes}
+            # Live Master View columns too (Current, P.High, P.Low, Open, ...)
+            # — the live sector report reads them straight from the LMV row.
+            codes += [name for name, _ in MAIN_COLUMN_NAME_DATA if name.lower() not in known]
+            for code in codes:
                 combo.addItem(code)
         self._sector_pair_from.setCurrentText("MT")
         self._sector_pair_to.setCurrentText("CLOSE")

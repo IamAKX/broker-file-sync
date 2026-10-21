@@ -61,11 +61,39 @@ def metric_label(metric: dict | None) -> str:
     return f'{metric.get("strategy_name") or "Strategy"}: {metric.get("column", "")}'
 
 
+# Names the EMV field list and the Live Master View use for the same thing.
+_FIELD_ALIASES = {
+    "current": ("ltp", "last price", "close"),
+    "ltp": ("current", "close"),
+    "last price": ("current", "close"),
+    "close": ("current", "ltp"),
+}
+
+
+def _field_value(values: dict, name):
+    """*name*'s value from a stock's column dict: exact match, then
+    case-insensitive ("P.HIGH" from the field list vs LMV's "P.High" — #81:
+    the pair silently resolved to nothing and the live report came out
+    blank), then the Current/LTP/Close aliases."""
+    if name is None:
+        return None
+    if name in values:
+        return values[name]
+    lowered = {str(k).lower(): k for k in values}
+    key = str(name).strip().lower()
+    if key in lowered:
+        return values[lowered[key]]
+    for alias in _FIELD_ALIASES.get(key, ()):
+        if alias in lowered:
+            return values[lowered[alias]]
+    return None
+
+
 def _pair_value(values: dict, metric: dict):
     """% change going from field *from* to field *to*: (to - from) / from * 100
     — e.g. "MT vs Close" with MT 2100 and Close 2092 = -0.38% (the spec's
     own example)."""
-    a, b = _num(values.get(metric.get("from"))), _num(values.get(metric.get("to")))
+    a, b = _num(_field_value(values, metric.get("from"))), _num(_field_value(values, metric.get("to")))
     if a is None or b is None or a == 0:
         return None
     return (b - a) / a * 100
