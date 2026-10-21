@@ -1719,12 +1719,10 @@ def test_hmv_screen_conditional_formatting_can_target_another_column(qapp, contr
     assert screen._table.item(0, signal_idx).background().color() != QColor("#00ff00")
 
 
-def test_hmv_screen_does_not_add_row_filter_streak_columns(qapp, controller, monkeypatch, bars_db):
-    """services.strategy_engine.apply_strategies' "Days True"/"Since"
-    streak columns (for a strategy with a row filter) are LMV-only —
-    Inception has no day_history/historic-value support wired up, so this
-    screen calls apply_strategies with include_streak_columns=False. A
-    strategy WITH a row filter here must NOT gain those two extra columns."""
+def test_hmv_screen_adds_row_filter_streak_columns(qapp, controller, monkeypatch, bars_db):
+    """Issue #101 — a strategy WITH a row filter gains "Days True"/"Since"
+    columns here (computed on the load worker via emv_report_data.StreakLookup),
+    like LMV's own."""
     from screens.inception_hmv import InceptionHmvScreen
     from services import inception_strategy_store
     from PySide6.QtCore import QDate
@@ -1741,7 +1739,9 @@ def test_hmv_screen_does_not_add_row_filter_streak_columns(qapp, controller, mon
 
     screen._on_load()
     _run_worker(qapp, screen)
-    assert not any("Days True" in h or "Since" in h for h in screen._headers)
+    assert "Range — Days True" in screen._headers and "Range — Since" in screen._headers
+    row = dict(zip(screen._headers, screen._data[0]))
+    assert row["Range — Days True"] == 1 and row["Range — Since"] == "2026-08-18"
     assert "Sector" in screen._headers   # see services.inception_sector
     assert screen._strat_btn.text() == "⚡  Strategies  1/1"
 

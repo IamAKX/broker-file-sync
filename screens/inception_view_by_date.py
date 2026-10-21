@@ -47,6 +47,7 @@ from components.error_popup import show_api_error
 from components.popup_position import clamp_to_screen
 from screens.historic_viewer import HistoricDataViewer
 from services import (
+    emv_report_data,
     inception_bars_store, inception_change_highlight, inception_compute_service,
     inception_day_history, inception_formula_builder_columns, inception_formula_variable_store,
     inception_sector, inception_strategy_store, inception_value_before_change,
@@ -118,6 +119,21 @@ def _reorder_by_saved_column_order(headers: list, rows: list) -> tuple:
     return new_headers, new_rows
 
 
+def _rows_to_table(rows: list) -> tuple:
+    """(headers, table_rows) of a snapshot, sector columns injected — the base
+    grid the active strategies are applied to."""
+    metric_keys = sorted({k for r in rows for k in r.get("values", {})})
+    headers = ["Symbol"] + metric_keys
+    # Display the underlying symbol (e.g. "ABB") rather than the raw
+    # roll-series symbol ("ABB_I") — that suffix is an internal detail of
+    # which continuous-futures series was picked as canonical.
+    table_rows = [
+        [_display_symbol(r["symbol"])] + [r.get("values", {}).get(k) for k in metric_keys]
+        for r in rows
+    ]
+    return inception_sector.inject_sector_rows(headers, table_rows)
+
+
 class _SnapshotLoadWorker(QThread):
     """Runs inception_compute_service.snapshot on a background thread — see
     that module's docstring on why a cold Group A/B walk across the full
@@ -131,9 +147,11 @@ class _SnapshotLoadWorker(QThread):
     succeeded = Signal(list, object)    # rows, day_history
     failed = Signal(str)
 
-    def __init__(self, as_of_date: date, parent=None):
+    def __init__(self, as_of_date: date, parent=None, strategies: list | None = None):
         super().__init__(parent)
         self._as_of_date = as_of_date
+        self._strategies = strategies or []
+        self.streak_lookup = emv_report_data.StreakLookup(as_of_date)   # warmed in run() (issue #101)
 
     def run(self):
         try:
@@ -141,6 +159,10 @@ class _SnapshotLoadWorker(QThread):
                 self._as_of_date, progress_cb=lambda done, total: self.progress.emit(done, total),
             )
             day_history = self._merge_formula_builder_columns_and_day_history(rows, self._as_of_date)
+            if any(s.get("active") and s.get("row_filter") for s in self._strategies):
+                headers, table_rows = _rows_to_table(rows)
+                self.streak_lookup.warm(self._strategies, headers, table_rows, day_history,
+                                        inception_formula_variable_store)
         except Exception as exc:
             self.failed.emit(str(exc))
             return
@@ -585,7 +607,11 @@ class InceptionViewByDateScreen(QWidget):
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(True)
 
-        self._worker = _SnapshotLoadWorker(self._selected_date, parent=self)
+        # Same merge _on_view_succeeded applies, so the worker pre-computes the
+        # "Days True"/"Since" streaks of exactly the strategies that will show.
+        self._strategies = inception_strategy_store.merge_session_active(
+            inception_strategy_store.load_all(), self._strategies)
+        self._worker = _SnapshotLoadWorker(self._selected_date, parent=self, strategies=self._strategies)
         self._worker.progress.connect(self._on_view_progress)
         self._worker.succeeded.connect(self._on_view_succeeded)
         self._worker.failed.connect(self._on_view_failed)
@@ -609,17 +635,7 @@ class InceptionViewByDateScreen(QWidget):
             self._status_lbl.setStyleSheet(f"color: {t.get('status_red')};")
             return
 
-        metric_keys = sorted({k for r in rows for k in r.get("values", {})})
-        headers = ["Symbol"] + metric_keys
-        table_rows = [
-            # Display the underlying symbol (e.g. "ABB") rather than the raw
-            # roll-series symbol ("ABB_I") — that suffix is an internal
-            # detail of which continuous-futures series was picked as
-            # canonical, not something a user browsing by date needs to see.
-            [_display_symbol(r["symbol"])] + [r.get("values", {}).get(k) for k in metric_keys]
-            for r in rows
-        ]
-        headers, table_rows = inception_sector.inject_sector_rows(headers, table_rows)
+        headers, table_rows = _rows_to_table(rows)
 
         # Active Inception strategies are evaluated entirely here, on the
         # client — the snapshot response above is base (raw + precomputed)
@@ -655,6 +671,7 @@ class InceptionViewByDateScreen(QWidget):
         base_col_count = len(headers)
         headers, table_rows = apply_strategies(strategies, headers, table_rows,
                                                day_history=day_history, include_streak_columns=False,
+                                               streak_lookup=self._worker.streak_lookup,
                                                symbol_col="Symbol",
                                                variable_store=inception_formula_variable_store)
         # Conditional formatting (services.strategy_engine.get_row_fmt_

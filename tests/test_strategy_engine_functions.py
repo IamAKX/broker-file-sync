@@ -1542,6 +1542,26 @@ def test_apply_strategies_include_streak_columns_false_suppresses_them():
     assert new_data == data
 
 
+def test_apply_strategies_streak_lookup_fills_streak_columns_for_passing_rows_only():
+    """Issue #101 — Inception passes a lookup instead of day_history."""
+    from services.strategy_engine import apply_strategies
+    strategy = _streak_strategy()
+    headers = ["Symbol", "OPEN", "CLOSE"]
+    data = [["A", 100.0, 105.0], ["B", 100.0, 90.0]]
+    calls = []
+
+    def lookup(strat, symbol):
+        calls.append(symbol)
+        return 4, "2026-10-12"
+
+    new_headers, new_data = apply_strategies([strategy], headers, data, include_streak_columns=False,
+                                             streak_lookup=lookup, symbol_col="Symbol")
+    assert new_headers[-2:] == [f"{strategy['name']} — Days True", f"{strategy['name']} — Since"]
+    row_a = next(r for r in new_data if r[0] == "A")
+    assert row_a[-2:] == [4, "2026-10-12"]
+    assert calls == ["A"]            # the failing row is never looked up
+
+
 def test_apply_strategies_resolves_indicator_library_code_with_parentheses():
     """An Indicator Library field ([RSI(14)] style) resolves like any other
     inception field — and works inside a row filter, not just a column."""

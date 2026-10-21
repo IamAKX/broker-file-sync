@@ -406,6 +406,33 @@ def test_trailing_days_true_counts_consecutive_days_ending_at_as_of(monkeypatch)
     assert emv_report_data.trailing_days_true("NOPE", strategies[0], as_of) == 0
 
 
+def test_streak_lookup_reads_pending_until_warmed_then_gives_days_true_and_since(monkeypatch):
+    """Issue #101 — EMV View by Date / HMV 'Days True' / 'Since' columns."""
+    strategies = _trend_setup(monkeypatch)
+    s130 = {"id": "s130", "name": "Above 130", "active": True, "category": "Daily", "columns": [],
+            "row_filter": _cond_close_above(130)}
+    as_of = date(2026, 2, 20)
+    headers = ["Symbol", "CLOSE"]
+    data = [["SBIN", 140.0], ["ABB", 100.0]]
+    lookup = emv_report_data.StreakLookup(as_of)
+    assert lookup(s130, "SBIN") == (lookup.PENDING, None)       # nothing computed on the GUI thread
+    lookup.warm([s130], headers, data)
+    expected_days, expected_since = emv_report_data.trailing_streak("SBIN", s130, as_of)
+    assert expected_days > 0
+    assert lookup(s130, "SBIN") == (expected_days, expected_since.isoformat())
+    assert lookup(s130, None) == (None, None)
+
+
+def test_streak_lookup_caps_a_full_lookback_as_a_lower_bound(monkeypatch):
+    strategies = _trend_setup(monkeypatch)
+    as_of = date(2026, 2, 20)
+    lookup = emv_report_data.StreakLookup(as_of)
+    s_all = dict(strategies[0], row_filter=_cond_close_above(0))      # true on every day
+    lookup.warm([s_all], ["Symbol", "CLOSE"], [["ABB", 100.0]])
+    days, since = lookup(s_all, "ABB")
+    assert days == f"≥{emv_report_data.DAYS_TRUE_LOOKBACK}" and since is None
+
+
 def test_trend_report_pages_show_distribution_days_true_and_multi_timeframe_columns(monkeypatch):
     _trend_setup(monkeypatch)
     result = emv_report_data.classify_trend(None, "Daily", date(2026, 2, 20), multi_timeframe=True)

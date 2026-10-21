@@ -1377,7 +1377,8 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
                      include_streak_columns: bool = True,
                      symbol_col: str = SYMBOL_COLUMN,
                      inception_values: dict | None = None,
-                     variable_store=None) -> tuple[list, list[list]]:
+                     variable_store=None,
+                     streak_lookup=None) -> tuple[list, list[list]]:
     """
     Append strategy columns to headers and data rows.
     Returns (new_headers, new_data).
@@ -1419,6 +1420,12 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
     day_history param IS populated for everything services.
     inception_day_history covers — see those two screens' own workers.)
 
+    ``streak_lookup`` (Inception only, issue #101): ``fn(strategy, symbol) ->
+    (days_true, since_date | None)``. When given, a row-filtered strategy gets
+    its "Days True"/"Since" pair filled from this callable instead of the
+    day_history request include_streak_columns relies on (which Inception's
+    day_history can't serve). Only called for rows that pass the filter.
+
     ``inception_values`` (LMV only — see services.lmv_inception_fields):
     ``{normalized_symbol: {code: value}}`` of HMV's historical Group A/B
     columns (52WH, ATH, the DAY/WEEK gap codes, ...). Merged into each row
@@ -1453,7 +1460,7 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
     for strat in active:
         for col in strat.get("columns", []):
             extra_headers.append(col["name"])
-        if include_streak_columns and strat.get("row_filter"):
+        if (include_streak_columns or streak_lookup) and strat.get("row_filter"):
             extra_headers.extend(streak_column_names(strat))
 
     new_headers = list(headers) + extra_headers
@@ -1518,7 +1525,11 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
             # two) anyway, same "doesn't apply to this row" convention the
             # strategy's own columns already use, so there's nothing to
             # compute in that case.
-            if include_streak_columns and row_filter and passed:
+            if streak_lookup and row_filter and passed:
+                days_true, since_date = streak_lookup(strat, row_dict.get(symbol_col))
+                values.append(days_true)
+                values.append(since_date)
+            elif include_streak_columns and row_filter and passed:
                 symbol = row_dict.get(symbol_col)
                 entry = None
                 if day_history is not None and symbol:
@@ -1544,7 +1555,7 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
                 # columns (and, if it has a row filter, its Days True/Since
                 # streak columns too) don't apply to it.
                 slot_count = len(strat.get("columns", []))
-                if include_streak_columns and strat.get("row_filter"):
+                if (include_streak_columns or streak_lookup) and strat.get("row_filter"):
                     slot_count += 2
                 extra_vals.extend([None] * slot_count)
         new_data.append(list(row) + extra_vals)

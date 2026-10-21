@@ -79,8 +79,9 @@ from components.frozen_table_columns import FrozenColumns
 from components.color_filter import ColorColumnFilter
 from components.sortable_table import HeaderSorter, SortableItem
 from components.popup_position import clamp_to_screen
-from screens.inception_view_by_date import _display_symbol, _remap_to_display_symbols
+from screens.inception_view_by_date import _display_symbol, _remap_to_display_symbols, _rows_to_table
 from services import (
+    emv_report_data,
     inception_bars_store, inception_change_highlight, inception_compute_service,
     inception_day_history, inception_formula_builder_columns, inception_formula_variable_store,
     inception_sector, inception_strategy_store, inception_value_before_change,
@@ -89,6 +90,24 @@ from services.formula_engine import FORMULA_CODES
 from services.strategy_engine import apply_strategies, build_symbol_index, get_row_fmt_colors
 
 _FROZEN_HEADERS = ["Sector", "Symbol"]
+
+
+class _StreakWarmWorker(QThread):
+    """Pre-computes "Days True"/"Since" for a newly applied strategy selection
+    off the GUI thread (issue #101); the screen re-renders when it finishes."""
+    done = Signal()
+
+    def __init__(self, lookup, strategies, headers, data, day_history, parent=None):
+        super().__init__(parent)
+        self._args = (lookup, strategies, headers, data, day_history)
+
+    def run(self):
+        lookup, strategies, headers, data, day_history = self._args
+        try:
+            lookup.warm(strategies, headers, data, day_history, inception_formula_variable_store)
+        except Exception:
+            pass
+        self.done.emit()
 
 
 class _HmvLoadWorker(QThread):
@@ -104,10 +123,12 @@ class _HmvLoadWorker(QThread):
     succeeded = Signal(object, list, object)  # as_of_date (date | None), rows, day_history
     failed = Signal(str)
 
-    def __init__(self, date_from: date, date_to: date, parent=None):
+    def __init__(self, date_from: date, date_to: date, parent=None, strategies: list | None = None):
         super().__init__(parent)
         self._date_from = date_from
         self._date_to = date_to
+        self._strategies = strategies or []
+        self.streak_lookup = None   # set in run() once as_of is known (issue #101)
 
     def run(self):
         try:
@@ -118,6 +139,11 @@ class _HmvLoadWorker(QThread):
             day_history = {}
             if as_of_date is not None:
                 day_history = self._merge_formula_builder_columns_and_day_history(rows, as_of_date)
+                self.streak_lookup = emv_report_data.StreakLookup(as_of_date)
+                if any(s.get("active") and s.get("row_filter") for s in self._strategies):
+                    headers, data = _rows_to_table(rows)
+                    self.streak_lookup.warm(self._strategies, headers, data, day_history,
+                                            inception_formula_variable_store)
         except Exception as exc:
             self.failed.emit(str(exc))
             return
@@ -283,6 +309,9 @@ class InceptionHmvScreen(QWidget):
         self._day_history: dict = {}   # see services.inception_day_history / _recompute_display
         self._fmt_colors: list = []    # [{target_column: color}, ...] per row — see _recompute_display
         self._strategies: list = []
+        self._as_of_date = None
+        self._streak_lookup_fn = None
+        self._streak_worker = None
         self._visible_cols: set = set()
         self._worker: _HmvLoadWorker | None = None
         # "Changed since last Load/View" cell highlighting — see services.
@@ -528,7 +557,8 @@ class InceptionHmvScreen(QWidget):
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(True)
 
-        self._worker = _HmvLoadWorker(date_from, date_to, parent=self)
+        self._worker = _HmvLoadWorker(date_from, date_to, parent=self,
+                                      strategies=inception_strategy_store.load_all())
         self._worker.progress.connect(self._on_load_progress)
         self._worker.succeeded.connect(
             lambda as_of_date, rows, day_history: self._on_load_succeeded(date_from, date_to, as_of_date, rows, day_history)
@@ -547,6 +577,8 @@ class InceptionHmvScreen(QWidget):
         self._load_btn.setText("Load")
         self._progress_bar.setVisible(False)
         self._day_history = day_history
+        self._as_of_date = as_of_date
+        self._streak_lookup_fn = self._worker.streak_lookup if self._worker is not None else None   # issue #101
 
         self._as_of_lbl.setText(f"As of {as_of_date.isoformat()}" if as_of_date else "No synced trading day in this range")
 
@@ -626,12 +658,31 @@ class InceptionHmvScreen(QWidget):
         # the strategy card's toggle on InceptionStrategyBuilderScreen).
         updated_by_id = {s["id"]: s for s in updated}
         self._strategies = [updated_by_id.get(s["id"], s) for s in self._strategies]
+        # "Days True"/"Since" of a newly applied strategy are computed off the
+        # GUI thread first (issue #101), then the grid is rebuilt once.
+        lookup = self._streak_lookup()
+        if lookup is not None and self._raw_headers and any(
+                s.get("active") and s.get("row_filter") for s in self._strategies):
+            self._streak_worker = _StreakWarmWorker(
+                lookup, list(self._strategies), self._raw_headers, self._raw_data, self._day_history, parent=self)
+            self._streak_worker.done.connect(self._recompute_display)
+            self._status_lbl.setText("Computing Days True / Since…")
+            self._streak_worker.start()
+            return
         self._recompute_display()
 
     def _update_strat_btn_label(self):
         active = sum(1 for s in self._strategies if s.get("active"))
         total = len(self._strategies)
         self._strat_btn.setText("⚡  Strategies" if total == 0 else f"⚡  Strategies  {active}/{total}")
+
+    def _streak_lookup(self):
+        """"Days True"/"Since" lookup for the loaded as-of day (issue #101)."""
+        if self._as_of_date is None:
+            return None
+        if self._streak_lookup_fn is None:
+            self._streak_lookup_fn = emv_report_data.StreakLookup(self._as_of_date)
+        return self._streak_lookup_fn
 
     def _recompute_display(self):
         """Re-derives the displayed headers/data from the cached raw (no
@@ -656,6 +707,7 @@ class InceptionHmvScreen(QWidget):
         base_col_count = len(self._raw_headers)
         headers, data = apply_strategies(self._strategies, self._raw_headers, self._raw_data,
                                           day_history=self._day_history, include_streak_columns=False,
+                                          streak_lookup=self._streak_lookup(),
                                           symbol_col="Symbol",
                                           variable_store=inception_formula_variable_store)
         # Conditional formatting (services.strategy_engine.get_row_fmt_

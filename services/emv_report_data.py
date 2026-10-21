@@ -687,6 +687,54 @@ def trailing_days_true(display_symbol: str, strategy: dict, as_of_date: date,
     return trailing_streak(display_symbol, strategy, as_of_date, lookback, cache)[0]
 
 
+class StreakLookup:
+    """"Days True"/"Since" for the EMV View by Date / HMV grids (issue #101),
+    passed to strategy_engine.apply_strategies(streak_lookup=...).
+
+    Computing a streak replays each stock's last DAYS_TRUE_LOOKBACK days, which
+    takes seconds across a universe — so it is done by warm() on a background
+    thread, and the GUI thread only ever reads memoized results (an
+    un-warmed pair reads "…"). One per-stock history pass is shared by every
+    strategy. A streak filling the whole lookback reads "≥N" (a lower bound)."""
+
+    PENDING = "…"
+
+    def __init__(self, as_of_date: date, lookback: int = DAYS_TRUE_LOOKBACK):
+        self._as_of = as_of_date
+        self._lookback = lookback
+        self._rows_cache: dict = {}
+        self._results: dict = {}
+
+    @staticmethod
+    def _key(strategy: dict, symbol) -> tuple:
+        return (strategy.get("id"), symbol, repr(strategy.get("row_filter")))
+
+    def _compute(self, strategy: dict, symbol) -> tuple:
+        key = self._key(strategy, symbol)
+        if key not in self._results:
+            days, since = trailing_streak(symbol, strategy, self._as_of, self._lookback, self._rows_cache)
+            capped = days >= self._lookback
+            self._results[key] = (f"≥{days}" if capped else days,
+                                  since.isoformat() if since and not capped else None)
+        return self._results[key]
+
+    def __call__(self, strategy: dict, symbol) -> tuple:
+        if not symbol:
+            return None, None
+        return self._results.get(self._key(strategy, symbol), (self.PENDING, None))
+
+    def warm(self, strategies: list, headers: list, data: list, day_history=None, variable_store=None) -> None:
+        """Computes (and memoizes) the streak of every row that passes each
+        active row-filtered strategy. Safe to call repeatedly — already
+        computed pairs cost nothing."""
+        active = [s for s in strategies if s.get("active") and s.get("row_filter")]
+        if not active:
+            return
+        apply_strategies(active, headers, data, day_history=day_history, include_streak_columns=False,
+                         streak_lookup=lambda strat, sym: self._compute(strat, sym) if sym else (None, None),
+                         symbol_col="Symbol", variable_store=variable_store)
+
+
 def classify_trend(category_id: str | None, timeframe: str, as_of_date: date,
                    multi_timeframe: bool = False, with_days_true: bool = True) -> dict:
     """Stocks in trend category *category_id* (None = every active category)
