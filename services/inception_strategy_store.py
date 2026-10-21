@@ -118,12 +118,45 @@ def clear_local_cache() -> None:
         os.remove(_STORE_FILE)
 
 
+def clean_name(name) -> str:
+    """A column name with every run of whitespace (including a pasted newline
+    or tab, issue #103) collapsed to one space and the ends trimmed."""
+    return " ".join(str(name or "").split())
+
+
+def _repair_column_names(strategy: dict) -> None:
+    """Fixes a column name saved with stray whitespace/newlines (issue #103:
+    it rendered as "[\nNAME]" in the field list and broke the formula) and
+    points every token that referenced the old spelling at the clean one."""
+    renames = {}
+    for col in strategy.get("columns", []):
+        old = col.get("name", "")
+        new = clean_name(old)
+        if new and new != old:
+            renames[old] = new
+            col["name"] = new
+    if not renames:
+        return
+    token_lists = [strategy.get("row_filter", [])]
+    for col in strategy.get("columns", []):
+        token_lists.append(col.get("formula", []))
+        for rule in col.get("fmt_rules", []):
+            token_lists.append(rule.get("condition", []))
+            if rule.get("target_column") in renames:
+                rule["target_column"] = renames[rule["target_column"]]
+    for tokens in token_lists:
+        for tok in tokens:
+            if isinstance(tok, dict) and tok.get("type") == "col" and tok.get("value") in renames:
+                tok["value"] = renames[tok["value"]]
+
+
 def _backfill_defaults(strategies: list) -> list:
     for s in strategies:
         s.setdefault("category", "Daily")
         s.setdefault("row_filter", [])
         for col in s.get("columns", []):
             col.setdefault("fmt_rules", [])
+        _repair_column_names(s)
     return strategies
 
 

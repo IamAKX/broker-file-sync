@@ -150,7 +150,7 @@ class _SnapshotLoadWorker(QThread):
     def __init__(self, as_of_date: date, parent=None, strategies: list | None = None):
         super().__init__(parent)
         self._as_of_date = as_of_date
-        self._strategies = strategies or []
+        self._strategies = strategies   # None -> every stored strategy (Strategy Builder's sample load)
         self.streak_lookup = emv_report_data.StreakLookup(as_of_date)   # warmed in run() (issue #101)
 
     def run(self):
@@ -158,10 +158,14 @@ class _SnapshotLoadWorker(QThread):
             rows = inception_compute_service.snapshot(
                 self._as_of_date, progress_cb=lambda done, total: self.progress.emit(done, total),
             )
-            day_history = self._merge_formula_builder_columns_and_day_history(rows, self._as_of_date)
-            if any(s.get("active") and s.get("row_filter") for s in self._strategies):
+            # Only the strategies that will actually be applied need their
+            # day-history built (issue #102: building it for every stored
+            # strategy made a View take minutes with many inactive ones).
+            applied = None if self._strategies is None else [s for s in self._strategies if s.get("active")]
+            day_history = self._merge_formula_builder_columns_and_day_history(rows, self._as_of_date, applied)
+            if applied and any(s.get("row_filter") for s in applied):
                 headers, table_rows = _rows_to_table(rows)
-                self.streak_lookup.warm(self._strategies, headers, table_rows, day_history,
+                self.streak_lookup.warm(applied, headers, table_rows, day_history,
                                         inception_formula_variable_store)
         except Exception as exc:
             self.failed.emit(str(exc))

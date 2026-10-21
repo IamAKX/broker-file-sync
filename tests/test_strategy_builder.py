@@ -1946,3 +1946,18 @@ def test_emv_row_filter_clear_button_resets_to_all_rows(qapp):
     assert editor._filter_clear_btn.isEnabled() is False
     assert "all rows" in editor._filter_preview.text()
     editor._clear_filter()  # idempotent
+
+
+def test_column_name_with_stray_newline_is_repaired_on_load_and_formulas_follow():
+    """Issue #103: a column saved as "\\nMTLTPBUY" showed as "[\\nMTLTPBUY]"."""
+    from services import inception_strategy_store as store
+    strat = {"id": "s", "name": "S", "row_filter": [{"type": "col", "value": "\nMTLTPBUY"}],
+             "columns": [{"name": "\nMTLTPBUY", "formula": [], "fmt_rules": [
+                 {"condition": [{"type": "col", "value": "\nMTLTPBUY"}], "target_column": "\nMTLTPBUY"}]},
+                         {"name": "Other", "formula": [{"type": "col", "value": "\nMTLTPBUY"}]}]}
+    [fixed] = store._backfill_defaults([strat])
+    assert fixed["columns"][0]["name"] == "MTLTPBUY"
+    assert fixed["row_filter"][0]["value"] == "MTLTPBUY"
+    assert fixed["columns"][1]["formula"][0]["value"] == "MTLTPBUY"
+    assert fixed["columns"][0]["fmt_rules"][0]["target_column"] == "MTLTPBUY"
+    assert store.clean_name("  A \n B\t") == "A B"

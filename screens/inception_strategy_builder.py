@@ -316,7 +316,7 @@ class _InceptionColumnEditorDialog(QDialog):
         lbl.setFixedWidth(120)
         self._name_edit = QLineEdit(self._col.get("name", ""))
         self._name_edit.setFixedHeight(34)
-        self._name_edit.textChanged.connect(lambda v: self._col.update({"name": v}))
+        self._name_edit.textChanged.connect(lambda v: self._col.update({"name": store.clean_name(v)}))
         name_row.addWidget(lbl)
         name_row.addWidget(self._name_edit)
         root.addLayout(name_row)

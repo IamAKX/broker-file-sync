@@ -39,7 +39,7 @@ sync-success path that clears inception_compute_service's cache (screens.
 inception_settings) since both go stale the same way.
 """
 
-from datetime import timedelta
+from datetime import date
 
 from services import formula_engine, indicator_library
 
@@ -50,18 +50,29 @@ def clear_cache() -> None:
     _cache.clear()
 
 
+_holiday_cache: dict[tuple, frozenset] = {}
+
+
 def _holidays_for(bars: list[dict]) -> set:
+    """Weekdays between the first and last bar with no bar. Pure ordinal
+    arithmetic (a weekday check per calendar day is the hot loop of every
+    per-day Formula Builder replay) and memoized per (first, last, count)."""
     if not bars:
         return set()
-    bar_dates = {b["trade_date"] for b in bars}
     first, last = bars[0]["trade_date"], bars[-1]["trade_date"]
-    holidays = set()
-    d = first
-    while d <= last:
-        if d.weekday() < 5 and d not in bar_dates:
-            holidays.add(d)
-        d += timedelta(days=1)
-    return holidays
+    key = (first, last, len(bars))
+    cached = _holiday_cache.get(key)
+    if cached is None:
+        bar_ords = {b["trade_date"].toordinal() for b in bars}
+        # date.fromordinal(1) is a Monday, so ordinal % 7 in (6, 0) is Sat/Sun
+        cached = frozenset(
+            date.fromordinal(o) for o in range(first.toordinal(), last.toordinal() + 1)
+            if o % 7 not in (6, 0) and o not in bar_ords
+        )
+        if len(_holiday_cache) > 20000:
+            _holiday_cache.clear()
+        _holiday_cache[key] = cached
+    return set(cached)
 
 
 # Codes services.formula_engine can't compute from Inception's own bars at
