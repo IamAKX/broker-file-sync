@@ -30,7 +30,7 @@ def _reset_module_state(tmp_path, monkeypatch):
 # ── Field catalogue ────────────────────────────────────────────────────────
 
 def test_field_codes_are_all_real_inception_codes():
-    catalogue = set(inception_columns.all_derived_codes())
+    catalogue = set(inception_columns.all_derived_codes()) | set(inception_columns.gap_sub_fields())
     assert lif.FIELD_CODES
     assert all(code in catalogue for code in lif.FIELD_CODES)
 
@@ -236,3 +236,22 @@ def test_all_field_codes_and_catalogue_include_indicators(monkeypatch):
     assert codes[:len(lif.FIELD_CODES)] == lif.FIELD_CODES
     assert codes.count("52WH") == 1 and "RSI(14)" in codes
     assert "RSI(14)" in [e["token"]["value"] for e in lif.field_catalogue()]
+
+
+def test_every_gap_area_offers_bare_code_plus_low_high_date_fields():
+    """#88: Gap number (bare code = HIGH alias) + LOW / HIGH / DATE sub-fields."""
+    for code in inception_columns.GROUP_B:
+        assert code in lif.FIELD_CODES
+        for suffix in ("LOW", "HIGH", "DATE"):
+            assert f"{code} {suffix}" in lif.FIELD_CODES
+    assert len(lif.FIELD_CODES) == len(set(lif.FIELD_CODES))           # no duplicates
+    names = {e["name"] for e in lif.field_catalogue()}
+    assert "[WEEK FD GDN 3 LOW]" in names and "[DAY UF GUP 1 DATE]" in names
+    desc = next(e for e in lif.field_catalogue() if e["name"] == "[DAY UF GUP 2 LOW]")["description"]
+    assert "lower bound" in desc
+
+
+def test_field_cache_fingerprint_changes_with_the_field_schema(monkeypatch):
+    before = lif._fingerprint()
+    monkeypatch.setattr(lif, "_FIELDS_SCHEMA", "something-else")
+    assert lif._fingerprint() != before

@@ -121,6 +121,22 @@ def all_derived_codes() -> list[str]:
     return list(GROUP_A) + list(GROUP_B)
 
 
+def gap_sub_fields(include_dates: bool = True) -> list[str]:
+    """Every gap area's "<CODE> LOW" / "<CODE> HIGH" (/ "<CODE> DATE") field
+    — the bare code only aliases HIGH, so these are how a user gets the other
+    bound and the date the gap opened (#88)."""
+    suffixes = GAP_METRIC_SUFFIXES if include_dates else tuple(s for s in GAP_METRIC_SUFFIXES if s != "DATE")
+    return [f"{code} {s}" for code in GROUP_B for s in suffixes]
+
+
+def gap_parent(field: str) -> str | None:
+    """"DAY UF GUP 1 LOW" -> "DAY UF GUP 1"; None for anything else."""
+    for suffix in GAP_METRIC_SUFFIXES:
+        if field.endswith(f" {suffix}") and field[: -len(suffix) - 1] in GROUP_B:
+            return field[: -len(suffix) - 1]
+    return None
+
+
 def is_stateful_gap(code: str) -> bool:
     return code in GROUP_B
 

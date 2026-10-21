@@ -776,7 +776,7 @@ class ReportsScreen(QWidget):
         stock_lay.addWidget(self._field_label("Field (compared against Close)"))
         field_row = QHBoxLayout()
         self._emv_field_combo = QComboBox()
-        for code in hfs.available_fields():
+        for code in hfs.available_fields(include_gap_dates=False):
             self._emv_field_combo.addItem(code, code)
         self._emv_field_combo.setEditable(False)
         idx = self._emv_field_combo.findData("DT")
@@ -795,7 +795,7 @@ class ReportsScreen(QWidget):
         self._emv_extra_fields: list = []
         add_row = QHBoxLayout()
         self._emv_extra_combo = QComboBox()
-        for code in hfs.available_fields():
+        for code in hfs.available_fields(include_gap_dates=False):
             self._emv_extra_combo.addItem(code, code)
         add_row.addWidget(self._emv_extra_combo, 1)
         add_extra_btn = QPushButton("Add")
@@ -1113,7 +1113,7 @@ class ReportsScreen(QWidget):
         self._sector_pair_to = QComboBox()
         for combo in (self._sector_pair_from, self._sector_pair_to):
             combo.setEditable(True)
-            for code in hfs.available_fields():
+            for code in hfs.available_fields(include_gap_dates=False):
                 combo.addItem(code)
         self._sector_pair_from.setCurrentText("MT")
         self._sector_pair_to.setCurrentText("CLOSE")

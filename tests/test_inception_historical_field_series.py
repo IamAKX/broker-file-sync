@@ -133,3 +133,29 @@ def test_synced_field_trend_reads_each_bars_own_synced_value():
     inception_bars_store.upsert_bars([dict(r, patp=100.0 + i) for i, r in enumerate(rows)])
     series = hfs.historical_field_series("ABB", "PATP", date(2026, 1, 1), date(2026, 1, 12))
     assert [e["value"] for e in series] == [100.0 + i for i in range(len(series))]
+
+
+def test_gap_sub_fields_are_offered_and_resolve_per_day():
+    """#88: "<gap code> LOW/HIGH/DATE" are selectable and carry the gap's
+    bounds / opening date through historical_field_series."""
+    fields = hfs.available_fields()
+    for name in ("DAY FD GUP 1 LOW", "DAY FD GUP 1 HIGH", "DAY FD GUP 1 DATE", "WEEK UF GDN 3 HIGH"):
+        assert name in fields
+    # a date can't be charted, so the plotted-field lists leave DATE out
+    plotted = hfs.available_fields(include_gap_dates=False)
+    assert "DAY FD GUP 1 LOW" in plotted and "DAY FD GUP 1 DATE" not in plotted
+
+    d1, d2, d3 = date(2025, 2, 3), date(2025, 2, 4), date(2025, 2, 5)
+    inception_bars_store.upsert_bars([
+        {"symbol": "GAPPY", "trade_date": d1, "open": 99, "high": 101, "low": 98, "close": 100, "volume": 1},
+        {"symbol": "GAPPY", "trade_date": d2, "open": 106, "high": 108, "low": 105, "close": 106, "volume": 1},
+        {"symbol": "GAPPY", "trade_date": d3, "open": 107, "high": 109, "low": 98, "close": 99, "volume": 1},
+    ])
+    by_field = {
+        f: {e["date"]: e["value"] for e in hfs.historical_field_series("GAPPY", f, d1, d3)}
+        for f in ("DAY FD GUP 1", "DAY FD GUP 1 LOW", "DAY FD GUP 1 HIGH", "DAY FD GUP 1 DATE")
+    }
+    assert by_field["DAY FD GUP 1 LOW"][d3] == 100
+    assert by_field["DAY FD GUP 1 HIGH"][d3] == 106
+    assert by_field["DAY FD GUP 1"][d3] == 106            # bare code = HIGH alias
+    assert by_field["DAY FD GUP 1 DATE"][d3] == d2.isoformat()

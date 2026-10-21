@@ -39,10 +39,11 @@ def _canonical_field(field: str) -> str:
 
 def _derived_codes() -> set:
     from services import inception_columns
-    return set(inception_columns.GROUP_A) | set(inception_columns.GROUP_B)
+    return (set(inception_columns.GROUP_A) | set(inception_columns.GROUP_B)
+            | set(inception_columns.gap_sub_fields()))
 
 
-def available_fields(include_strategy_columns: bool = True) -> list:
+def available_fields(include_strategy_columns: bool = True, include_gap_dates: bool = True) -> list:
     """Every field code this module can build a trend for: the raw OHLCV
     fields, every services.formula_engine.FORMULA_CODES code (Day/Week/Month
     Top-Bottom, Camarilla pivots, pivot points, ...), the synced Reliable
@@ -58,6 +59,9 @@ def available_fields(include_strategy_columns: bool = True) -> list:
     codes = list(_RAW_FIELDS.keys()) + list(formula_engine.FORMULA_CODES)
     codes += list(ifbc._LMV_SYNCED_CODE_MAP) + ["Avg Rate"] + list(ifbc._LMV_SYNCED_NEW_FIELD_MAP)
     codes += inception_columns.all_derived_codes()
+    # Each gap area's LOW/HIGH bounds (+ the date it opened, unless the caller
+    # plots the field — a date can't be charted).
+    codes += inception_columns.gap_sub_fields(include_dates=include_gap_dates)
     try:
         codes += indicator_library.field_codes()
     except Exception:

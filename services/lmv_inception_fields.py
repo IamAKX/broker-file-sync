@@ -70,11 +70,20 @@ _GROUP_A_FIELDS = [
     "CFYH", "CFYO", "CFYL", "PFYH", "PFYO", "PFYL", "PFYC",
 ]
 
-FIELD_CODES: list[str] = _GROUP_A_FIELDS + list(inception_columns.GROUP_B)
+# Every gap area is offered as the bare code (its HIGH alias) AND its explicit
+# LOW / HIGH / DATE sub-fields (#88) — a gap is a price range plus the date it
+# opened, not one number.
+_FIELDS_SCHEMA = "gap-subfields-v1"
+
+FIELD_CODES: list[str] = _GROUP_A_FIELDS + [
+    name
+    for code in inception_columns.GROUP_B
+    for name in (code, *inception_columns.gap_metric_names(code))
+]
 
 # Fail loud at import if a code ever drifts out of the shared catalogue —
 # these MUST stay in lockstep with what inception_compute_service produces.
-_CATALOGUE_CODES = set(inception_columns.all_derived_codes())
+_CATALOGUE_CODES = set(inception_columns.all_derived_codes()) | set(inception_columns.gap_sub_fields())
 _missing = [c for c in FIELD_CODES if c not in _CATALOGUE_CODES]
 assert not _missing, f"lmv_inception_fields: unknown Inception codes {_missing}"
 
@@ -93,6 +102,10 @@ _loaded = False
 
 
 def _description(code: str) -> str:
+    parent = inception_columns.gap_parent(code)
+    if parent is not None:
+        part = {"LOW": "lower bound", "HIGH": "upper bound", "DATE": "date it opened"}[code.rsplit(" ", 1)[1]]
+        return f"{inception_columns.GROUP_B[parent]} — {part} of the gap area"
     return (inception_columns.GROUP_A.get(code)
             or inception_columns.GROUP_B.get(code)
             or f"Inception historical field ({code})")
@@ -204,6 +217,7 @@ def _fingerprint() -> str:
         settings["gap_threshold_pct"],
         settings["week_window_days"],
         settings["fifo_cap"],
+        _FIELDS_SCHEMA,   # a new/changed field list must not reuse an older cache file
     ))
 
 
