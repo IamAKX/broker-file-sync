@@ -221,3 +221,26 @@ def test_column_name_sources_cover_formula_strategy_and_inception_columns(monkey
     assert {"RSC", "PDTO", "Floor_10D", "Trigger"} <= set(lmv)
     inception = config_editor._all_inception_column_names()
     assert inception[:2] == ["Sector", "Symbol"] and "52WH" in inception and len(inception) > 100
+
+
+def test_main_column_order_lists_row_filter_streak_columns_of_every_strategy(monkeypatch):
+    """#85: "<strategy> — Days True" / "— Since" show in LMV but were missing here."""
+    from screens import config_editor
+    from services import formula_tokens, strategy_store
+    from services.strategy_engine import apply_strategies
+    monkeypatch.setattr(formula_tokens, "all_field_codes", lambda: [])
+    filtered = {"id": "a", "name": "TOPBOTTOM CALLOI STRONG BUY NEAR PHIGH", "active": True,
+                "columns": [{"name": "Col", "formula": [{"type": "col", "value": "X"}], "fmt_rules": []}],
+                "row_filter": [{"type": "col", "value": "X"}, {"type": "op", "value": ">"}, {"type": "num", "value": "1"}]}
+    unfiltered = {"id": "b", "name": "Plain", "active": True, "columns": [{"name": "Other"}], "row_filter": []}
+    monkeypatch.setattr(strategy_store, "load_all", lambda: [filtered, unfiltered])
+
+    names = config_editor._all_lmv_column_names()
+
+    assert "TOPBOTTOM CALLOI STRONG BUY NEAR PHIGH — Days True" in names
+    assert "TOPBOTTOM CALLOI STRONG BUY NEAR PHIGH — Since" in names
+    assert not any(n.startswith("Plain —") for n in names)       # no filter -> no streak columns
+    # ...and these are exactly the names the LMV grid uses
+    headers, _ = apply_strategies([filtered], ["X"], [[5]], day_history={})
+    assert headers[-2:] == ["TOPBOTTOM CALLOI STRONG BUY NEAR PHIGH — Days True",
+                            "TOPBOTTOM CALLOI STRONG BUY NEAR PHIGH — Since"]

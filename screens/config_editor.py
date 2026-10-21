@@ -50,10 +50,14 @@ def _all_lmv_column_names() -> list:
     Formula Builder fields, then each strategy's own columns."""
     from config_defaults import MAIN_COLUMN_ORDER_DATA
     from services import formula_tokens, strategy_store
+    from services.strategy_engine import streak_column_names
     names = [row[0] for row in MAIN_COLUMN_ORDER_DATA]
     names += formula_tokens.all_field_codes()
     for strategy in strategy_store.load_all():
         names += [c.get("name") for c in strategy.get("columns", [])]
+        # A row-filtered strategy also adds "<name> — Days True" / "— Since"
+        # to the LMV grid; they must be orderable here too (#85).
+        names += streak_column_names(strategy)
     return names
 
 

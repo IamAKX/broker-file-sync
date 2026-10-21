@@ -1068,6 +1068,15 @@ def scan_day_funcs(tokens: list) -> list:
 
 
 # ── Row-filter streak ("Days True" / "Since") ────────────────────────────────
+
+def streak_column_names(strategy: dict) -> list:
+    """The two LMV columns apply_strategies appends for a strategy with a row
+    filter: "<name> — Days True" and "<name> — Since" ([] without a filter)."""
+    if not strategy.get("row_filter"):
+        return []
+    name = strategy.get("name", "Strategy")
+    return [f"{name} — Days True", f"{name} — Since"]
+
 # See the module docstring's own "Row-filter streak" section.
 
 STREAK_LOOKBACK_DAYS = 60
@@ -1445,9 +1454,7 @@ def apply_strategies(strategies: list, headers: list, data: list[list],
         for col in strat.get("columns", []):
             extra_headers.append(col["name"])
         if include_streak_columns and strat.get("row_filter"):
-            name = strat.get("name", "Strategy")
-            extra_headers.append(f"{name} — Days True")
-            extra_headers.append(f"{name} — Since")
+            extra_headers.extend(streak_column_names(strat))
 
     new_headers = list(headers) + extra_headers
 
