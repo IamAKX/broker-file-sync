@@ -1923,3 +1923,26 @@ def test_delete_strategy_restores_local_copy_on_failure(screen, monkeypatch):
     assert len(screen._strategies) == 1
     assert screen._strategies[0]["id"] == strat["id"]
     assert len(popup) == 1
+
+
+def test_emv_row_filter_clear_button_resets_to_all_rows(qapp):
+    """#97: the EMV (Inception) builder has the same Row Filter > Clear."""
+    from screens.inception_strategy_builder import _InceptionStrategyEditor
+    s = {
+        "id": "x", "name": "T", "category": "Daily",
+        "row_filter": [
+            {"type": "col", "value": "Current"},
+            {"type": "op", "value": ">"},
+            {"type": "col", "value": "52WH"},
+        ],
+        "columns": [],
+    }
+    editor = _InceptionStrategyEditor(s, ["Current", "52WH"], None)
+    assert editor._filter_clear_btn.isEnabled() is True
+
+    editor._clear_filter()
+
+    assert editor._strategy["row_filter"] == []
+    assert editor._filter_clear_btn.isEnabled() is False
+    assert "all rows" in editor._filter_preview.text()
+    editor._clear_filter()  # idempotent

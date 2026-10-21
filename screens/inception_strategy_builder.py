@@ -634,18 +634,25 @@ class _InceptionStrategyEditor(QWidget):
         filter_info.setStyleSheet(f"color:{txts};")
         filter_edit_btn = _btn("Edit Filter…", outlined=True, theme=t, small=True)
         filter_edit_btn.clicked.connect(self._open_filter_editor)
+        # One-click "include all rows" (#97), same as the LMV builder. Staged
+        # on the in-memory copy; persisted when the strategy is saved.
+        self._filter_clear_btn = _btn("Clear", danger=True, theme=t, small=True)
+        self._filter_clear_btn.clicked.connect(self._clear_filter)
         filter_hdr.addWidget(filter_title)
         filter_hdr.addSpacing(8)
         filter_hdr.addWidget(filter_info)
         filter_hdr.addStretch()
+        filter_hdr.addWidget(self._filter_clear_btn)
+        filter_hdr.addSpacing(6)
         filter_hdr.addWidget(filter_edit_btn)
         root.addLayout(filter_hdr)
 
-        self._filter_preview = QLabel(_tokens_to_display(self._strategy.get("row_filter", [])))
+        self._filter_preview = QLabel("")
         self._filter_preview.setFont(QFont("Menlo,Consolas,monospace", 9))
         self._filter_preview.setStyleSheet(f"color:{_t(t,'accent')};background:transparent;border:none;padding:2px 4px;")
         self._filter_preview.setWordWrap(True)
         root.addWidget(self._filter_preview)
+        self._refresh_filter_preview()
 
         root.addWidget(_sep(t))
 
@@ -787,7 +794,21 @@ class _InceptionStrategyEditor(QWidget):
         )
         if tokens is not None:
             self._strategy["row_filter"] = tokens
-            self._filter_preview.setText(_tokens_to_display(self._strategy["row_filter"]))
+            self._refresh_filter_preview()
+
+    def _clear_filter(self):
+        """Row Filter > Clear: back to "include all rows" (staged until save)."""
+        if not self._strategy.get("row_filter"):
+            return
+        self._strategy["row_filter"] = []
+        self._refresh_filter_preview()
+
+    def _refresh_filter_preview(self):
+        tokens = self._strategy.get("row_filter", [])
+        self._filter_preview.setText(
+            _tokens_to_display(tokens) if tokens else "(no filter — all rows shown)"
+        )
+        self._filter_clear_btn.setEnabled(bool(tokens))
 
     def _refresh_category_items(self, select: str | None = None):
         target = select if select is not None else self._last_valid_category
