@@ -89,6 +89,7 @@ from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
 from services import formula_engine, inception_bars_store, inception_columns, indicator_library
 from services import inception_strategy_store as store
+from services import inception_backtest_config as bt_store
 from services import inception_formula_variable_store as var_store
 from screens.strategy_builder import (
     StrategyCard, _CategorySection, _AddCategoryDialog,
@@ -542,6 +543,76 @@ def _colorbutton(color: str):
 
 # ── strategy editor (right panel) ────────────────────────────────────────────
 
+class _BacktestMetricDialog(QDialog):
+    """One informational back-test metric: a name and a value formula,
+    evaluated on each trade's entry day and shown in the Back-test report."""
+
+    def __init__(self, metric: dict, fields: list, theme=None, parent=None, sample_rows: list = None,
+                 extra_row_values: dict = None):
+        super().__init__(parent)
+        self._metric = copy.deepcopy(metric)
+        self._fields = fields
+        self._theme = theme
+        self._sample_rows = sample_rows
+        self._extra_row_values = dict(extra_row_values or {})
+        self.setWindowTitle("Informational metric")
+        self.resize(560, 220)
+        _apply_dialog_bg(self, theme)
+        t = theme
+        root = QVBoxLayout(self)
+        root.setSpacing(14)
+        root.setContentsMargins(20, 20, 20, 20)
+        name_row = QHBoxLayout()
+        lbl = QLabel("Metric name:")
+        lbl.setFixedWidth(110)
+        self._name_edit = QLineEdit(self._metric.get("name", ""))
+        self._name_edit.setFixedHeight(34)
+        name_row.addWidget(lbl)
+        name_row.addWidget(self._name_edit)
+        root.addLayout(name_row)
+        formula_row = QHBoxLayout()
+        flbl = QLabel("Formula (value):")
+        flbl.setFixedWidth(110)
+        self._preview = QLabel(_tokens_to_display(self._metric.get("formula", [])) or "—")
+        self._preview.setFont(QFont("Menlo,Consolas,monospace", 9))
+        self._preview.setStyleSheet(f"color:{_t(t, 'accent')};background:transparent;border:none;")
+        self._preview.setWordWrap(True)
+        edit_btn = _btn("Edit Formula…", outlined=True, theme=t, small=True)
+        edit_btn.clicked.connect(self._edit_formula)
+        formula_row.addWidget(flbl)
+        formula_row.addWidget(self._preview, 1)
+        formula_row.addWidget(edit_btn)
+        root.addLayout(formula_row)
+        root.addStretch()
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        ok = _btn("OK", accent=True, theme=t)
+        ok.clicked.connect(self._accept)
+        buttons.addWidget(cancel)
+        buttons.addWidget(ok)
+        root.addLayout(buttons)
+
+    def _edit_formula(self):
+        tokens = _open_expression_editor(
+            list(self._metric.get("formula", [])), self._fields, self._theme, "value", parent=self,
+            sample_rows=self._sample_rows, extra_row_values=self._extra_row_values)
+        if tokens is not None:
+            self._metric["formula"] = tokens
+            self._preview.setText(_tokens_to_display(tokens) or "—")
+
+    def _accept(self):
+        if not self._name_edit.text().strip():
+            QMessageBox.warning(self, "Name Required", "Give the metric a name.")
+            return
+        self._metric["name"] = self._name_edit.text().strip()
+        self.accept()
+
+    def result_metric(self) -> dict:
+        return copy.deepcopy(self._metric)
+
+
 class _InceptionStrategyEditor(QWidget):
     saved = Signal(dict)
 
@@ -552,6 +623,11 @@ class _InceptionStrategyEditor(QWidget):
         self._theme = theme
         self._sample_rows = sample_rows
         self._last_valid_category = self._strategy.get("category", "Daily")
+        # Back-test rules (#83): direction, entry / exit condition, informational
+        # metrics — kept apart from the strategy (own store, see
+        # services.inception_backtest_config) and written on Save.
+        self._bt = (bt_store.load_config(self._strategy["id"]) if self._strategy.get("id")
+                    else bt_store.new_config())
         self._build()
 
     def _field_names(self) -> list:
@@ -655,6 +731,8 @@ class _InceptionStrategyEditor(QWidget):
         self._refresh_filter_preview()
 
         root.addWidget(_sep(t))
+        self._build_backtest_section(root, t, txts)
+        root.addWidget(_sep(t))
 
         col_hdr = QHBoxLayout()
         col_title = QLabel("Columns")
@@ -689,6 +767,143 @@ class _InceptionStrategyEditor(QWidget):
         outer.addWidget(footer)
 
         self._refresh_columns()
+
+    # ── Back-test rules (#83) ────────────────────────────────────────────────
+
+    def _build_backtest_section(self, root, t, txts):
+        hdr = QHBoxLayout()
+        title = QLabel("Back-test")
+        title.setFont(font_scale.font(font_scale.MEDIUM, True))
+        info = QLabel("(optional — the entry / exit rules the EMV Strategy Back-test report uses)")
+        info.setFont(font_scale.font(font_scale.SMALL, False))
+        info.setStyleSheet(f"color:{txts};")
+        hdr.addWidget(title)
+        hdr.addSpacing(8)
+        hdr.addWidget(info)
+        hdr.addStretch()
+        root.addLayout(hdr)
+
+        dir_row = QHBoxLayout()
+        dir_lbl = QLabel("Direction:")
+        dir_lbl.setFixedWidth(130)
+        self._bt_direction = QComboBox()
+        self._bt_direction.addItem("Buy (profit when price rises)", bt_store.DIRECTION_BUY)
+        self._bt_direction.addItem("Sell (profit when price falls)", bt_store.DIRECTION_SELL)
+        self._bt_direction.setCurrentIndex(max(self._bt_direction.findData(self._bt["direction"]), 0))
+        self._bt_direction.setFixedHeight(34)
+        dir_row.addWidget(dir_lbl)
+        dir_row.addWidget(self._bt_direction, 1)
+        root.addLayout(dir_row)
+
+        self._bt_previews = {}
+        for key, label, hint in (
+            ("entry_condition", "Entry condition", "trade opens at the close when this is true (blank = the Row Filter)"),
+            ("exit_condition", "Exit condition", "trade closes at the close when this is true (blank = when the entry stops holding)"),
+        ):
+            row = QHBoxLayout()
+            lbl = QLabel(f"{label}:")
+            lbl.setFont(font_scale.font(font_scale.SMALL, True))
+            lbl.setFixedWidth(130)
+            preview = QLabel("")
+            preview.setFont(QFont("Menlo,Consolas,monospace", 9))
+            preview.setStyleSheet(f"color:{_t(t, 'accent')};background:transparent;border:none;padding:2px 4px;")
+            preview.setWordWrap(True)
+            preview.setToolTip(hint)
+            self._bt_previews[key] = preview
+            edit = _btn("Edit…", outlined=True, theme=t, small=True)
+            edit.clicked.connect(lambda _=False, k=key: self._edit_bt_condition(k))
+            clear = _btn("Clear", danger=True, theme=t, small=True)
+            clear.clicked.connect(lambda _=False, k=key: self._clear_bt_condition(k))
+            row.addWidget(lbl)
+            row.addWidget(preview, 1)
+            row.addWidget(clear)
+            row.addWidget(edit)
+            root.addLayout(row)
+            hint_lbl = QLabel(hint)
+            hint_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+            hint_lbl.setStyleSheet(f"color:{txts};")
+            root.addWidget(hint_lbl)
+        self._refresh_bt_previews()
+
+        metrics_hdr = QHBoxLayout()
+        metrics_title = QLabel("Informational metrics")
+        metrics_title.setFont(font_scale.font(font_scale.SMALL, True))
+        add_metric = _btn("+ Add Metric", outlined=True, theme=t, small=True)
+        add_metric.clicked.connect(self._add_bt_metric)
+        metrics_hdr.addWidget(metrics_title)
+        metrics_hdr.addWidget(QLabel("(shown next to each back-tested trade, evaluated on its entry day)"))
+        metrics_hdr.addStretch()
+        metrics_hdr.addWidget(add_metric)
+        root.addLayout(metrics_hdr)
+        self._bt_metrics_box = QVBoxLayout()
+        self._bt_metrics_box.setSpacing(4)
+        root.addLayout(self._bt_metrics_box)
+        self._refresh_bt_metrics()
+
+    def _refresh_bt_previews(self):
+        for key, preview in self._bt_previews.items():
+            tokens = self._bt.get(key) or []
+            preview.setText(_tokens_to_display(tokens) if tokens else "(not set)")
+
+    def _edit_bt_condition(self, key: str):
+        tokens = _open_expression_editor(
+            list(self._bt.get(key) or []), self._field_names(), self._theme, "condition", parent=self,
+            sample_rows=self._sample_rows, extra_row_values=self._extra_column_values())
+        if tokens is not None:
+            self._bt[key] = tokens
+            self._refresh_bt_previews()
+
+    def _clear_bt_condition(self, key: str):
+        self._bt[key] = []
+        self._refresh_bt_previews()
+
+    def _refresh_bt_metrics(self):
+        t = self._theme
+        while self._bt_metrics_box.count():
+            item = self._bt_metrics_box.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        for idx, metric in enumerate(self._bt["metrics"]):
+            frame = QFrame()
+            lay = QHBoxLayout(frame)
+            lay.setContentsMargins(0, 0, 0, 0)
+            name = QLabel(metric["name"])
+            name.setFont(font_scale.font(font_scale.SMALL, True))
+            name.setFixedWidth(160)
+            formula = QLabel(_tokens_to_display(metric.get("formula") or []) or "—")
+            formula.setFont(QFont("Menlo,Consolas,monospace", 9))
+            formula.setStyleSheet(f"color:{_t(t, 'accent')};background:transparent;border:none;")
+            formula.setWordWrap(True)
+            edit = _btn("Edit", outlined=True, theme=t, small=True)
+            edit.clicked.connect(lambda _=False, i=idx: self._edit_bt_metric(i))
+            delete = _btn("Delete", danger=True, theme=t, small=True)
+            delete.clicked.connect(lambda _=False, i=idx: self._delete_bt_metric(i))
+            lay.addWidget(name)
+            lay.addWidget(formula, 1)
+            lay.addWidget(edit)
+            lay.addWidget(delete)
+            self._bt_metrics_box.addWidget(frame)
+
+    def _metric_dialog(self, metric: dict) -> dict | None:
+        dlg = _BacktestMetricDialog(metric, self._field_names(), self._theme, parent=self,
+                                    sample_rows=self._sample_rows, extra_row_values=self._extra_column_values())
+        return dlg.result_metric() if dlg.exec() == QDialog.DialogCode.Accepted else None
+
+    def _add_bt_metric(self):
+        metric = self._metric_dialog(bt_store.new_metric(f"Metric{len(self._bt['metrics']) + 1}"))
+        if metric is not None:
+            self._bt["metrics"].append(metric)
+            self._refresh_bt_metrics()
+
+    def _edit_bt_metric(self, idx: int):
+        metric = self._metric_dialog(self._bt["metrics"][idx])
+        if metric is not None:
+            self._bt["metrics"][idx] = metric
+            self._refresh_bt_metrics()
+
+    def _delete_bt_metric(self, idx: int):
+        del self._bt["metrics"][idx]
+        self._refresh_bt_metrics()
 
     def _add_column(self):
         col = store.new_column(f"Col{len(self._strategy['columns']) + 1}")
@@ -841,6 +1056,9 @@ class _InceptionStrategyEditor(QWidget):
     def _save(self):
         self._strategy["name"] = self._name_edit.text().strip() or "Untitled"
         self._strategy["category"] = self._category_combo.currentText()
+        self._bt["direction"] = self._bt_direction.currentData()
+        if self._strategy.get("id"):
+            bt_store.save_config(self._strategy["id"], self._bt)
         self.saved.emit(copy.deepcopy(self._strategy))
 
 
@@ -1256,6 +1474,8 @@ class InceptionStrategyBuilderScreen(QWidget):
         except (ApiError, NetworkError) as exc:
             show_api_error(t, self, exc)
             return
+        if strategy.get("id") and bt_store.has_rules(strategy["id"]):
+            bt_store.save_config(cloned["id"], bt_store.load_config(strategy["id"]))   # the copy keeps the back-test rules
         self._strategies = store.load_all()
         self._refresh_list()
 
@@ -1273,6 +1493,7 @@ class InceptionStrategyBuilderScreen(QWidget):
         except (ApiError, NetworkError) as exc:
             show_api_error(t, self, exc)
             return
+        bt_store.delete_config(strategy_id)        # its back-test rules go with it
         self._strategies = store.load_all()
         self._refresh_list()
         if self._active_editor is not None and self._active_editor._strategy.get("id") == strategy_id:

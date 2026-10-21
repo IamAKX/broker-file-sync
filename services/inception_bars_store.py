@@ -135,6 +135,14 @@ def last_synced_date() -> date | None:
     return date.fromisoformat(row[0]) if row and row[0] else None
 
 
+def first_synced_date() -> date | None:
+    """The earliest trade_date across every symbol in the local store (None if
+    nothing's synced) — how far back a back-test can see."""
+    with _connect() as conn:
+        row = conn.execute("SELECT MIN(trade_date) FROM eod_bars").fetchone()
+    return date.fromisoformat(row[0]) if row and row[0] else None
+
+
 def latest_synced_date_on_or_before(as_of: date) -> date | None:
     """The latest trade_date <= as_of across every symbol — every synced
     instrument shares the same trading calendar, so this is a single

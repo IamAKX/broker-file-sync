@@ -1110,3 +1110,86 @@ def test_live_reports_are_not_anchored():
     report["subject_config"] = {"mode": "live", "metric": None, "primary_timeframe": "Daily"}
     html = reports._build_report_html(report, None, (["Sector", "Scrip Name", "% Change"], []))
     assert "Generated: 01-01-2020" not in html
+
+
+# ── #83: EMV Strategy Back-test subtype ─────────────────────────────────────
+
+def _bt_strategy(monkeypatch):
+    from services import inception_strategy_store
+    strategy = {"id": "e1", "name": "Breakout", "active": True, "category": "Daily", "columns": [], "row_filter": []}
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [strategy])
+    return strategy
+
+
+def test_emv_wizard_backtest_subtype_validates_saves_restores_and_generates(screen, qapp, monkeypatch):
+    from PySide6.QtCore import QDate
+    from services import inception_backtest_config as bt_cfg
+    from services import report_store
+
+    _bt_strategy(monkeypatch)
+    _seed_bars("ABB", date(2026, 1, 1), 40)                        # a steadily rising close
+    bt_cfg.save_config("e1", {"direction": "BUY",
+                              "entry_condition": [{"type": "col", "value": "CLOSE"}, {"type": "op", "value": ">"},
+                                                  {"type": "num", "value": "110"}],
+                              "exit_condition": [{"type": "col", "value": "CLOSE"}, {"type": "op", "value": ">"},
+                                                 {"type": "num", "value": "118"}], "metrics": []})
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    labels = [screen._emv_subtype_combo.itemText(i) for i in range(screen._emv_subtype_combo.count())]
+    assert any("Back-test" in label for label in labels)
+    screen._select_data(screen._emv_subtype_combo, "backtest")
+    assert not screen._emv_bt_frame.isHidden() and screen._emv_stock_frame.isHidden()
+    assert screen._emv_bt_amount.text() == "5000" and screen._emv_bt_stock_combo.isHidden()
+    assert "no entry / exit set" not in screen._emv_bt_strategy_combo.itemText(0)     # it has rules
+
+    warned = []
+    monkeypatch.setattr("PySide6.QtWidgets.QMessageBox.warning", staticmethod(lambda *a, **k: warned.append(a[1])))
+    screen._name_edit.setText("BT")
+    screen._emv_bt_amount.setText("1000")
+    screen._save_and_generate()
+    assert warned == ["Investment Amount"] and report_store.load_all() == []          # minimum ₹5,000
+
+    screen._emv_bt_amount.setText("7500")
+    screen._select_data(screen._emv_bt_scope_combo, "stock")
+    screen._save_and_generate()
+    assert warned[-1] == "Stock Required"
+
+    screen._emv_bt_stock_combo.setText("abb")
+    screen._emv_bt_from.setDate(QDate(2026, 1, 1))
+    screen._emv_bt_to.setDate(QDate(2026, 2, 27))
+    screen._save_and_generate()
+    qapp.processEvents()
+    saved = report_store.load_all()[0]
+    cfg = saved["subject_config"]
+    assert cfg["subtype"] == "backtest" and cfg["stock"] == "ABB" and cfg["investment_amount"] == 7500.0
+    assert cfg["from"] == "2026-01-01" and cfg["to"] == "2026-02-27"
+    html = screen._last_rendered_html
+    assert "EMV Strategy Back-test Report" in html and "Breakout — ABB" in html
+    assert "Sector Distribution" not in html and "Investment Simulation" in html and "₹7,500" in html
+
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    screen._prefill_fields(saved)
+    assert screen._emv_subtype_combo.currentData() == "backtest" and screen._emv_bt_scope_combo.currentData() == "stock"
+    assert screen._emv_bt_stock_combo.text() == "ABB" and screen._emv_bt_amount.text() == "7500"
+
+
+def test_emv_backtest_strategy_without_rules_is_flagged_in_the_picker(screen, monkeypatch):
+    from services import report_store
+    _bt_strategy(monkeypatch)
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    assert "no entry / exit set" in screen._emv_bt_strategy_combo.itemText(0)
+
+
+def test_emv_backtest_from_first_synced_day(monkeypatch):
+    from screens import reports
+    from services import emv_backtest, inception_bars_store, report_store
+    seen = {}
+    monkeypatch.setattr(emv_backtest, "backtest_result",
+                        lambda sid, d_from, d_to, amount, stock: seen.update(a=(d_from, d_to, amount, stock))
+                        or {"kind": "EMV", "name": "x", "symbol": stock, "date_from": d_from, "date_to": d_to,
+                            "trades": [], "notes": [], "method": "", "investment_amount": amount})
+    monkeypatch.setattr(inception_bars_store, "first_synced_date", lambda: date(2025, 6, 27))
+    report = report_store.new_report(report_store.REPORT_TYPE_EMV, "bt")
+    report["subject_config"] = {"subtype": "backtest", "strategy_id": "e1", "from": "2026-01-01", "to": "2026-03-01",
+                                "from_first_day": True, "investment_amount": 9000}
+    reports._build_report_html(report)
+    assert seen["a"] == (date(2025, 6, 27), date(2026, 3, 1), 9000, None)

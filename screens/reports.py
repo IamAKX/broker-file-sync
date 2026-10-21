@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 
+from services import backtest_report
 from screens.report_column_picker import ColumnPickerWidget
 from screens.report_indicator_picker import IndicatorPickerWidget
 from services import (
@@ -155,6 +156,17 @@ def _build_emv_html(report: dict, today: date | None = None) -> str:
     today = today or date.today()
     subject = report.get("subject_config", {})
     subtype = subject.get("subtype", "stock")
+
+    if subtype == "backtest":
+        from services import emv_backtest, inception_bars_store
+        date_to = date.fromisoformat(subject["to"]) if subject.get("to") else today
+        date_from = date.fromisoformat(subject["from"]) if subject.get("from") else date_to - timedelta(days=180)
+        if subject.get("from_first_day"):
+            date_from = inception_bars_store.first_synced_date() or date_from
+        result = emv_backtest.backtest_result(
+            subject.get("strategy_id"), date_from, date_to,
+            subject.get("investment_amount") or backtest_report.MIN_INVESTMENT, (subject.get("stock") or "").strip() or None)
+        return backtest_report.build_html(result, doc_title=report.get("name", "EMV Back-test Report"))
 
     if subtype == "trend":
         as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else today
@@ -718,6 +730,7 @@ class ReportsScreen(QWidget):
         self._emv_stock_frame.setVisible(subtype == "stock")
         self._emv_strategy_frame.setVisible(subtype == "strategy")
         self._emv_trend_frame.setVisible(subtype == "trend")
+        self._emv_bt_frame.setVisible(subtype == "backtest")
 
     @staticmethod
     def _emv_symbol_choices() -> list:
@@ -800,6 +813,7 @@ class ReportsScreen(QWidget):
         self._emv_subtype_combo.addItem("Stock — historical field trend", "stock")
         self._emv_subtype_combo.addItem("Strategy — qualifying stocks", "strategy")
         self._emv_subtype_combo.addItem("Trend category — stocks by classification", "trend")
+        self._emv_subtype_combo.addItem("Strategy Back-test — simulated entries and exits over past days", "backtest")
         self._emv_subtype_combo.currentIndexChanged.connect(self._on_emv_subtype_changed)
         layout.addWidget(self._emv_subtype_combo)
 
@@ -998,6 +1012,55 @@ class ReportsScreen(QWidget):
         trend_lay.addWidget(self._emv_trend_columns)
         layout.addWidget(self._emv_trend_frame)
         self._refresh_trend_category_choices()
+
+        # Strategy Back-test subtype (#83)
+        self._emv_bt_frame = QFrame()
+        bt_lay = QVBoxLayout(self._emv_bt_frame)
+        bt_lay.setContentsMargins(0, 0, 0, 0)
+        bt_lay.setSpacing(8)
+        bt_lay.addWidget(self._field_label(
+            "Strategy (its entry / exit conditions and direction come from Inception > Strategy Builder > Back-test)"))
+        self._emv_bt_strategy_combo = _make_searchable(QComboBox())
+        from services import inception_backtest_config
+        for s in inception_strategy_store.load_all():
+            label = f'{s.get("name", "")} ({s.get("category", "")})'
+            if not inception_backtest_config.has_rules(s.get("id")):
+                label += " — no entry / exit set"
+            self._emv_bt_strategy_combo.addItem(label, s.get("id"))
+        bt_lay.addWidget(self._emv_bt_strategy_combo)
+        bt_lay.addWidget(self._field_label("Report on"))
+        self._emv_bt_scope_combo = QComboBox()
+        self._emv_bt_scope_combo.addItem("The entire strategy (every stock)", "strategy")
+        self._emv_bt_scope_combo.addItem("One specific stock under the strategy", "stock")
+        self._emv_bt_scope_combo.currentIndexChanged.connect(self._on_emv_bt_scope_changed)
+        bt_lay.addWidget(self._emv_bt_scope_combo)
+        self._emv_bt_stock_combo = _SymbolCombo(self._emv_symbol_choices())
+        bt_lay.addWidget(self._emv_bt_stock_combo)
+        bt_lay.addWidget(self._field_label("Back-test period"))
+        self._emv_bt_first_day = QCheckBox("From the first synced day")
+        self._emv_bt_first_day.toggled.connect(self._on_emv_bt_scope_changed)
+        bt_lay.addWidget(self._emv_bt_first_day)
+        bt_range = QHBoxLayout()
+        self._emv_bt_from = QDateEdit()
+        self._emv_bt_to = QDateEdit()
+        for edit, default in ((self._emv_bt_from, QDate.currentDate().addMonths(-6)),
+                              (self._emv_bt_to, QDate.currentDate())):
+            edit.setCalendarPopup(True)
+            edit.setDisplayFormat("dd-MMM-yyyy")
+            edit.setDate(default)
+        bt_range.addWidget(QLabel("From:"))
+        bt_range.addWidget(self._emv_bt_from, 1)
+        bt_range.addWidget(QLabel("To:"))
+        bt_range.addWidget(self._emv_bt_to, 1)
+        bt_lay.addLayout(bt_range)
+        bt_lay.addWidget(self._field_label(
+            f"Investment simulation amount (₹, minimum {int(backtest_report.MIN_INVESTMENT):,})"))
+        self._emv_bt_amount = QLineEdit(str(int(backtest_report.MIN_INVESTMENT)))
+        bt_lay.addWidget(self._emv_bt_amount)
+        bt_lay.addWidget(self._field_label(
+            "The whole universe takes a while to simulate (a stock at a time) — pick one stock or a shorter period for a quick run."))
+        layout.addWidget(self._emv_bt_frame)
+        self._on_emv_bt_scope_changed()
         self._on_emv_subtype_changed()
 
         self._on_emv_subtype_changed()
@@ -1111,6 +1174,10 @@ class ReportsScreen(QWidget):
                 "No open or recent alerts found — this report needs at least one "
                 "Strategy Notifications signal to have fired."
             ))
+
+    def _on_emv_bt_scope_changed(self):
+        self._emv_bt_stock_combo.setVisible(self._emv_bt_scope_combo.currentData() == "stock")
+        self._emv_bt_from.setEnabled(not self._emv_bt_first_day.isChecked())
 
     def _on_emv_range_mode_changed(self):
         custom = self._emv_range_mode.currentData() == "custom"
@@ -1351,7 +1418,17 @@ class ReportsScreen(QWidget):
         elif rtype == report_store.REPORT_TYPE_EMV:
             subtype = cfg.get("subtype", "stock")
             self._select_data(self._emv_subtype_combo, subtype)
-            if subtype == "trend":
+            if subtype == "backtest":
+                self._select_data(self._emv_bt_strategy_combo, cfg.get("strategy_id"))
+                self._select_data(self._emv_bt_scope_combo, "stock" if cfg.get("stock") else "strategy")
+                self._emv_bt_stock_combo.setText(cfg.get("stock") or "")
+                self._emv_bt_first_day.setChecked(bool(cfg.get("from_first_day")))
+                for edit, key in ((self._emv_bt_from, "from"), (self._emv_bt_to, "to")):
+                    d = QDate.fromString(str(cfg.get(key) or ""), Qt.DateFormat.ISODate)
+                    if d.isValid():
+                        edit.setDate(d)
+                self._emv_bt_amount.setText(str(int(cfg.get("investment_amount") or backtest_report.MIN_INVESTMENT)))
+            elif subtype == "trend":
                 self._select_data(self._emv_trend_category, cfg.get("category_id"))
                 self._select_data(self._emv_trend_timeframe, cfg.get("timeframe", "Daily"))
                 d = QDate.fromString(str(cfg.get("as_of_date") or ""), Qt.DateFormat.ISODate)
@@ -1477,7 +1554,36 @@ class ReportsScreen(QWidget):
             self._active_report["columns"] = self._lmv_column_picker.columns()
         elif self._active_report["type"] == report_store.REPORT_TYPE_EMV:
             subtype = self._emv_subtype_combo.currentData()
-            if subtype == "trend":
+            if subtype == "backtest":
+                if self._emv_bt_strategy_combo.count() == 0:
+                    QMessageBox.warning(self, "No Strategies", "Create an Inception strategy in Strategy Builder first.")
+                    return
+                stock = None
+                if self._emv_bt_scope_combo.currentData() == "stock":
+                    stock = self._emv_bt_stock_combo.text().strip().upper()
+                    if not stock:
+                        QMessageBox.warning(self, "Stock Required", "Enter or pick the stock to report on.")
+                        return
+                amount = _parse_float(self._emv_bt_amount.text(), backtest_report.MIN_INVESTMENT)
+                if amount < backtest_report.MIN_INVESTMENT:
+                    QMessageBox.warning(
+                        self, "Investment Amount",
+                        f"The investment simulation needs at least ₹{int(backtest_report.MIN_INVESTMENT):,}.")
+                    return
+                lo, hi = self._emv_bt_from.date().toPython(), self._emv_bt_to.date().toPython()
+                if lo > hi and not self._emv_bt_first_day.isChecked():
+                    QMessageBox.warning(self, "Period", "The From date is after the To date.")
+                    return
+                self._active_report["subject_config"] = {
+                    "subtype": "backtest",
+                    "strategy_id": self._emv_bt_strategy_combo.currentData(),
+                    "stock": stock,
+                    "from": lo.isoformat(), "to": hi.isoformat(),
+                    "from_first_day": self._emv_bt_first_day.isChecked(),
+                    "investment_amount": amount,
+                }
+                self._active_report["columns"] = []
+            elif subtype == "trend":
                 self._active_report["subject_config"] = {
                     "subtype": "trend",
                     "category_id": self._emv_trend_category.currentData(),
