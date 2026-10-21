@@ -1,3 +1,4 @@
+import pytest
 """Tests for services/inception_day_history.py — pure logic, no Qt/DB."""
 from datetime import date, timedelta
 from unittest.mock import patch
@@ -691,3 +692,29 @@ def test_strategy_column_history_blank_when_not_enough_bars():
 
 def test_strategy_column_specs_empty_for_raw_only_strategies():
     assert idh.strategy_column_specs([_strategy([tok_days("AVG_DAYS", "CLOSE", 5)])]) == []
+
+
+def test_strategy_column_history_resolves_col_of_another_symbol(monkeypatch):
+    """Issue #104: RSC = [CLOSE]/[CLOSE of NIFTY], then VALUE_DAYS_AGO(RSC, 1)
+    read blank because the historic evaluation never saw NIFTY."""
+    stock = _bars([100, 102, 104, 108, 110])
+    nifty = _bars([200, 200, 205, 205, 210])
+    monkeypatch.setattr(idh, "_bars_of_symbol", lambda sym, date_to: nifty)
+    rsc = [_col("CLOSE"), _op("/"), {"type": "col", "value": "CLOSE", "of": "NIFTY"}, _op("*"), _num("100")]
+    strat = {"id": "s", "name": "RSC", "active": True, "columns": [
+        {"name": "RSC", "formula": rsc},
+        {"name": "RSC PREV", "formula": [tok_days("VALUE_DAYS_AGO", "RSC", 1)]}]}
+    specs = idh.strategy_column_specs([strat])
+    out = idh.resolve_strategy_columns(specs, "ABC", stock)
+    (key, entry), = out.items()
+    assert entry["ABC"]["First"] == pytest.approx(108 / 205 * 100)      # yesterday's RSC
+
+
+def test_derived_day_specs_skip_the_strategys_own_columns():
+    """The strategy's own column is resolve_strategy_columns' job — resolving it
+    as a Group A/B code too read None and overwrote the real value."""
+    strat = {"id": "s", "name": "S", "active": True, "columns": [
+        {"name": "RSC", "formula": [_col("CLOSE")]},
+        {"name": "RSC PREV", "formula": [tok_days("VALUE_DAYS_AGO", "RSC", 1)]},
+        {"name": "X", "formula": [tok_days("VALUE_DAYS_AGO", "52WH", 1)]}]}
+    assert idh.derived_day_specs([strat]) == [("First", "52WH", 2)]

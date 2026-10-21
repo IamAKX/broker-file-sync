@@ -52,6 +52,7 @@ compute_day_history).
 import math
 from datetime import date, timedelta
 
+from services.formula_engine import FORMULA_CODES
 from services.inception_columns import RAW_FIELDS
 from services.strategy_engine import (
     VALUE_BEFORE_CHANGE_DAILY_TAG, VALUE_BEFORE_CHANGE_N_TAG,
@@ -318,12 +319,18 @@ def derived_day_specs(strategies: list) -> list:
     seen: set = set()
     out = []
     for strat in strategies:
+        own = {c.get("name") for c in strat.get("columns", [])}
         for col in strat.get("columns", []):
             compiled = get_compiled(col.get("formula", []))
             if compiled is None:
                 continue
             for _, agg_key, col_name, window in compiled.day_specs:
                 if col_name in RAW_FIELDS or agg_key != "First":
+                    continue
+                if col_name in own:
+                    # one of the strategy's OWN columns — resolve_strategy_columns'
+                    # job; resolving it here as a Group A/B/Formula Builder code
+                    # read None and overwrote that value (issue #104: RSC PREV DAY)
                     continue
                 if isinstance(window, tuple) and window and window[0] in _VALUE_BEFORE_CHANGE_TAGS:
                     continue
@@ -715,6 +722,43 @@ def strategy_column_specs(strategies: list, variable_store=None) -> list:
     return out
 
 
+# Per (raw symbol, as-of date) bars of OTHER symbols ("[CLOSE of NIFTY]" in a
+# strategy column's history, issue #104) and the Formula Builder values at a
+# historic bar — shared by every stock of a load, so NIFTY is fetched and
+# computed once rather than once per stock.
+_other_bars_cache: dict = {}
+_fb_cache: dict = {}
+_FB_WINDOW = 300     # bars handed to compute_for_bars for one historic day (same as emv_report_data._recent_rows)
+
+
+def _bars_of_symbol(symbol: str, date_to) -> list:
+    key = (symbol.upper(), date_to)
+    if key not in _other_bars_cache:
+        from services import inception_bars_store
+        raw = symbol.strip().upper()
+        known = set(inception_bars_store.available_symbols())
+        raw = raw if raw in known else raw + "_I"
+        if len(_other_bars_cache) > 64:
+            _other_bars_cache.clear()
+        _other_bars_cache[key] = inception_bars_store.bars_for_symbol(raw, date_to=date_to)
+    return _other_bars_cache[key]
+
+
+def _fb_value(symbol_key: str, bars: list, i: int, code: str):
+    """Formula Builder column *code* as of bars[i]."""
+    from services import inception_formula_builder_columns
+    key = (symbol_key, bars[i]["trade_date"], code)
+    if key not in _fb_cache:
+        if len(_fb_cache) > 50000:
+            _fb_cache.clear()
+        values = inception_formula_builder_columns.compute_for_bars(
+            symbol_key, bars[max(0, i - _FB_WINDOW + 1): i + 1])
+        for c, v in values.items():
+            _fb_cache[(symbol_key, bars[i]["trade_date"], c)] = v
+        _fb_cache.setdefault(key, None)
+    return _fb_cache[key]
+
+
 def resolve_strategy_columns(specs: list, symbol: str, bars: list, variable_store=None) -> dict:
     """day_history chunk ({(col_name, window): {symbol: {agg_key: value}}},
     same shape build() returns) for *specs* (strategy_column_specs output),
@@ -733,6 +777,20 @@ def resolve_strategy_columns(specs: list, symbol: str, bars: list, variable_stor
         compiled = {name: get_compiled(f, variable_store) for name, f in cols.items()}
         memo: dict = {}
 
+        def other_value(of_sym, col_name, i):
+            """*col_name* of ANOTHER symbol on this stock's i-th bar date."""
+            other = _bars_of_symbol(str(of_sym), bars[-1]["trade_date"])
+            j = next((k for k in range(len(other) - 1, -1, -1)
+                      if other[k]["trade_date"] == bars[i]["trade_date"]), None)
+            if j is None:
+                return None
+            if col_name in RAW_FIELDS:
+                v = other[j].get(_BAR_KEY[col_name])
+                return v if isinstance(v, (int, float)) else None
+            if col_name in FORMULA_CODES:
+                return _fb_value(str(of_sym).strip().upper(), other, j, col_name)
+            return None
+
         def value_at(name, i):
             if i < 0 or i >= n:
                 return None
@@ -748,14 +806,22 @@ def resolve_strategy_columns(specs: list, symbol: str, bars: list, variable_stor
             memo[key] = None          # cycle guard: a self-reference reads None
             row = {_STRAT_SYM: _STRAT_SYM}
             for col_name in comp.col_vars:
-                row[col_name] = value_at(col_name, i) if (col_name in cols or col_name in RAW_FIELDS) else None
+                if col_name in cols or col_name in RAW_FIELDS:
+                    row[col_name] = value_at(col_name, i)
+                elif col_name in FORMULA_CODES:
+                    row[col_name] = _fb_value(symbol, bars, i, col_name)   # PMC, CML, ... at that day
+                else:
+                    row[col_name] = None
+            sym_idx = {}
+            for _, col_name, of_sym in comp.col_of_vars:
+                sym_idx.setdefault(str(of_sym).strip().upper(), {})[col_name] = other_value(of_sym, col_name, i)
             dh: dict = {}
             for _, agg_key, col_name, window in comp.day_specs:
                 dh.setdefault((col_name, window), {}).setdefault(_STRAT_SYM, {})[agg_key] = (
                     agg_value(agg_key, col_name, window, i))
             try:
                 val = evaluate_compiled(comp, row, [], day_history=dh,
-                                        sym_index={}, symbol_col=_STRAT_SYM)
+                                        sym_index=sym_idx, symbol_col=_STRAT_SYM)
             except Exception:
                 val = None
             memo[key] = val
