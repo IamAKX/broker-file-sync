@@ -233,8 +233,9 @@ def timeline_events(data: dict) -> list:
 
 def build_report_data(strategy_id: str, symbol: str, signal: dict | None = None,
                       indicator_ids: list | None = None, indicator_days: int = 60,
-                      compact_indicators: bool = False) -> dict:
-    """*signal* lets a caller that already holds the signal (Live Alerts'
+                      compact_indicators: bool = False, show_why: bool = True) -> dict:
+    """*show_why* False drops the "Why this signal triggered" section from the
+    card (#89) — the trigger clauses are not even evaluated then. *signal* lets a caller that already holds the signal (Live Alerts'
     backend-sourced row, or the strategy-wide report's own scan) bypass the
     local state_store lookup. *indicator_ids* (Indicator Library entries) adds
     "indicator_sections" — charts of those indicators on the stock's last
@@ -264,7 +265,8 @@ def build_report_data(strategy_id: str, symbol: str, signal: dict | None = None,
         "current_price": current_price,
         "status": status,
         "score": compute_score(signal, strategy_id),
-        "trigger": trigger_explanation(strategy_id),
+        "show_why": show_why,
+        "trigger": trigger_explanation(strategy_id) if show_why else [],
         "sr": support_resistance_data(symbol, direction, current_price),
         "elapsed": elapsed_label(signal.get("entry_time"), signal.get("resolved_at")),
         "metrics": signal.get("metrics", {}),
@@ -331,7 +333,8 @@ def _sort_key(card: dict):
 def build_strategy_report_data(strategy_id: str, include_stopped: bool = False,
                                include_cancelled: bool = False, include_achieved: bool = False,
                                new_since: datetime | None = None, refresh_minutes: int = 0,
-                               indicator_ids: list | None = None, indicator_days: int = 60) -> dict:
+                               indicator_ids: list | None = None, indicator_days: int = 60,
+                               show_why: bool = True) -> dict:
     """The whole-strategy report: one card per stock. *new_since* marks a
     signal "recently added" when it was entered after that time (the caller
     passes the previous generation time, so a refresh highlights exactly the
@@ -340,7 +343,7 @@ def build_strategy_report_data(strategy_id: str, include_stopped: bool = False,
     for signal in strategy_signals(strategy_id, include_stopped, include_cancelled, include_achieved):
         card = build_report_data(strategy_id, signal.get("symbol"), signal=signal,
                                  indicator_ids=indicator_ids, indicator_days=indicator_days,
-                                 compact_indicators=True)
+                                 compact_indicators=True, show_why=show_why)
         entered = _parse_dt(signal.get("entry_time"))
         card["is_new"] = bool(new_since and entered and entered > new_since)
         card["sector_name"] = (signal.get("sector") or "Unclassified")
@@ -514,10 +517,12 @@ def card_html(data: dict, generated_at: datetime | None = None, embed_indicators
         if price_chart else ""
     ) + _levels_note(data)
 
+    show_why = data.get("show_why", True)
     chips = "".join(
         f'<div class="fk-chip {"ok" if t["satisfied"] else "no"}">{"✓" if t["satisfied"] else "✕"} {templates.esc(t["label"])}</div>'
         for t in data["trigger"]
     ) or '<div class="fk-note">No trigger condition configured.</div>'
+    why_html = f'<div class="fk-h">Why this signal triggered</div><div class="fk-chips">{chips}</div>' if show_why else ""
 
     tl = "".join(
         f'<div class="fk-tl-item {e["kind"]}"><span class="t">{templates.esc(e["title"])}</span> '
@@ -558,13 +563,13 @@ def card_html(data: dict, generated_at: datetime | None = None, embed_indicators
         f'<div class="fk-kpis">{kpis}</div>'
         f'<div class="fk-cols"><div class="fk-col-main"><div class="fk-h">Price levels — '
         f'{"possible resistance" if direction == "BUY" else "possible support"}</div>{ladder}</div>'
-        f'<div class="fk-col-side"><div class="fk-h">Why this signal triggered</div><div class="fk-chips">{chips}</div>'
+        f'<div class="fk-col-side">{why_html}'
         f'<div class="fk-h">Signal timeline</div><div class="fk-tl">{tl}</div></div></div>'
         f'{chart_html}'
         f'<div class="fk-h" style="margin-top:8px">Target progress</div>{progress or "<div class=fk-note>No targets configured.</div>"}'
         f'{indicator_html}</div>'
     )
-    n_tl = len(data["timeline"]) + len(data["trigger"])
+    n_tl = len(data["timeline"]) + (len(data["trigger"]) if show_why else 0)
     height = (_CARD_BASE_PX + max(len(rows) * _LADDER_ROW_PX, n_tl * 20 + 30)
               + max(len([t for t in data["targets"] if t["value"] is not None]), 1) * _PROGRESS_ROW_PX
               + indicator_px + (_svg_height(price_chart) + 30 if price_chart else 0) + 26)

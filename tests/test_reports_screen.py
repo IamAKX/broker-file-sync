@@ -337,6 +337,7 @@ def test_fuku_live_wizard_saves_and_generates_for_an_open_signal(screen, qapp):
     saved = report_store.load_all()
     assert len(saved) == 1
     assert saved[0]["subject_config"] == {"strategy_id": "strat-1", "symbol": "INFY",
+                                          "show_why": True,
                                           "indicator_ids": [], "indicator_days": 60}
     assert screen._stack.currentWidget() is screen._preview_page
     assert "INFY" in screen._last_rendered_html
@@ -474,7 +475,7 @@ def test_fuku_strategy_scope_wizard_saves_options_and_starts_refresh_timer(scree
     assert cfg == {
         "scope": "strategy", "strategy_id": "strat-1", "include_stopped": False,
         "include_cancelled": True, "include_achieved": False, "refresh_minutes": 3,
-        "indicator_ids": [], "indicator_days": 60,
+        "show_why": True, "indicator_ids": [], "indicator_days": 60,
     }
     assert 'fk-sym">INFY<' in screen._last_rendered_html and 'fk-sym">TCS<' in screen._last_rendered_html
     assert screen._refresh_timer.isActive() and screen._refresh_timer.interval() == 3 * 60_000
@@ -946,3 +947,32 @@ def test_fuku_wizard_strategy_dropdown_lists_every_strategy_and_is_searchable(sc
     assert screen._fuku_strategy_combo.isEditable()
     assert screen._fuku_strategy_combo.completer() is not None
     assert screen._fuku_signal_combo.isEditable()
+
+
+def test_fuku_wizard_show_why_unchecked_hides_section_and_round_trips(screen, qapp):
+    """#89: the checkbox is saved with the report and removes the section."""
+    from services import report_store
+    from services.strategy_alerts import state_store
+    from services.strategy_alerts import config_store as alerts_config_store
+
+    alerts_config_store.save_config("strat-1", {
+        "enabled": True, "direction": "BUY",
+        "trigger_condition": [{"type": "col", "value": "Close"}, {"type": "op", "value": ">"},
+                              {"type": "num", "value": "1"}],
+    })
+    _seed_open(state_store, "INFY")
+    screen._start_new_report(report_store.REPORT_TYPE_FUKU_LIVE)
+    assert screen._fuku_show_why.isChecked()
+    screen._fuku_show_why.setChecked(False)
+    screen._name_edit.setText("No why")
+    screen._save_and_generate()
+    qapp.processEvents()
+
+    saved = report_store.load_all()[0]
+    assert saved["subject_config"]["show_why"] is False
+    assert "Why this signal triggered" not in screen._last_rendered_html
+    assert 'fk-sym">INFY<' in screen._last_rendered_html
+
+    screen._start_new_report(report_store.REPORT_TYPE_FUKU_LIVE)
+    screen._prefill_fields(saved)
+    assert screen._fuku_show_why.isChecked() is False

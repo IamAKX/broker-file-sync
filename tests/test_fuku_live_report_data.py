@@ -330,3 +330,31 @@ def test_levels_note_names_resistance_for_buy_and_support_for_sell_or_explains_a
     assert "Possible support:" in sell
     none = fl._levels_note(_card_data("NOPE", "BUY"))
     assert "No possible resistance levels" in none
+
+
+def _why_config():
+    alerts_config_store.save_config("s1", {
+        "enabled": True, "direction": "BUY",
+        "trigger_condition": [
+            {"type": "col", "value": "Close"}, {"type": "op", "value": ">"}, {"type": "num", "value": "100"},
+        ],
+    })
+
+
+def test_show_why_false_drops_the_trigger_section_single_and_strategy():
+    """#89: the "Why this signal triggered" block is optional."""
+    _why_config()
+    state_store.set_open_signal("s1::INFY", _open_signal(), force_flush=True)
+
+    on = fl.build_report_html(fl.build_report_data("s1", "INFY"))
+    assert "Why this signal triggered" in on          # default: unchanged
+
+    off = fl.build_report_html(fl.build_report_data("s1", "INFY", show_why=False))
+    assert "Why this signal triggered" not in off
+    assert "Signal timeline" in off and "Target progress" in off   # rest intact
+
+    strat_off = fl.build_strategy_report_html(fl.build_strategy_report_data("s1", show_why=False))
+    assert "Why this signal triggered" not in strat_off
+    assert "INFY" in strat_off
+    strat_on = fl.build_strategy_report_html(fl.build_strategy_report_data("s1"))
+    assert "Why this signal triggered" in strat_on

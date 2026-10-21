@@ -228,6 +228,7 @@ def _build_fuku_live_html(report: dict, new_since: datetime | None = None) -> st
             include_achieved=bool(subject.get("include_achieved")),
             new_since=new_since, refresh_minutes=int(subject.get("refresh_minutes") or 0),
             indicator_ids=subject.get("indicator_ids"), indicator_days=int(subject.get("indicator_days") or 60),
+            show_why=bool(subject.get("show_why", True)),
         )
         return fuku_live_report_data.build_strategy_report_html(
             data, doc_title=report.get("name", "Fuku Live Report"))
@@ -235,6 +236,7 @@ def _build_fuku_live_html(report: dict, new_since: datetime | None = None) -> st
         subject.get("strategy_id"), subject.get("symbol", ""),
         signal=report.get("_signal"),
         indicator_ids=subject.get("indicator_ids"), indicator_days=int(subject.get("indicator_days") or 60),
+        show_why=bool(subject.get("show_why", True)),
     )
     return fuku_live_report_data.build_report_html(data, doc_title=report.get("name", "Fuku Live Report"))
 
@@ -1027,6 +1029,10 @@ class ReportsScreen(QWidget):
         single_lay.addWidget(self._fuku_signal_combo)
         layout.addWidget(self._fuku_single_frame)
         self._on_fuku_scope_changed()
+        # Both scopes: not every recipient should see the trigger reasoning.
+        self._fuku_show_why = QCheckBox('Show the "Why this signal triggered" section')
+        self._fuku_show_why.setChecked(True)
+        layout.addWidget(self._fuku_show_why)
         self._add_indicator_fields(layout, with_symbols=False)
 
         if not signals:
@@ -1313,6 +1319,7 @@ class ReportsScreen(QWidget):
         elif rtype == report_store.REPORT_TYPE_FUKU_LIVE:
             scope = cfg.get("scope", "single")
             self._prefill_indicator_fields(cfg)
+            self._fuku_show_why.setChecked(bool(cfg.get("show_why", True)))
             self._select_data(self._fuku_scope_combo, scope)
             if scope == "strategy":
                 self._select_data(self._fuku_strategy_combo, cfg.get("strategy_id"))
@@ -1453,6 +1460,7 @@ class ReportsScreen(QWidget):
                     "include_cancelled": self._fuku_inc_cancelled.isChecked(),
                     "include_achieved": self._fuku_inc_achieved.isChecked(),
                     "refresh_minutes": self._fuku_refresh_spin.value(),
+                    "show_why": self._fuku_show_why.isChecked(),
                     **self._indicator_settings(),
                 }
             else:
@@ -1464,6 +1472,7 @@ class ReportsScreen(QWidget):
                     return
                 strategy_id, symbol = self._fuku_signal_combo.currentData()
                 self._active_report["subject_config"] = {"strategy_id": strategy_id, "symbol": symbol,
+                                                         "show_why": self._fuku_show_why.isChecked(),
                                                          **self._indicator_settings()}
 
         self._active_report["name"] = name
