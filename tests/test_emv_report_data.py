@@ -540,3 +540,21 @@ def test_stock_report_without_close_comparison_drops_every_close_element():
         assert gone not in html, gone
     assert ">DT<" in html and ">MT<" in html and "Current DT" in html     # the fields remain
     assert "DT, MT vs Close" not in html and "DT, MT" in html
+
+
+def test_resolve_stock_window_periods_vs_custom_range():
+    """#90: a custom date range replaces "last N periods"."""
+    today = date(2026, 10, 21)
+    f, t, n = emv_report_data.resolve_stock_window({"n_periods": 20}, today)
+    assert t == today and n == 20 and (t - f).days == int(20 * 1.6) + 10
+    # default when nothing is configured (older saved reports)
+    assert emv_report_data.resolve_stock_window({}, today)[2] == 20
+
+    f, t, n = emv_report_data.resolve_stock_window(
+        {"range_mode": "custom", "date_from": "2026-08-03", "date_to": "2026-09-30", "n_periods": 20}, today)
+    assert (f, t, n) == (date(2026, 8, 3), date(2026, 9, 30), None)
+    # reversed dates are swapped, incomplete custom config falls back to periods
+    f, t, _ = emv_report_data.resolve_stock_window(
+        {"range_mode": "custom", "date_from": "2026-09-30", "date_to": "2026-08-03"}, today)
+    assert f < t
+    assert emv_report_data.resolve_stock_window({"range_mode": "custom", "n_periods": 7}, today)[2] == 7

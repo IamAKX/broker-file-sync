@@ -28,7 +28,7 @@ strategy_engine's condition-explain mode) — worth wiring in as a
 follow-on once that exists, not duplicated here.
 """
 
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from services import fuku_score, inception_sector, report_columns
 from services import inception_historical_field_series as hfs
@@ -119,6 +119,24 @@ def pick_axes(reference_values: list, extras: list) -> list:
         far = ref > 0 and mag > 0 and (mag / ref > AXIS_SCALE_RATIO or ref / mag > AXIS_SCALE_RATIO)
         axes.append("right" if far else "left")
     return axes
+
+
+def resolve_stock_window(subject: dict, today: date | None = None) -> tuple:
+    """(date_from, date_to, n_periods_or_None) for an EMV stock report's
+    subject_config. A custom range ("range_mode": "custom", "date_from"/
+    "date_to" ISO dates — #90) returns exactly those dates and None (no
+    trimming to a period count); otherwise the last n_periods trading days
+    ending today, fetched with a generous calendar-day buffer so N trading
+    days are covered across weekends/holidays (the caller trims back to N)."""
+    today = today or date.today()
+    if subject.get("range_mode") == "custom" and subject.get("date_from") and subject.get("date_to"):
+        d_from = date.fromisoformat(subject["date_from"])
+        d_to = date.fromisoformat(subject["date_to"])
+        if d_from > d_to:
+            d_from, d_to = d_to, d_from
+        return d_from, d_to, None
+    n_periods = int(subject.get("n_periods", 20))
+    return today - timedelta(days=int(n_periods * 1.6) + 10), today, n_periods
 
 
 def build_stock_report_data(symbol: str, field: str, date_from: date, date_to: date,

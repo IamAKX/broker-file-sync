@@ -160,20 +160,16 @@ def _build_emv_html(report: dict) -> str:
 
     symbol = emv_report_data.resolve_symbol(subject.get("symbol", ""))
     field = subject.get("field", "CLOSE")
-    n_periods = int(subject.get("n_periods", 20))
-    # Generous calendar-day buffer so N trading days are actually covered
-    # even with weekends/holidays in between; historical_field_series only
-    # ever returns real trading days regardless, and the extra buffer is
-    # trimmed back down to exactly n_periods below.
-    date_to = date.today()
-    date_from = date_to - timedelta(days=int(n_periods * 1.6) + 10)
+    # Last N trading days (with a calendar-day buffer, trimmed to exactly N
+    # below) or a custom date range (#90, n_periods is None: no trimming).
+    date_from, date_to, n_periods = emv_report_data.resolve_stock_window(subject)
     indicator_ids = subject.get("indicator_ids") or []
     data = emv_report_data.build_stock_report_data(
         symbol, field, date_from, date_to, indicator_ids,
         extra_fields=subject.get("extra_fields"), field_color=subject.get("field_color"),
         compare_close=bool(subject.get("compare_close", True)),
     )
-    if len(data["series"]) > n_periods:
+    if n_periods is not None and len(data["series"]) > n_periods:
         data["series"] = data["series"][-n_periods:]
         for extra in data["extras"]:
             extra["series"] = extra["series"][-n_periods:]
@@ -822,11 +818,37 @@ class ReportsScreen(QWidget):
             "Close columns, state or days-below summary."
         )
         stock_lay.addWidget(self._emv_compare_close)
-        stock_lay.addWidget(self._field_label("Number of Periods (trading days)"))
+        stock_lay.addWidget(self._field_label("Period"))
+        self._emv_range_mode = QComboBox()
+        self._emv_range_mode.addItem("Number of periods (last N trading days)", "periods")
+        self._emv_range_mode.addItem("Custom date range", "custom")
+        self._emv_range_mode.currentIndexChanged.connect(self._on_emv_range_mode_changed)
+        stock_lay.addWidget(self._emv_range_mode)
+        self._emv_periods_frame = QFrame()
+        periods_lay = QVBoxLayout(self._emv_periods_frame)
+        periods_lay.setContentsMargins(0, 0, 0, 0)
+        periods_lay.addWidget(self._field_label("Number of Periods (trading days)"))
         self._emv_periods_spin = QSpinBox()
         self._emv_periods_spin.setRange(2, 500)
         self._emv_periods_spin.setValue(20)
-        stock_lay.addWidget(self._emv_periods_spin)
+        periods_lay.addWidget(self._emv_periods_spin)
+        stock_lay.addWidget(self._emv_periods_frame)
+        self._emv_range_frame = QFrame()
+        range_lay = QHBoxLayout(self._emv_range_frame)
+        range_lay.setContentsMargins(0, 0, 0, 0)
+        self._emv_date_from = QDateEdit()
+        self._emv_date_to = QDateEdit()
+        for edit, default in ((self._emv_date_from, QDate.currentDate().addMonths(-3)),
+                              (self._emv_date_to, QDate.currentDate())):
+            edit.setCalendarPopup(True)
+            edit.setDisplayFormat("dd-MMM-yyyy")
+            edit.setDate(default)
+        range_lay.addWidget(QLabel("From:"))
+        range_lay.addWidget(self._emv_date_from, 1)
+        range_lay.addWidget(QLabel("To:"))
+        range_lay.addWidget(self._emv_date_to, 1)
+        stock_lay.addWidget(self._emv_range_frame)
+        self._on_emv_range_mode_changed()
         stock_lay.addWidget(self._field_label("Indicators to plot (from the Indicator Library)"))
         self._emv_indicator_list = QListWidget()
         self._emv_indicator_list.setMaximumHeight(160)
@@ -1048,6 +1070,11 @@ class ReportsScreen(QWidget):
                 "No open or recent alerts found — this report needs at least one "
                 "Strategy Notifications signal to have fired."
             ))
+
+    def _on_emv_range_mode_changed(self):
+        custom = self._emv_range_mode.currentData() == "custom"
+        self._emv_periods_frame.setVisible(not custom)
+        self._emv_range_frame.setVisible(custom)
 
     def _on_fuku_scope_changed(self):
         is_strategy = self._fuku_scope_combo.currentData() == "strategy"
@@ -1302,6 +1329,11 @@ class ReportsScreen(QWidget):
                 self._emv_compare_close.setChecked(bool(cfg.get("compare_close", True)))
                 if cfg.get("n_periods"):
                     self._emv_periods_spin.setValue(int(cfg["n_periods"]))
+                self._select_data(self._emv_range_mode, cfg.get("range_mode", "periods"))
+                for edit, key in ((self._emv_date_from, "date_from"), (self._emv_date_to, "date_to")):
+                    d = QDate.fromString(str(cfg.get(key) or ""), Qt.DateFormat.ISODate)
+                    if d.isValid():
+                        edit.setDate(d)
                 chosen = set(cfg.get("indicator_ids") or [])
                 for i in range(self._emv_indicator_list.count()):
                     item = self._emv_indicator_list.item(i)
@@ -1427,6 +1459,9 @@ class ReportsScreen(QWidget):
                     "field_color": self._emv_field_color,
                     "extra_fields": [dict(e) for e in self._emv_extra_fields],
                     "n_periods": self._emv_periods_spin.value(),
+                    "range_mode": self._emv_range_mode.currentData(),
+                    "date_from": self._emv_date_from.date().toPython().isoformat(),
+                    "date_to": self._emv_date_to.date().toPython().isoformat(),
                     "compare_close": self._emv_compare_close.isChecked(),
                     "indicator_ids": self._selected_indicator_ids(),
                 }

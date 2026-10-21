@@ -1002,3 +1002,38 @@ def test_emv_wizard_compare_close_checkbox_is_saved_and_applied(screen, qapp):
     screen._start_new_report(report_store.REPORT_TYPE_EMV)
     screen._prefill_fields(saved)
     assert screen._emv_compare_close.isChecked() is False
+
+
+def test_emv_wizard_custom_date_range_is_saved_and_limits_the_report(screen, qapp):
+    """#90: pick From/To instead of a period count."""
+    from PySide6.QtCore import QDate
+    from services import report_store
+
+    _seed_bars("DIVISLAB", date(2026, 1, 1), 60)          # business days from 1-Jan-2026
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    assert screen._emv_range_mode.currentData() == "periods"
+    assert not screen._emv_periods_frame.isHidden() and screen._emv_range_frame.isHidden()
+
+    screen._name_edit.setText("Range")
+    screen._emv_symbol_edit.setText("DIVISLAB")
+    screen._emv_field_combo.setCurrentIndex(screen._emv_field_combo.findData("CLOSE"))
+    screen._emv_range_mode.setCurrentIndex(screen._emv_range_mode.findData("custom"))
+    assert screen._emv_periods_frame.isHidden() and not screen._emv_range_frame.isHidden()
+    screen._emv_date_from.setDate(QDate(2026, 1, 12))
+    screen._emv_date_to.setDate(QDate(2026, 1, 23))
+
+    screen._save_and_generate()
+    qapp.processEvents()
+
+    saved = report_store.load_all()[0]
+    cfg = saved["subject_config"]
+    assert cfg["range_mode"] == "custom" and cfg["date_from"] == "2026-01-12" and cfg["date_to"] == "2026-01-23"
+    html = screen._last_rendered_html
+    assert "10 periods" in html                                   # 12..23 Jan = 10 trading days
+    assert "12-Jan-2026" in html and "23-Jan-2026" in html and "26-Jan-2026" not in html
+    assert "09-Jan-2026" not in html
+
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    screen._prefill_fields(saved)
+    assert screen._emv_range_mode.currentData() == "custom"
+    assert screen._emv_date_from.date() == QDate(2026, 1, 12)
