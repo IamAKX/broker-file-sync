@@ -103,6 +103,19 @@ table.report-table td {{
   padding: 5px 8px; border-bottom: 1px solid var(--border); white-space: nowrap;
 }}
 table.report-table tr:last-child td {{ border-bottom: none; }}
+/* A page can't scroll sideways, so a wide table must shrink to fit instead of
+   running off the right edge (#87): the more columns, the smaller the type and
+   padding, and headers/cells may wrap. */
+table.report-table.dense-1 {{ font-size: 10px; }}
+table.report-table.dense-1 th, table.report-table.dense-1 td {{ padding: 5px 5px; }}
+table.report-table.dense-2 {{ font-size: 9px; }}
+table.report-table.dense-2 th, table.report-table.dense-2 td {{ padding: 4px 3px; }}
+table.report-table.dense-3 {{ font-size: 8px; }}
+table.report-table.dense-3 th, table.report-table.dense-3 td {{ padding: 3px 2px; }}
+table.report-table.dense-1 th, table.report-table.dense-2 th, table.report-table.dense-3 th {{ white-space: normal; vertical-align: bottom; }}
+table.report-table.dense-3 td {{ white-space: normal; word-break: break-word; }}
+table.report-table.dense-1 .status-pill {{ font-size: 9px; padding: 1px 6px; }}
+table.report-table.dense-2 .status-pill, table.report-table.dense-3 .status-pill {{ font-size: 8px; padding: 1px 4px; }}
 
 .status-pill {{
   display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 10px; font-weight: 700;
@@ -260,8 +273,10 @@ def data_table(headers: list, rows: list, column_html: set | None = None) -> str
         for header, value in zip(headers, row):
             cells.append(f"<td>{value if header in column_html else esc(value)}</td>")
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
+    n = len(headers)
+    density = "" if n <= 8 else (" dense-1" if n <= 11 else (" dense-2" if n <= 14 else " dense-3"))
     return (
-        f'<table class="report-table"><thead><tr>{head}</tr></thead>'
+        f'<table class="report-table{density}"><thead><tr>{head}</tr></thead>'
         f'<tbody>{"".join(body_rows)}</tbody></table>'
     )
 
