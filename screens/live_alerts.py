@@ -39,6 +39,7 @@ from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
 from services import fuku_live_report_data, fuku_score
 from services.strategy_alerts import state_store
+from services.strategy_alerts.models import PARTIAL_TARGETS_LABEL, is_partially_achieved
 
 _PAGE_SIZES = (25, 50, 100)
 
@@ -48,6 +49,7 @@ _PAGE_SIZES = (25, 50, 100)
 _STATUS_OPTIONS = [
     ("All", None),
     ("Open", "open"),
+    (PARTIAL_TARGETS_LABEL, "partially_achieved"),
     ("Targets Achieved", "all_targets_achieved"),
     ("Stopped Out", "stopped_out"),
     ("Trade Cancelled", "trade_cancelled"),
@@ -116,7 +118,9 @@ def _status_text(signal: dict) -> str:
     if signal.get("state") == "pending":
         return "Pending"
     if signal.get("state") == "open":
-        return "Open"
+        # Some, not all, of the targets achieved (#94) — still live, but not
+        # the same as an "Open" trade that has done nothing yet.
+        return PARTIAL_TARGETS_LABEL if is_partially_achieved(signal) else "Open"
     return "Resolved"
 
 
@@ -181,6 +185,7 @@ _STATUS_COLOR_TOKEN = {
     "Targets Achieved": "accent",
     "Stopped Out": "destructive",
     "Open": "status_blue",
+    PARTIAL_TARGETS_LABEL: "status_teal",
     "Pending": "status_orange",
     "Trade Cancelled": "status_purple",
     "Closed (Intraday)": "status_amber",
@@ -731,6 +736,11 @@ class LiveAlertsScreen(QWidget):
         if reset_page:
             self._page = 1
         filters = self._current_filters()
+        # "Targets Partially Achieved" is derived (open + some targets hit),
+        # not a backend status: ask for the open signals and keep those rows.
+        partial_only = filters["status"] == "partially_achieved"
+        if partial_only:
+            filters["status"] = "open"
         try:
             response = strategy_signals_api.list_signals(
                 **filters, page=self._page, page_size=self._resolved_page_size(),
@@ -743,6 +753,8 @@ class LiveAlertsScreen(QWidget):
         self._total_pages = response.get("total_pages", 0)
         self._page = response.get("page", self._page)
         self._rows = [_signal_from_api_item(item) for item in response.get("items", [])]
+        if partial_only:
+            self._rows = [s for s in self._rows if is_partially_achieved(s)]
         score_configs = fuku_score.configs_by_strategy()   # one load for the whole page
 
         t = self._controller.theme

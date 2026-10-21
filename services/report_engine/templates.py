@@ -158,6 +158,7 @@ table.report-table.dense-2 .status-pill, table.report-table.dense-3 .status-pill
 .fk-badge.win {{ color: #15803D; background: #DCFCE7; border: 1px solid #86EFAC; }}
 .fk-badge.loss {{ color: #B91C1C; background: #FEE2E2; border: 1px solid #FCA5A5; }}
 .fk-badge.cancel {{ color: #92400E; background: #FEF3C7; border: 1px solid #FCD34D; }}
+.fk-badge.partial {{ color: #0F766E; background: #CCFBF1; border: 1px solid #5EEAD4; }}
 .fk-badge.new {{ color: #fff; background: #F59E0B; }}
 .fk-kpis {{ display: flex; gap: 6px; margin-bottom: 10px; }}
 .fk-kpi {{ flex: 1; border: 1px solid var(--border); border-radius: 7px; padding: 5px 8px; background: var(--neutral-bg); min-width: 0; }}
@@ -218,6 +219,7 @@ html, body { background: #0B1220; }
 .fk-badge.win { color: #86EFAC; background: #14532D; border-color: #16A34A; }
 .fk-badge.loss { color: #FCA5A5; background: #7F1D1D; border-color: #DC2626; }
 .fk-badge.cancel { color: #FCD34D; background: #78350F; border-color: #D97706; }
+.fk-badge.partial { color: #5EEAD4; background: #134E4A; border-color: #0D9488; }
 .fk-chip.ok { color: #86EFAC; background: #14532D; }
 .fk-chip.no { color: #FCA5A5; background: #7F1D1D; }
 .fk-tl-item::before { border-color: #0F172A; box-shadow: 0 0 0 1px #475569; }

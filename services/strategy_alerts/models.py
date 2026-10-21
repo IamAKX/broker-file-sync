@@ -113,6 +113,25 @@ RESOLUTION_TRADE_CANCELLED = "trade_cancelled"
 RESOLUTION_INTRADAY_CLOSED = "intraday_closed"
 
 
+PARTIAL_TARGETS_LABEL = "Targets Partially Achieved"
+
+
+def target_progress(signal: dict) -> tuple:
+    """(achieved, total) over the signal's Target metrics."""
+    targets = [m for m in (signal.get("metrics") or {}).values() if m.get("role") == ROLE_TARGET]
+    return sum(1 for m in targets if m.get("achieved")), len(targets)
+
+
+def is_partially_achieved(signal: dict) -> bool:
+    """A still-open signal with some, but not all, of its targets achieved
+    (#94) — it stays open (the remaining targets / stop-loss are still live)
+    but is its own status, with a real return behind it."""
+    if signal.get("resolution") or signal.get("state") in ("pending",):
+        return False
+    achieved, total = target_progress(signal)
+    return 0 < achieved < total
+
+
 def new_metric(name: str, role: str = ROLE_INFORMATIONAL, formula: list | None = None) -> dict:
     return {"id": str(uuid.uuid4()), "name": name, "role": role, "formula": formula or []}
 

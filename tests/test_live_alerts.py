@@ -791,3 +791,42 @@ def test_open_full_report_navigates_and_hands_signal_to_reports(screen, monkeypa
     screen._open_full_report({"symbol": "INFY"})
 
     assert calls == ["reports", "INFY"]
+
+
+# ── #94: Targets Partially Achieved ─────────────────────────────────────────
+
+def _partial_item(symbol="PNBHOUSING", achieved=2):
+    item = _api_item(symbol=symbol, status="open")
+    item["metrics"] = {
+        "sl": {"name": "SL", "role": "stop_loss", "value": 95.0},
+        **{f"t{i}": {"name": f"TARGET {i + 1}", "role": "target", "value": 101.0 + i,
+                     "achieved": i < achieved, "achieved_at": None} for i in range(4)},
+    }
+    return item
+
+
+def test_open_signal_with_some_targets_achieved_has_its_own_status(screen, monkeypatch):
+    fake = _FakeListApi(items=[_partial_item("PNBHOUSING", 2), _partial_item("PLAIN", 0), _partial_item("DONE", 4)])
+    monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
+    screen._refresh_table()
+
+    status = {screen._table.item(r, 3).text(): screen._table.item(r, 5).text() for r in range(screen._table.rowCount())}
+    assert status["PNBHOUSING"] == "Targets Partially Achieved"
+    assert status["PLAIN"] == "Open"                         # nothing achieved yet
+    assert status["DONE"] == "Open"                          # (resolution decides "all achieved", not these flags)
+
+
+def test_partial_status_filter_asks_for_open_signals_and_keeps_only_partial_rows(screen, monkeypatch):
+    fake = _FakeListApi(items=[_partial_item("PNBHOUSING", 2), _partial_item("PLAIN", 0)])
+    monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
+    screen._status_combo.setCurrentIndex(screen._status_combo.findData("partially_achieved"))
+    screen._refresh_table(reset_page=True)
+
+    assert fake.calls[-1]["status"] == "open"                # the backend has no such status
+    symbols = [screen._table.item(r, 3).text() for r in range(screen._table.rowCount())]
+    assert symbols == ["PNBHOUSING"]
+
+
+def test_status_dropdown_lists_the_new_category(screen):
+    labels = [screen._status_combo.itemText(i) for i in range(screen._status_combo.count())]
+    assert "Targets Partially Achieved" in labels

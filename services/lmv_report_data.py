@@ -22,7 +22,12 @@ from services.strategy_alerts import state_store
 DEFAULT_INVESTMENT_AMOUNT = 5000.0
 _MAX_BACKEND_PAGES = 20
 
+# Not a real resolution: an alert that is still open but has achieved some, not
+# all, of its targets (#94). It is reported with its mark-to-market return.
+RESOLUTION_PARTIAL = "targets_partially_achieved"
+
 _RESOLUTION_LABELS = {
+    RESOLUTION_PARTIAL: ("PARTIAL TARGETS", "positive"),
     "all_targets_achieved": ("TARGET HIT", "positive"),
     "stopped_out": ("STOP LOSS", "negative"),
     "intraday_closed": ("CLOSED", "neutral"),
@@ -127,6 +132,34 @@ def _fallback_exit_price(trade: dict) -> float | None:
 def _exit_price(trade: dict) -> float | None:
     price = trade.get("exit_price")
     return price if price is not None else _fallback_exit_price(trade)
+
+
+def scale_out_yield(trade: dict, entry, exit_price, direction: str):
+    """(yield %, booked_targets, total_targets) for a trade that achieved some
+    of its targets and then did NOT reach the last one (#94): still open, or
+    stopped out. The position is split equally across the targets; each
+    achieved target books its share at that target's price and the rest exits
+    at *exit_price* (the stop, or the last price while open). So the profit
+    made on the way to those targets is no longer thrown away when the trade
+    later falls back to its stop-loss.
+
+    Returns (None, ...) when there is nothing to book — no achieved target, no
+    target at all, or a target "price" that is not a price (a boolean-style
+    metric) — and the caller falls back to the plain entry->exit yield."""
+    targets = [m for m in (trade.get("metrics") or {}).values() if m.get("role") == "target"]
+    done = [m for m in targets if m.get("achieved")]
+    if not targets or not done or len(done) == len(targets) or not entry:
+        return None, len(done), len(targets)
+    prices = [m.get("value") for m in done]
+    if any(p is None or not (0.5 * entry <= p <= 2 * entry) for p in prices):
+        return None, len(done), len(targets)
+    rest = len(targets) - len(done)
+    parts = [report_metrics.directional_yield(entry, p, direction) for p in prices]
+    tail = report_metrics.directional_yield(entry, exit_price, direction) if exit_price is not None else None
+    if tail is None or any(p is None for p in parts):
+        return None, len(done), len(targets)
+    total = len(targets)
+    return (sum(parts) + rest * tail) / total, len(done), total
 
 
 def _days_true_label(trade: dict) -> str:
@@ -236,6 +269,90 @@ def resolved_trades_for_strategy(strategy_id: str, date_from: date | None = None
     return trades
 
 
+def _local_open_partial_trades(strategy_id: str) -> list:
+    from services.strategy_alerts.models import is_partially_achieved
+    return [
+        s for s in state_store.get_open_signals().values()
+        if s.get("strategy_id") == strategy_id and s.get("state") == "open" and is_partially_achieved(s)
+    ]
+
+
+def _backend_open_partial_trades(strategy_id: str, date_from: date | None, date_to: date | None) -> list:
+    """Open signals the backend holds (another device's alerts) that have hit
+    some targets — best effort, like _backend_resolved_trades."""
+    try:
+        from api import strategy_signals_api
+        from api.exceptions import ApiError, NetworkError
+        from services.strategy_alerts.models import is_partially_achieved
+    except ImportError:
+        return []
+    out, page = [], 1
+    while page <= _MAX_BACKEND_PAGES:
+        try:
+            response = strategy_signals_api.list_signals(
+                strategy_id=strategy_id, status="open", page=page, page_size=100)
+        except (ApiError, NetworkError):
+            break
+        for item in response.get("items", []):
+            signal = dict(item, state="open", resolution=None)
+            if is_partially_achieved(signal):
+                out.append(signal)
+        if page >= (response.get("total_pages") or 1):
+            break
+        page += 1
+    return out
+
+
+def partial_open_trades(strategy_id: str, date_to: date | None, include_backend: bool = False,
+                        date_from: date | None = None) -> list:
+    """Open alerts of *strategy_id* that have achieved some but not all of their
+    targets (#94), shaped like resolved trades so they flow through the same
+    yield / table / curve code: resolution RESOLUTION_PARTIAL, resolved_at = the
+    last time the signal was seen (when its current return was struck) and
+    exit_price = that last price (mark-to-market), else the highest achieved
+    target.
+
+    Only for a report covering the present (date_to today or later): an alert
+    that is partial NOW says nothing about a past range, and without
+    point-in-time snapshots there is nothing older to reconstruct from."""
+    if date_to is not None and date_to < date.today():
+        return []
+    signals = _local_open_partial_trades(strategy_id)
+    if include_backend:
+        seen = {s.get("id") for s in signals if s.get("id")}
+        signals += [s for s in _backend_open_partial_trades(strategy_id, None, date_to)
+                    if not (s.get("id") and s["id"] in seen)]
+    trades = []
+    for s in signals:
+        if date_to is not None:
+            try:
+                if datetime.fromisoformat(s["entry_time"]).date() > date_to:
+                    continue
+            except (KeyError, TypeError, ValueError):
+                pass
+        trade = dict(s)
+        trade["resolution"] = RESOLUTION_PARTIAL
+        struck = s.get("last_tick_time") or datetime.now().isoformat()
+        if date_from is not None:
+            # keep it inside the report's window so the performance curve
+            # buckets it (the last tick may predate a "today only" range)
+            try:
+                if datetime.fromisoformat(struck).date() < date_from:
+                    struck = datetime.combine(date_from, datetime.min.time()).isoformat()
+            except (TypeError, ValueError):
+                pass
+        trade["resolved_at"] = struck
+        exit_price = s.get("last_price")
+        if exit_price is None:
+            achieved = [m["value"] for m in (s.get("metrics") or {}).values()
+                        if m.get("role") == "target" and m.get("achieved") and m.get("value") is not None]
+            if achieved:
+                exit_price = max(achieved) if s.get("direction", "BUY") == "BUY" else min(achieved)
+        trade["exit_price"] = exit_price
+        trades.append(trade)
+    return trades
+
+
 def backtest_trades_for_strategy(strategy_id: str, date_from: date | None, date_to: date | None) -> tuple:
     """(trades, notes): the trades *strategy_id* would have produced over the
     range, replayed from stored end-of-day LMV data (services.strategy_backtest)
@@ -267,6 +384,9 @@ def compute_strategy_summary(strategy_id: str, date_from: date | None, date_to: 
         trades, notes = backtest_trades_for_strategy(strategy_id, date_from, date_to)
     else:
         trades = resolved_trades_for_strategy(strategy_id, date_from, date_to, include_backend=include_backend)
+        partial = partial_open_trades(strategy_id, date_to, include_backend=include_backend,
+                                      date_from=date_from)
+        trades = sorted(trades + partial, key=_resolved_dt)
 
     rows = []
     yields = []
@@ -276,9 +396,25 @@ def compute_strategy_summary(strategy_id: str, date_from: date | None, date_to: 
         exit_p = _exit_price(t)
         direction = t.get("direction", "BUY")
         y = report_metrics.directional_yield(entry, exit_p, direction)
+        booked = None
+        if t.get("resolution") in (RESOLUTION_PARTIAL, "stopped_out"):
+            scaled, n_hit, n_total = scale_out_yield(t, entry, exit_p, direction)
+            if scaled is not None:
+                y, booked = scaled, (n_hit, n_total)
         yields.append(y)
         resolution_counts[t.get("resolution")] = resolution_counts.get(t.get("resolution"), 0) + 1
         label, kind = _RESOLUTION_LABELS.get(t.get("resolution"), (t.get("resolution", ""), "neutral"))
+        if t.get("resolution") == RESOLUTION_PARTIAL:
+            from services.strategy_alerts.models import target_progress
+            done, total = target_progress(t)
+            label = f"PARTIAL {done}/{total}"
+            if y is not None and y < 0:
+                kind = "negative"
+        elif booked is not None:
+            # stopped out after booking some targets: say so, and colour it by
+            # the blended result (a stop after 3 of 4 targets can still be a win)
+            label = f"STOP LOSS ({booked[0]}/{booked[1]} targets)"
+            kind = "positive" if (y or 0) >= 0 else "negative"
         # A positional "intraday_closed" isn't inherently a win or loss —
         # recolor it by its own yield sign rather than a fixed neutral tag.
         if t.get("resolution") == "intraday_closed" and y is not None:
@@ -293,6 +429,7 @@ def compute_strategy_summary(strategy_id: str, date_from: date | None, date_to: 
             "status_label": label,
             "status_kind": kind,
             "days_true": _days_true_label(t),
+            "booked_targets": booked,
             "trade": t,
         })
 
@@ -304,7 +441,10 @@ def compute_strategy_summary(strategy_id: str, date_from: date | None, date_to: 
         "yields": yields,
         "blended_yield": report_metrics.blended_yield(yields),
         "win_rate": report_metrics.win_rate(yields),
-        "closed_trades": len(trades),
+        # "Closed" excludes the still-open partially-achieved trades, which are
+        # counted (and yielded) but reported separately.
+        "closed_trades": len(trades) - resolution_counts.get(RESOLUTION_PARTIAL, 0),
+        "partial_trades": resolution_counts.get(RESOLUTION_PARTIAL, 0),
         "resolution_counts": resolution_counts,
         "sharpe": report_metrics.sharpe_ratio(yields),
         "sortino": report_metrics.sortino_ratio(yields),
@@ -448,6 +588,8 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
             kind="positive" if (summary_a["blended_yield"] or 0) >= 0 else "negative",
         )
         + templates.kpi_card("Closed Trades", str(summary_a["closed_trades"]))
+        + (templates.kpi_card("Partially Achieved (open)", str(summary_a["partial_trades"]), kind="positive")
+           if summary_a.get("partial_trades") else "")
         + templates.kpi_card("Win Rate", f'{summary_a["win_rate"]:.0f}%' if summary_a["win_rate"] is not None else "—")
     )
     if comparing:
@@ -460,6 +602,7 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
         counts = summary["resolution_counts"]
         segments = [
             {"label": "Target Hit", "value": counts.get("all_targets_achieved", 0), "color": "#16a34a"},
+            {"label": "Partial Targets", "value": counts.get(RESOLUTION_PARTIAL, 0), "color": "#0d9488"},
             {"label": "Stop Loss", "value": counts.get("stopped_out", 0), "color": "#dc2626"},
             {"label": "Closed", "value": counts.get("intraday_closed", 0), "color": "#D97706"},
         ]
@@ -570,6 +713,15 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
     for symbol, sections in data.get("indicator_charts") or []:
         for title, svg in sections:
             blocks.append((templates.section(f"{title} — {symbol}", svg), emv_report_data._section_height(svg)))
+
+    summaries = [s for s in (summary_a, summary_b) if s]
+    if any(r.get("booked_targets") or (r["trade"] or {}).get("resolution") == RESOLUTION_PARTIAL
+           for s in summaries for r in s["rows"]):
+        blocks.append((templates.section("Partially achieved targets", (
+            '<p class="fk-note">A trade that achieved some, but not all, of its targets is counted with the profit made '
+            "on the way: its position is split equally across the targets, each achieved target books its share at "
+            "that target's price, and the remaining share exits at the stop-loss (stopped out) or is marked at the last "
+            "price (still open — shown as <b>PARTIAL n/N</b>). Trades that reached every target are unchanged.</p>")), 90))
 
     if not all_rows:
         blocks.append((templates.section(

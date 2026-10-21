@@ -358,3 +358,24 @@ def test_show_why_false_drops_the_trigger_section_single_and_strategy():
     assert "INFY" in strat_off
     strat_on = fl.build_strategy_report_html(fl.build_strategy_report_data("s1"))
     assert "Why this signal triggered" in strat_on
+
+
+def test_open_signal_with_some_targets_achieved_is_labelled_partial_in_the_report():
+    """#94"""
+    sig = _open_signal(symbol="PNB", entry=100.0)
+    sig["metrics"] = {
+        "t1": {"name": "TARGET 1", "role": "target", "value": 101.0, "achieved": True, "achieved_at": "2026-03-01T10:00:00"},
+        "t2": {"name": "TARGET 2", "role": "target", "value": 105.0, "achieved": False, "achieved_at": None},
+        "sl": {"name": "SL", "role": "stop_loss", "value": 95.0},
+    }
+    state_store.set_open_signal("s1::PNB", sig, force_flush=True)
+    data = fl.build_report_data("s1", "PNB")
+    assert data["status"] == "TARGETS PARTIALLY ACHIEVED 1/2"
+    html = fl.build_report_html(data)
+    assert "TARGETS PARTIALLY ACHIEVED 1/2" in html and 'fk-badge partial' in html
+
+    strat = fl.build_strategy_report_html(fl.build_strategy_report_data("s1"))
+    assert "Partially achieved" in strat                        # KPI card
+    plain = _open_signal(symbol="PLAIN")
+    state_store.set_open_signal("s1::PLAIN", plain, force_flush=True)
+    assert fl.build_report_data("s1", "PLAIN")["status"] == "OPEN"

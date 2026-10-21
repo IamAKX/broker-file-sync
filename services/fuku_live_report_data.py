@@ -19,6 +19,7 @@ from services import emv_report_data, fuku_score, strategy_store, support_resist
 from services.report_engine import charts, templates
 from services.strategy_alerts import config_store as alerts_config_store
 from services.strategy_alerts import state_store
+from services.strategy_alerts.models import is_partially_achieved, target_progress
 from services.strategy_engine import clause_label, split_top_level_and
 
 _STATUS_LABELS = {
@@ -28,6 +29,16 @@ _STATUS_LABELS = {
     "trade_cancelled": "TRADE CANCELLED",
     "intraday_closed": "INTRADAY CLOSED",
 }
+
+
+_PARTIAL_STATUS = "TARGETS PARTIALLY ACHIEVED"
+
+
+def _status_kind(status: str) -> str:
+    """CSS/KPI bucket of a status label: win / loss / cancel / partial / open."""
+    if status.startswith(_PARTIAL_STATUS):
+        return "partial"
+    return {"TARGETS ACHIEVED": "win", "STOPPED OUT": "loss", "TRADE CANCELLED": "cancel"}.get(status, "open")
 
 
 def _fmt_price(value) -> str:
@@ -251,6 +262,9 @@ def build_report_data(strategy_id: str, symbol: str, signal: dict | None = None,
     current_price = current_price_of(signal)
 
     status = _STATUS_LABELS.get(signal.get("resolution"), signal.get("resolution") or "OPEN")
+    if status == "OPEN" and is_partially_achieved(signal):
+        done, total = target_progress(signal)
+        status = f"{_PARTIAL_STATUS} {done}/{total}"
 
     data = {
         "found": True,
@@ -467,7 +481,7 @@ def _levels_note(data: dict) -> str:
 
 
 def _status_badge(data: dict) -> str:
-    kind = {"TARGETS ACHIEVED": "win", "STOPPED OUT": "loss", "TRADE CANCELLED": "cancel"}.get(data["status"], "open")
+    kind = _status_kind(data["status"])
     return f'<span class="fk-badge {kind}">{templates.esc(data["status"])}</span>'
 
 
@@ -577,10 +591,9 @@ def card_html(data: dict, generated_at: datetime | None = None, embed_indicators
 
 
 def _status_counts(cards: list) -> dict:
-    counts = {"open": 0, "win": 0, "loss": 0, "cancel": 0}
+    counts = {"open": 0, "partial": 0, "win": 0, "loss": 0, "cancel": 0}
     for c in cards:
-        key = {"TARGETS ACHIEVED": "win", "STOPPED OUT": "loss", "TRADE CANCELLED": "cancel"}.get(c["status"], "open")
-        counts[key] += 1
+        counts[_status_kind(c["status"])] += 1
     return counts
 
 
@@ -622,6 +635,7 @@ def build_strategy_report_pages(data: dict) -> list:
     kpis = (
         templates.kpi_card("Stocks", str(len(cards)))
         + templates.kpi_card("Open", str(counts["open"]))
+        + (templates.kpi_card("Partially achieved", str(counts["partial"]), kind="positive") if counts["partial"] else "")
         + templates.kpi_card("Targets hit", str(counts["win"]), kind="positive" if counts["win"] else "neutral")
         + templates.kpi_card("Stopped out", str(counts["loss"]), kind="negative" if counts["loss"] else "neutral")
         + templates.kpi_card("Avg % move", f"{avg_move:+.2f}%" if avg_move is not None else "—",
