@@ -101,13 +101,13 @@ def _build_placeholder_html(report: dict) -> str:
     return templates.render_report([page], doc_title=type_label)
 
 
-def _build_lmv_html(report: dict) -> str:
+def _build_lmv_html(report: dict, today: date | None = None) -> str:
     subject = report.get("subject_config", {})
     tf = report.get("timeframe", {})
     mode = tf.get("mode", report_metrics.TIMEFRAME_DAILY)
     custom_from = date.fromisoformat(tf["from"]) if tf.get("from") else None
     custom_to = date.fromisoformat(tf["to"]) if tf.get("to") else None
-    date_from, date_to = report_metrics.resolve_preset_range(mode, custom_from, custom_to)
+    date_from, date_to = report_metrics.resolve_preset_range(mode, custom_from, custom_to, today=today)
 
     data = lmv_report_data.build_report_data(
         subject.get("strategy_a_id"), subject.get("strategy_b_id"),
@@ -133,12 +133,13 @@ def _build_lmv_html(report: dict) -> str:
     )
 
 
-def _build_emv_html(report: dict) -> str:
+def _build_emv_html(report: dict, today: date | None = None) -> str:
+    today = today or date.today()
     subject = report.get("subject_config", {})
     subtype = subject.get("subtype", "stock")
 
     if subtype == "trend":
-        as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else date.today()
+        as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else today
         classification = emv_report_data.classify_trend(
             subject.get("category_id"), subject.get("timeframe", "Daily"), as_of,
             multi_timeframe=bool(subject.get("multi_timeframe")),
@@ -151,7 +152,7 @@ def _build_emv_html(report: dict) -> str:
         )
 
     if subtype == "strategy":
-        as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else date.today()
+        as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else today
         classification = emv_report_data.classify_strategy(subject.get("strategy_id"), as_of)
         return emv_report_data.build_strategy_report_html(
             classification, doc_title=report.get("name", "EMV EOD Report"),
@@ -163,7 +164,7 @@ def _build_emv_html(report: dict) -> str:
     field = subject.get("field", "CLOSE")
     # Last N trading days (with a calendar-day buffer, trimmed to exactly N
     # below) or a custom date range (#90, n_periods is None: no trimming).
-    date_from, date_to, n_periods = emv_report_data.resolve_stock_window(subject)
+    date_from, date_to, n_periods = emv_report_data.resolve_stock_window(subject, today)
     indicator_ids = subject.get("indicator_ids") or []
     data = emv_report_data.build_stock_report_data(
         symbol, field, date_from, date_to, indicator_ids,
@@ -197,7 +198,7 @@ def _is_auto_refresh_report(report: dict) -> bool:
     return _is_fuku_strategy_scope(report) or _is_live_sector(report)
 
 
-def _build_sector_html(report: dict, lmv_snapshot: tuple | None = None) -> str:
+def _build_sector_html(report: dict, lmv_snapshot: tuple | None = None, today: date | None = None) -> str:
     subject = report.get("subject_config", {})
     metric = subject.get("metric") or None
     mode = subject.get("mode", "eod")
@@ -205,7 +206,7 @@ def _build_sector_html(report: dict, lmv_snapshot: tuple | None = None) -> str:
         headers, data = lmv_snapshot if lmv_snapshot else ([], [])
         source = sector_report_data.live_stocks(headers, data, metric)
     else:
-        as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else date.today()
+        as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else (today or date.today())
         source = sector_report_data.eod_stocks(as_of, metric)
     sector_data = sector_report_data.build_sector_report_data(
         source, mode, metric, selected_sector=subject.get("sector"),
@@ -241,16 +242,23 @@ def _build_fuku_live_html(report: dict, new_since: datetime | None = None) -> st
 
 def _build_report_html(report: dict, new_since: datetime | None = None, lmv_snapshot: tuple | None = None) -> str:
     report_type = report.get("type")
-    if report_type == report_store.REPORT_TYPE_LMV:
-        html = _build_lmv_html(report)
-    elif report_type == report_store.REPORT_TYPE_EMV:
-        html = _build_emv_html(report)
-    elif report_type == report_store.REPORT_TYPE_FUKU_LIVE:
-        html = _build_fuku_live_html(report, new_since)
-    elif report_type == report_store.REPORT_TYPE_SECTOR:
-        html = _build_sector_html(report, lmv_snapshot)
-    else:
-        html = _build_placeholder_html(report)
+    # EOD-style reports are reproducible, so regenerating one rebuilds it as of
+    # when it was originally generated (#100) — not as of today. Fuku Live and
+    # the live sector report are live by design and always show "now".
+    anchored = report_type in (report_store.REPORT_TYPE_LMV, report_store.REPORT_TYPE_EMV) or (
+        report_type == report_store.REPORT_TYPE_SECTOR and not _is_live_sector(report))
+    generated = report_store.generation_time(report) if anchored else None
+    with templates.generated_as_of(generated):
+        if report_type == report_store.REPORT_TYPE_LMV:
+            html = _build_lmv_html(report, generated.date())
+        elif report_type == report_store.REPORT_TYPE_EMV:
+            html = _build_emv_html(report, generated.date())
+        elif report_type == report_store.REPORT_TYPE_FUKU_LIVE:
+            html = _build_fuku_live_html(report, new_since)
+        elif report_type == report_store.REPORT_TYPE_SECTOR:
+            html = _build_sector_html(report, lmv_snapshot, generated.date() if generated else None)
+        else:
+            html = _build_placeholder_html(report)
     # Light/Dark chosen in the wizard — applied here so every report type
     # (and the live auto-refresh) gets it, both in the preview and the PDF.
     return templates.apply_theme(html, (report.get("visuals") or {}).get("theme"))
@@ -1528,6 +1536,9 @@ class ReportsScreen(QWidget):
 
         self._active_report["name"] = name
         self._active_report.setdefault("visuals", {})["theme"] = self._report_theme_combo.currentData()
+        # Save & Generate is a fresh generation: later "Generate" clicks rebuild
+        # the report as of this moment (#100).
+        self._active_report["generated_at"] = report_store._now_iso()
         report_store.save_report(self._active_report)
         report_recipients.save_recipients(self._active_report["id"], parsed)
 

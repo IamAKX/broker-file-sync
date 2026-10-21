@@ -1037,3 +1037,76 @@ def test_emv_wizard_custom_date_range_is_saved_and_limits_the_report(screen, qap
     screen._prefill_fields(saved)
     assert screen._emv_range_mode.currentData() == "custom"
     assert screen._emv_date_from.date() == QDate(2026, 1, 12)
+
+
+# ── #100: regenerating a saved report reproduces the original ──────────────
+
+def test_generation_time_prefers_generated_at_then_last_save():
+    from datetime import datetime
+    from services import report_store
+    assert report_store.generation_time({"generated_at": "2026-10-16T18:05:00", "updated_at": "2026-10-20T09:00:00"}) \
+        == datetime(2026, 10, 16, 18, 5)
+    assert report_store.generation_time({"updated_at": "2026-10-06T09:30:00"}) == datetime(2026, 10, 6, 9, 30)
+    utc = report_store.generation_time({"generated_at": "2026-10-16T12:30:00+00:00"})
+    assert utc.tzinfo is None and abs((utc - datetime(2026, 10, 16, 12, 30)).total_seconds()) <= 14 * 3600
+    assert report_store.generation_time({}).year >= 2026           # nothing recorded: now
+
+
+def test_header_shows_original_generation_time_and_a_regenerated_note():
+    from datetime import datetime
+    from services.report_engine import templates
+    now = datetime(2026, 10, 20, 11, 0)
+    plain = templates.report_header("EMV EOD Report", "x", now)
+    assert "Generated: 20-10-2026 11:00" in plain and "Regenerated" not in plain
+    with templates.generated_as_of(datetime(2026, 10, 16, 18, 5)):
+        regen = templates.report_header("EMV EOD Report", "x", now)
+        same_day = templates.report_header("EMV EOD Report", "x", datetime(2026, 10, 16, 18, 6))
+    assert "Generated: 16-10-2026 18:05" in regen and "Regenerated: 20-10-2026 11:00" in regen
+    assert "Regenerated" not in same_day
+    assert "Generated: 20-10-2026 11:00" in templates.report_header("EMV EOD Report", "x", now)   # override is scoped
+
+
+def test_regenerating_a_saved_emv_stock_report_rebuilds_it_as_of_the_original_date():
+    """The complaint: generated on 16-Oct, regenerated on 20-Oct, showed 20-Oct."""
+    from screens import reports
+    from services import report_store
+    _seed_bars("DIVISLAB", date(2026, 1, 1), 60)           # business days from 1-Jan-2026 (~26-Mar)
+    report = report_store.new_report(report_store.REPORT_TYPE_EMV, "old one")
+    report["subject_config"] = {"subtype": "stock", "symbol": "DIVISLAB", "field": "CLOSE", "n_periods": 5,
+                                "indicator_ids": []}
+    report["generated_at"] = "2026-01-23T10:00:00"          # generated on the 23rd...
+
+    html = reports._build_report_html(report)               # ...regenerated "now" (months later)
+
+    assert "23-Jan-2026" in html and "22-Jan-2026" in html
+    assert "26-Jan-2026" not in html and "02-Feb-2026" not in html     # nothing after the original date
+    assert "Generated: 23-01-2026 10:00" in html and "Regenerated:" in html
+    assert "5 periods" in html
+
+
+def test_save_and_generate_stamps_generated_at_and_gallery_generate_keeps_it(screen, qapp):
+    from services import report_store
+    _seed_bars("DIVISLAB", date(2026, 1, 1), 30)
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    screen._name_edit.setText("Keep me")
+    screen._emv_symbol_edit.setText("DIVISLAB")
+    screen._emv_field_combo.setCurrentIndex(screen._emv_field_combo.findData("CLOSE"))
+    screen._save_and_generate()
+    qapp.processEvents()
+    saved = report_store.load_all()[0]
+    stamp = saved["generated_at"]
+    assert stamp                                              # stamped
+
+    screen._generate_and_preview(saved)                       # gallery "Generate": must not restamp
+    qapp.processEvents()
+    assert report_store.load_all()[0]["generated_at"] == stamp
+
+
+def test_live_reports_are_not_anchored():
+    from screens import reports
+    from services import report_store
+    report = report_store.new_report(report_store.REPORT_TYPE_SECTOR, "live")
+    report["generated_at"] = "2020-01-01T00:00:00"
+    report["subject_config"] = {"mode": "live", "metric": None, "primary_timeframe": "Daily"}
+    html = reports._build_report_html(report, None, (["Sector", "Scrip Name", "% Change"], []))
+    assert "Generated: 01-01-2020" not in html

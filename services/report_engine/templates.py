@@ -20,6 +20,8 @@ caller has decided how content is split.
 """
 
 import html
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 
 # A4 in mm — matches pdf_export.py's default QPageSize.A4. Content is laid
@@ -286,7 +288,28 @@ def section(title: str, body_html: str, subtitle: str = "") -> str:
     return f'<div class="section"><h2>{esc(title)}</h2>{sub}{body_html}</div>'
 
 
+# When a saved report is regenerated, it must read as the report that was
+# originally generated (#100): the builder wraps its work in generated_as_of(),
+# and every header then shows that original timestamp instead of "now".
+_GENERATED_AT: ContextVar = ContextVar("report_generated_at", default=None)
+
+
+@contextmanager
+def generated_as_of(original: datetime | None):
+    token = _GENERATED_AT.set(original)
+    try:
+        yield
+    finally:
+        _GENERATED_AT.reset(token)
+
+
 def report_header(title: str, subtitle: str, generated_at: datetime, extra_meta: str = "") -> str:
+    original = _GENERATED_AT.get()
+    if original is not None:
+        if abs((generated_at - original).total_seconds()) > 120:
+            regenerated = f'Regenerated: {generated_at.strftime("%d-%m-%Y %H:%M")}'
+            extra_meta = f"{extra_meta} · {regenerated}" if extra_meta else regenerated
+        generated_at = original
     when = generated_at.strftime("%d-%m-%Y %H:%M")
     meta = f'Generated: {esc(when)}'
     if extra_meta:
