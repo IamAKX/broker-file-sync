@@ -168,6 +168,11 @@ class FrozenColumns(QObject):
         # belt-and-suspenders live_viewer's own _configure_frozen_column uses.
         QTimer.singleShot(0, self._update_geometry)
 
+    def overlay_header(self):
+        """The frozen overlay's horizontal header, so a caller can make it
+        clickable (e.g. components.sortable_table.HeaderSorter)."""
+        return self._overlay.horizontalHeader()
+
     def sync_row_hidden(self) -> None:
         """Mirrors self._table's per-row hidden state onto the overlay —
         the two views share a model but NOT view state (row visibility,

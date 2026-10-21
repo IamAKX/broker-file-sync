@@ -9,6 +9,7 @@ from PySide6.QtGui import QBrush, QColor
 from components.column_filter_popup import ColumnFilterPopup
 from components.frozen_table_columns import FrozenColumns
 from components.popup_position import clamp_to_screen
+from components.sortable_table import HeaderSorter, SortableItem
 
 _CATEGORIES = ["All", "Daily", "Weekly", "Monthly", "Common"]
 
@@ -197,7 +198,7 @@ class HistoricDataViewer(QWidget):
                     cell_text = f"{value:.4f}"
                 else:
                     cell_text = str(value)
-                item = QTableWidgetItem(cell_text)
+                item = SortableItem(cell_text)
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 fill = cell_highlights.get((r, c))
                 if fill:
@@ -219,6 +220,9 @@ class HistoricDataViewer(QWidget):
         self._freeze = FrozenColumns(self._table)
         if self._frozen_headers:
             self._freeze.configure(headers, self._frozen_headers, self._freeze_style())
+        # Click a header to sort (ascending, then descending) — row-hidden
+        # state is per row POSITION, so filters are re-applied after a sort.
+        self._sorter = HeaderSorter(self._table, self._freeze, on_sorted=self._apply_row_filters)
 
     def _freeze_style(self) -> str:
         t = self._theme

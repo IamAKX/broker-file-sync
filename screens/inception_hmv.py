@@ -76,6 +76,7 @@ from PySide6.QtGui import QBrush, QColor
 from api.exceptions import ApiError, NetworkError
 from components.column_filter_popup import ColumnFilterPopup
 from components.frozen_table_columns import FrozenColumns
+from components.sortable_table import HeaderSorter, SortableItem
 from components.popup_position import clamp_to_screen
 from screens.inception_view_by_date import _display_symbol, _remap_to_display_symbols
 from services import (
@@ -391,6 +392,8 @@ class InceptionHmvScreen(QWidget):
         self._table.setShowGrid(True)
         layout.addWidget(self._table, 1)
         self._freeze = FrozenColumns(self._table)
+        # Click a header to sort asc/desc (same as LMV).
+        self._sorter = HeaderSorter(self._table, self._freeze)
 
         bottom = QHBoxLayout()
         self._status_lbl = QLabel("")
@@ -716,7 +719,7 @@ class InceptionHmvScreen(QWidget):
         for r, row in enumerate(self._data):
             row_colors = self._fmt_colors[r] if r < len(self._fmt_colors) else {}
             for c, val in enumerate(row):
-                item = QTableWidgetItem(self._fmt_cell(val))
+                item = SortableItem(self._fmt_cell(val))
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
                 from screens.live_viewer import _contrasting_text
                 # Conditional formatting (a color the user deliberately
@@ -741,6 +744,8 @@ class InceptionHmvScreen(QWidget):
         # regardless of what the saved order says about them.
         self._restore_saved_column_order()
         self._freeze.configure(self._headers, _FROZEN_HEADERS, self._freeze_style())
+        # Keep the user's sort across re-populates (strategy toggle, colour change).
+        self._sorter.reapply()
 
     def _restore_saved_column_order(self):
         """Reorders columns to match the Config Editor > "Inception Column
