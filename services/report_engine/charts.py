@@ -269,7 +269,8 @@ def line_chart(series: list, width: int = 680, height: int = 260,
 
 def bar_chart(categories: list, values: list, width: int = 680, height: int = 220,
                color: str = "#2979FF", min_bar_width: int = 18,
-               negative_color: str | None = None, show_values: bool = False) -> str:
+               negative_color: str | None = None, show_values: bool = False,
+               zoom_axis: bool = False) -> str:
     """Vertical bar chart, one bar per (category, value) pair. *width* is a
     target — if fitting ``len(categories)`` bars at *min_bar_width* each
     would exceed it, the returned SVG is WIDER than *width* instead of
@@ -280,6 +281,13 @@ def bar_chart(categories: list, values: list, width: int = 680, height: int = 22
 
     *negative_color* recolors bars below zero; *show_values* prints each
     bar's value above (or below, for negatives) it.
+
+    *zoom_axis* — for a series that stays on one side of zero and moves in a
+    narrow band (an EMA around 3,300-3,700), a scale starting at 0 makes every
+    bar look the same height. With this set the value axis spans just the data
+    range (plus a little headroom) so the rise and fall is visible, with five
+    labelled gridlines; the bars then grow from the bottom of the plot rather
+    than from zero.
     """
     n = len(values)
     if n == 0:
@@ -295,20 +303,42 @@ def bar_chart(categories: list, values: list, width: int = 680, height: int = 22
     positive_values = [v for v in values if v is not None]
     lo = min(0.0, *positive_values) if positive_values else 0.0
     hi = max(0.0, *positive_values) if positive_values else 1.0
+    zoomed = False
+    if zoom_axis and positive_values:
+        vmin, vmax = min(positive_values), max(positive_values)
+        if vmin > 0 or vmax < 0:          # one side of zero only
+            spread = vmax - vmin
+            pad = spread * 0.15 if spread > 0 else abs(vmax) * 0.05 or 1.0
+            lo, hi = vmin - pad, vmax + pad * 0.5
+            if vmin > 0:
+                lo = max(lo, 0.0)
+            zoomed = True
     if lo == hi:
         hi = lo + 1
     span = hi - lo
-    zero_y = pad_top + plot_h - ((0 - lo) / span) * plot_h
+    # Where the bars start: zero normally, the bottom of the plot when zoomed.
+    base = lo if zoomed else 0.0
+    zero_y = pad_top + plot_h - ((base - lo) / span) * plot_h
 
     parts = [
         f'<line x1="{pad_left}" y1="{zero_y:.1f}" x2="{pad_left + plot_w:.1f}" y2="{zero_y:.1f}" '
         f'stroke="#CBD5E1" stroke-width="1"/>'
     ]
-    # Y-axis values: the top, zero and bottom of the scale.
-    for tick_value, tick_y in ((hi, pad_top), (0.0, zero_y), (lo, pad_top + plot_h)):
+    if zoomed:
+        ticks = [(lo + span * k / 4, pad_top + plot_h - plot_h * k / 4) for k in range(5)]
+        for tick_value, tick_y in ticks[1:]:
+            parts.append(
+                f'<line x1="{pad_left}" y1="{tick_y:.1f}" x2="{pad_left + plot_w:.1f}" y2="{tick_y:.1f}" '
+                f'stroke="#E2E8F0" stroke-width="1" stroke-dasharray="3 3"/>'
+            )
+    else:
+        # Y-axis values: the top, zero and bottom of the scale.
+        ticks = [(hi, pad_top), (0.0, zero_y), (lo, pad_top + plot_h)]
+    decimals = 2 if (zoomed and span < 10) else 1
+    for tick_value, tick_y in ticks:
         parts.append(
             f'<text x="{pad_left - 6}" y="{tick_y + 3:.1f}" text-anchor="end" font-family="sans-serif" '
-            f'font-size="9" fill="#94a3b8">{tick_value:.1f}</text>'
+            f'font-size="9" fill="#94a3b8">{tick_value:{"," if zoomed else ""}.{decimals}f}</text>'
         )
     bar_width = bar_slot * 0.6
     for i, (cat, v) in enumerate(zip(categories, values)):

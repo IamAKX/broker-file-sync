@@ -235,3 +235,41 @@ def test_line_chart_right_axis_uses_its_own_scale_and_labels():
     assert len(ys) == 3 and max(ys) - min(ys) > 100
     plain = charts.line_chart(series[:1], x_labels=["a", "b", "c"])
     assert 'text-anchor="start"' not in plain                                            # no right ticks without a right series
+
+
+def test_bar_chart_zoom_axis_makes_a_narrow_band_visible():
+    """#84: values in 3,300-3,700 drawn from 0 look identical; zoomed they differ."""
+    import re
+    values = [3500.0, 3600.0, 3400.0, 3700.0]
+
+    def heights(svg):
+        return [float(h) for h in re.findall(r'<rect[^>]*height="([\d.]+)"', svg)]
+
+    flat = heights(charts.bar_chart(list("abcd"), values))
+    zoomed_svg = charts.bar_chart(list("abcd"), values, zoom_axis=True)
+    zoomed = heights(zoomed_svg)
+    assert (max(flat) - min(flat)) / max(flat) < 0.1              # the complaint: all but identical
+    assert (max(zoomed) - min(zoomed)) / max(zoomed) > 0.5        # now clearly different
+    assert zoomed.index(max(zoomed)) == 3 and zoomed.index(min(zoomed)) == 2
+    assert ">3,700" in zoomed_svg or ">3,6" in zoomed_svg        # labelled ticks inside the data band
+    assert ">0.0<" not in zoomed_svg
+
+
+def test_bar_chart_zoom_axis_leaves_zero_crossing_series_alone():
+    a = charts.bar_chart(["a", "b"], [4.0, -2.0])
+    b = charts.bar_chart(["a", "b"], [4.0, -2.0], zoom_axis=True)
+    assert a == b
+
+
+def test_wide_data_tables_get_a_density_class_so_they_fit_the_page():
+    """#87: a 13-column table ran off the right edge of the PDF page."""
+    def cls(n):
+        html = templates.data_table([f"c{i}" for i in range(n)], [["1"] * n])
+        return html.split('class="')[1].split('"')[0]
+
+    assert cls(5) == "report-table" and cls(8) == "report-table"
+    assert cls(9) == "report-table dense-1" and cls(11) == "report-table dense-1"
+    assert cls(13) == "report-table dense-2"
+    assert cls(16) == "report-table dense-3"
+    doc = templates.render_report(["<p>x</p>"])
+    assert "table.report-table.dense-2" in doc and "white-space: normal" in doc

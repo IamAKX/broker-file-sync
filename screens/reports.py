@@ -171,6 +171,7 @@ def _build_emv_html(report: dict) -> str:
     data = emv_report_data.build_stock_report_data(
         symbol, field, date_from, date_to, indicator_ids,
         extra_fields=subject.get("extra_fields"), field_color=subject.get("field_color"),
+        compare_close=bool(subject.get("compare_close", True)),
     )
     if len(data["series"]) > n_periods:
         data["series"] = data["series"][-n_periods:]
@@ -814,6 +815,13 @@ class ReportsScreen(QWidget):
         extra_btn_row.addWidget(remove_btn)
         extra_btn_row.addStretch()
         stock_lay.addLayout(extra_btn_row)
+        self._emv_compare_close = QCheckBox("Compare the field(s) against Close")
+        self._emv_compare_close.setChecked(True)
+        self._emv_compare_close.setToolTip(
+            "Untick to chart just the selected fields (e.g. two RSC series) — no Close line, "
+            "Close columns, state or days-below summary."
+        )
+        stock_lay.addWidget(self._emv_compare_close)
         stock_lay.addWidget(self._field_label("Number of Periods (trading days)"))
         self._emv_periods_spin = QSpinBox()
         self._emv_periods_spin.setRange(2, 500)
@@ -1291,6 +1299,7 @@ class ReportsScreen(QWidget):
                 self._set_primary_field_color(cfg.get("field_color") or emv_report_data.DEFAULT_FIELD_COLOR)
                 self._emv_extra_fields = emv_report_data.normalize_extra_fields(cfg.get("extra_fields"))
                 self._refresh_extra_field_list()
+                self._emv_compare_close.setChecked(bool(cfg.get("compare_close", True)))
                 if cfg.get("n_periods"):
                     self._emv_periods_spin.setValue(int(cfg["n_periods"]))
                 chosen = set(cfg.get("indicator_ids") or [])
@@ -1418,6 +1427,7 @@ class ReportsScreen(QWidget):
                     "field_color": self._emv_field_color,
                     "extra_fields": [dict(e) for e in self._emv_extra_fields],
                     "n_periods": self._emv_periods_spin.value(),
+                    "compare_close": self._emv_compare_close.isChecked(),
                     "indicator_ids": self._selected_indicator_ids(),
                 }
         elif self._active_report["type"] == report_store.REPORT_TYPE_SECTOR:

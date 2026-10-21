@@ -976,3 +976,29 @@ def test_fuku_wizard_show_why_unchecked_hides_section_and_round_trips(screen, qa
     screen._start_new_report(report_store.REPORT_TYPE_FUKU_LIVE)
     screen._prefill_fields(saved)
     assert screen._fuku_show_why.isChecked() is False
+
+
+def test_emv_wizard_compare_close_checkbox_is_saved_and_applied(screen, qapp):
+    """#84: unticking "Compare against Close" drops Close from the generated report."""
+    from services import report_store
+
+    _seed_bars("DIVISLAB", date(2026, 1, 1), 30)
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    assert screen._emv_compare_close.isChecked()                       # default: unchanged
+    screen._name_edit.setText("No close")
+    screen._emv_symbol_edit.setText("DIVISLAB")
+    screen._emv_field_combo.setCurrentIndex(screen._emv_field_combo.findData("DT"))
+    screen._emv_periods_spin.setValue(10)
+    screen._emv_compare_close.setChecked(False)
+
+    screen._save_and_generate()
+    qapp.processEvents()
+
+    saved = report_store.load_all()[0]
+    assert saved["subject_config"]["compare_close"] is False
+    assert "Close vs" not in screen._last_rendered_html
+    assert "Current Close" not in screen._last_rendered_html
+
+    screen._start_new_report(report_store.REPORT_TYPE_EMV)
+    screen._prefill_fields(saved)
+    assert screen._emv_compare_close.isChecked() is False

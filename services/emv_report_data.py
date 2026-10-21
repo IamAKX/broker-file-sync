@@ -123,7 +123,7 @@ def pick_axes(reference_values: list, extras: list) -> list:
 
 def build_stock_report_data(symbol: str, field: str, date_from: date, date_to: date,
                              indicator_ids: list | None = None, extra_fields: list | None = None,
-                             field_color: str | None = None) -> dict:
+                             field_color: str | None = None, compare_close: bool = True) -> dict:
     series = hfs.historical_field_series(symbol, field, date_from, date_to)
     stats = hfs.condition_stats(series)
     current_value = next((e["value"] for e in reversed(series) if e["value"] is not None), None)
@@ -136,6 +136,7 @@ def build_stock_report_data(symbol: str, field: str, date_from: date, date_to: d
         "symbol": symbol, "field": field, "date_from": date_from, "date_to": date_to,
         "sector": inception_sector.sector_for(symbol),
         "field_color": field_color or DEFAULT_FIELD_COLOR, "extras": extras,
+        "compare_close": compare_close,
         "series": series, "stats": stats,
         "current_value": current_value, "current_close": current_close,
         "indicator_ids": indicator_ids or [],
@@ -222,14 +223,20 @@ def condition_stats_for(compared: dict) -> dict:
 
 def build_stock_report_pages(data: dict) -> list:
     series, stats = data["series"], data["stats"]
+    # #84: comparing against Close is optional — without it the report is just
+    # the chosen field(s): no Close line, Close columns, state or streaks.
+    compare_close = data.get("compare_close", True)
 
-    kpis = (
-        templates.kpi_card(f'Current {data["field"]}', _fmt(data["current_value"]))
-        + templates.kpi_card("Current Close", _fmt(data["current_close"]))
+    close_kpis = (
+        templates.kpi_card("Current Close", _fmt(data["current_close"]))
         + templates.kpi_card("Current State", (stats["current_state"] or "—").title())
         + templates.kpi_card(
             "Current Streak", f'{stats["current_streak"]} periods' if stats["current_streak"] else "—"
         )
+    ) if compare_close else ""
+    kpis = (
+        templates.kpi_card(f'Current {data["field"]}', _fmt(data["current_value"]))
+        + close_kpis
         + templates.kpi_card(
             "Level Change", f'{stats["level_change_pct"]:+.2f}%' if stats["level_change_pct"] is not None else "—",
             sublabel=_level_change_basis(data["field"], series),
@@ -245,15 +252,17 @@ def build_stock_report_pages(data: dict) -> list:
             # gap can never shift against the others.
             by_date = {e["date"]: e["value"] for e in extra["series"]}
             aligned.append([by_date.get(e["date"]) for e in series])
-        axes = pick_axes([e["value"] for e in series] + [e["close"] for e in series], aligned)
+        axes = pick_axes([e["value"] for e in series] + ([e["close"] for e in series] if compare_close else []),
+                         aligned)
     if series:
         n = len(series)
         plotted = [{"label": data["field"], "points": [e["value"] for e in series],
                     "color": data.get("field_color") or DEFAULT_FIELD_COLOR}]
         for extra, points, axis in zip(extras, aligned, axes):
             plotted.append({"label": extra["field"], "color": extra["color"], "points": points, "axis": axis})
-        plotted.append({"label": "Close", "points": [e["close"] for e in series],
-                        "color": "#16a34a", "dashed": True})
+        if compare_close:
+            plotted.append({"label": "Close", "points": [e["close"] for e in series],
+                            "color": "#16a34a", "dashed": True})
         line = charts.line_chart(
             plotted, x_labels=[e["date"].strftime("%d-%b") for e in series], y_label="Value",
         )
@@ -262,6 +271,9 @@ def build_stock_report_pages(data: dict) -> list:
             # A PDF page can't scroll: let long series squeeze to the page width
             # (thin bars) instead of the chart running off the right edge.
             min_bar_width=1,
+            # An EMA near 3,500 drawn from 0 looks like a wall of equal bars;
+            # zoom the axis so the rise and fall is visible (#84).
+            zoom_axis=True,
         )
     else:
         line = bar = '<p style="color:#64748b;font-size:11px;">No historical data for this symbol/period.</p>'
@@ -274,7 +286,7 @@ def build_stock_report_pages(data: dict) -> list:
         )
         + f'<div class="kpi-row">{kpis}</div>'
         + templates.section(
-            f'{", ".join([data["field"]] + [e["field"] for e in extras])} vs Close', line)
+            f'{", ".join([data["field"]] + [e["field"] for e in extras])}' + (" vs Close" if compare_close else ""), line)
     )
 
     def _state_pill(entry):
@@ -298,23 +310,25 @@ def build_stock_report_pages(data: dict) -> list:
             compare.append({"field": extra["field"], "series": extra["series"],
                             "by_date": {e["date"]: v for e, v in zip(series, points)}})
     extra_cols = [extra["field"] for extra in extras]
-    headers = ["Date", data["field"]] + extra_cols + ["Close"] + [f'Close vs {c["field"]}' for c in compare] + ["State"]
+    if compare_close:
+        headers = ["Date", data["field"]] + extra_cols + ["Close"] + [f'Close vs {c["field"]}' for c in compare] + ["State"]
+    else:
+        headers = ["Date", data["field"]] + extra_cols
     rows = []
     for idx, e in enumerate(reversed(series)):
         pos = len(series) - 1 - idx
-        rows.append(
-            [e["date"].strftime("%d-%b-%Y"), _fmt(e["value"])]
-            + [_fmt(points[pos]) for points in aligned]
-            + [_fmt(e["close"])]
-            + [_pct_vs(e["close"], c["by_date"].get(e["date"])) for c in compare]
-            + [_state_pill(e)]
-        )
-    pct_cols = {f'Close vs {c["field"]}' for c in compare}
+        row = [e["date"].strftime("%d-%b-%Y"), _fmt(e["value"])] + [_fmt(points[pos]) for points in aligned]
+        if compare_close:
+            row += ([_fmt(e["close"])]
+                    + [_pct_vs(e["close"], c["by_date"].get(e["date"])) for c in compare]
+                    + [_state_pill(e)])
+        rows.append(row)
+    pct_cols = {f'Close vs {c["field"]}' for c in compare} if compare_close else set()
 
     # "How many days was Close below X?" — per plotted (price-scale) column:
     # days above / below, current state and streak, longest streak.
     summary_rows = []
-    for c in compare:
+    for c in (compare if compare_close else []):
         cs = condition_stats_for(c)
         total = cs["periods_above"] + cs["periods_below"]
         summary_rows.append([
@@ -344,7 +358,7 @@ def build_stock_report_pages(data: dict) -> list:
                 subtitle="Counts the trading days in the report period on which Close was below / at-or-above the column"),
             _SECTION_OVERHEAD_PX + 16 + _TABLE_HEAD_PX + len(summary_rows) * _TABLE_ROW_PX))
     return _flow_pages(page1, _PAGE1_USED_PX, blocks, "Historical Values",
-                       headers, rows, {"State"} | pct_cols, table_empty=not rows)
+                       headers, rows, ({"State"} | pct_cols) if compare_close else set(), table_empty=not rows)
 
 
 def build_stock_report_html(data: dict, doc_title: str = "EMV EOD Report") -> str:

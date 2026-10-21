@@ -521,3 +521,22 @@ def test_stock_report_table_shows_plotted_columns_pct_vs_close_and_days_below_su
     below = sum(1 for e in high_series if e["close"] is not None and e["value"] is not None and e["close"] < e["value"])
     cs = emv_report_data.condition_stats_for({"series": high_series, "by_date": {e["date"]: e["value"] for e in high_series}})
     assert cs["periods_below"] == below
+
+
+def test_stock_report_without_close_comparison_drops_every_close_element():
+    """#84: comparing against Close is optional."""
+    _seed("DIVISLAB_I", date(2026, 1, 1), 30)
+    args = ("DIVISLAB_I", "DT", date(2026, 1, 12), date(2026, 1, 30))
+    extras = [{"field": "MT", "color": "#D97706"}]
+
+    with_close = "".join(emv_report_data.build_stock_report_pages(
+        emv_report_data.build_stock_report_data(*args, extra_fields=extras)))
+    assert "Close vs" in with_close and "Current Close" in with_close and ">State<" in with_close
+
+    data = emv_report_data.build_stock_report_data(*args, extra_fields=extras, compare_close=False)
+    html = "".join(emv_report_data.build_stock_report_pages(data))
+    assert data["compare_close"] is False
+    for gone in ("Close vs", "Current Close", ">State<", ">Close<", "days below", "Current Streak"):
+        assert gone not in html, gone
+    assert ">DT<" in html and ">MT<" in html and "Current DT" in html     # the fields remain
+    assert "DT, MT vs Close" not in html and "DT, MT" in html
