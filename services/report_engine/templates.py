@@ -104,6 +104,7 @@ table.report-table th {{
 table.report-table td {{
   padding: 5px 8px; border-bottom: 1px solid var(--border); white-space: nowrap;
 }}
+table.report-table td.wrap {{ white-space: normal; max-width: 200px; line-height: 1.25; }}
 table.report-table tr:last-child td {{ border-bottom: none; }}
 /* A page can't scroll sideways, so a wide table must shrink to fit instead of
    running off the right edge (#87): the more columns, the smaller the type and
@@ -275,7 +276,14 @@ def data_table(headers: list, rows: list, column_html: set | None = None) -> str
     for row in rows:
         cells = []
         for header, value in zip(headers, row):
-            cells.append(f"<td>{value if header in column_html else esc(value)}</td>")
+            if header in column_html:
+                cells.append(f"<td>{value}</td>")
+                continue
+            # A long cell (e.g. a strategy name) wraps onto a second line instead
+            # of stretching the table past the page edge; "\n" is an explicit break.
+            text = esc(value).replace("\n", "<br>")
+            wrap = ' class="wrap"' if len(str(value)) > 28 else ""
+            cells.append(f"<td{wrap}>{text}</td>")
         body_rows.append(f"<tr>{''.join(cells)}</tr>")
     n = len(headers)
     density = "" if n <= 8 else (" dense-1" if n <= 11 else (" dense-2" if n <= 14 else " dense-3"))

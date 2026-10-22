@@ -39,7 +39,7 @@ def test_exit_cell_says_how_many_targets_were_booked_for_a_blended_trade():
     y, n_hit, n_total = L.scale_out_yield(trade, 4544.5, 4555.0, "SELL")
     assert round(y, 2) == 0.22
     row = {"exit": 4555.0, "booked_targets": (n_hit, n_total)}
-    assert report_columns.lmv_cell("Exit", "S", row, str) == "4,555.00 (3/6 booked)"
+    assert report_columns.lmv_cell("Exit", "S", row, str) == "4,555.00\n(3/6 booked)"
     assert report_columns.lmv_cell("Exit", "S", {"exit": 4555.0, "booked_targets": None}, str) == "4,555.00"
 
 
