@@ -27,6 +27,22 @@ def test_lmv_cell_reads_signal_fields_and_metrics():
     assert report_columns.lmv_cell("Nope", "S", row, str) == "—"
 
 
+def test_exit_cell_says_how_many_targets_were_booked_for_a_blended_trade():
+    """#107: TORNTPHARM SELL 4544.5, 3 of 6 targets hit, then stopped at 4555 —
+    the blended yield is +0.22%, so the 4555 exit must not stand alone."""
+    from services import lmv_report_data as L
+    trade = {"entry_price": 4544.5, "exit_price": 4555.0, "direction": "SELL",
+             "resolution": "stopped_out", "metrics": {
+                 f"t{i}": {"role": "target", "value": v, "achieved": a}
+                 for i, (v, a) in enumerate([(4476.4, False), (4491.7, False), (4512.9, True),
+                                              (4526.6, True), (4456.9, False), (4502.5, True)])}}
+    y, n_hit, n_total = L.scale_out_yield(trade, 4544.5, 4555.0, "SELL")
+    assert round(y, 2) == 0.22
+    row = {"exit": 4555.0, "booked_targets": (n_hit, n_total)}
+    assert report_columns.lmv_cell("Exit", "S", row, str) == "4,555.00 (3/6 booked)"
+    assert report_columns.lmv_cell("Exit", "S", {"exit": 4555.0, "booked_targets": None}, str) == "4,555.00"
+
+
 def test_emv_cell_reads_arbitrary_field_values():
     row = {"symbol": "X", "sector": "IT", "score": {"score": 80, "max_score": 100},
            "values": {"DT": 1234.5, "Flag": "Y"}}

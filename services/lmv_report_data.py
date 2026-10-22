@@ -772,7 +772,10 @@ def build_report_pages(data: dict, columns: list | None = None) -> list:
             '<p class="fk-note">A trade that achieved some, but not all, of its targets is counted with the profit made '
             "on the way: its position is split equally across the targets, each achieved target books its share at "
             "that target's price, and the remaining share exits at the stop-loss (stopped out) or is marked at the last "
-            "price (still open — shown as <b>PARTIAL n/N</b>). Trades that reached every target are unchanged.</p>")), 90))
+            "price (still open — shown as <b>PARTIAL n/N</b>). The <b>Exit</b> column shows that last price / stop "
+            "with the number of targets already booked, e.g. <b>4,555.00 (3/6 booked)</b>, so the Yield can be "
+            "positive for a SELL even when the exit is above the entry. Trades that reached every target are "
+            "unchanged.</p>")), 100))
 
     if not all_rows:
         blocks.append((templates.section(

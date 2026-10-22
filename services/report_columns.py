@@ -75,7 +75,12 @@ def lmv_cell(column: str, strategy_name: str, row: dict, fmt_pct) -> str:
     if column == "Entry":
         return _fmt_price(row["entry"])
     if column == "Exit":
-        return _fmt_price(row["exit"])
+        # A trade that booked some targets before its stop / while still open
+        # is yielded as a blend (#94), so the last price alone would read as
+        # contradicting the Yield (#107) — say how many targets were booked.
+        booked = row.get("booked_targets")
+        suffix = f" ({booked[0]}/{booked[1]} booked)" if booked else ""
+        return _fmt_price(row["exit"]) + suffix
     if column == "Yield":
         return fmt_pct(row["yield"])
     if column == "Days True":
