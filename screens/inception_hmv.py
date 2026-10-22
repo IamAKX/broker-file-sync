@@ -110,6 +110,28 @@ class _StreakWarmWorker(QThread):
         self.done.emit()
 
 
+class _ExtraHistoryWorker(QThread):
+    """Builds the day-history a newly applied strategy needs (the load only
+    built it for the strategies active at the time — issue #102) off the GUI
+    thread, merges it into the shared dict, and warms the streak lookup."""
+    done = Signal()
+
+    def __init__(self, rows, as_of_date, extra, applied, day_history, lookup, headers, data, parent=None):
+        super().__init__(parent)
+        self._args = (rows, as_of_date, extra, applied, day_history, lookup, headers, data)
+
+    def run(self):
+        rows, as_of_date, extra, applied, day_history, lookup, headers, data = self._args
+        try:
+            more = _HmvLoadWorker._merge_formula_builder_columns_and_day_history(rows, as_of_date, extra)
+            inception_day_history.merge_into(day_history, more)
+            if lookup is not None and any(s.get("row_filter") for s in applied):
+                lookup.warm(applied, headers, data, day_history, inception_formula_variable_store)
+        except Exception:
+            pass
+        self.done.emit()
+
+
 class _HmvLoadWorker(QThread):
     progress = Signal(int, int)          # done, total instruments
     # day_history declared `object`, not `dict` — its keys are (col_name,
@@ -138,7 +160,10 @@ class _HmvLoadWorker(QThread):
             )
             day_history = {}
             if as_of_date is not None:
-                day_history = self._merge_formula_builder_columns_and_day_history(rows, as_of_date)
+                # Only the strategies active now need their day-history built
+                # (issue #102); the picker builds any others on demand.
+                day_history = self._merge_formula_builder_columns_and_day_history(
+                    rows, as_of_date, [s for s in self._strategies if s.get("active")])
                 self.streak_lookup = emv_report_data.StreakLookup(as_of_date)
                 if any(s.get("active") and s.get("row_filter") for s in self._strategies):
                     headers, data = _rows_to_table(rows)
@@ -150,7 +175,8 @@ class _HmvLoadWorker(QThread):
         self.succeeded.emit(as_of_date, rows, day_history)
 
     @staticmethod
-    def _merge_formula_builder_columns_and_day_history(rows: list, as_of_date: date) -> dict:
+    def _merge_formula_builder_columns_and_day_history(rows: list, as_of_date: date,
+                                                       strategies: list | None = None) -> dict:
         """Adds LMV's ~56 Formula Builder columns (MT, MB, DT, DB, PMH, the
         camarilla pivot ladders, ...) to every row's values dict, computed
         from that same instrument's local bar history — see services.
@@ -184,7 +210,8 @@ class _HmvLoadWorker(QThread):
         call site instead of always running, e.g. for a caller that only
         needs the raw/Group A-B values.
         """
-        strategies = inception_strategy_store.load_all()
+        if strategies is None:
+            strategies = inception_strategy_store.load_all()
         specs = inception_day_history.raw_day_specs(strategies)
         extreme_specs = inception_day_history.raw_extreme_specs(strategies)
         vbc_specs = inception_value_before_change.specs_for_strategies(strategies)
@@ -312,6 +339,8 @@ class InceptionHmvScreen(QWidget):
         self._as_of_date = None
         self._streak_lookup_fn = None
         self._streak_worker = None
+        self._rows: list = []
+        self._history_built_for: set = set()
         self._visible_cols: set = set()
         self._worker: _HmvLoadWorker | None = None
         # "Changed since last Load/View" cell highlighting — see services.
@@ -578,6 +607,9 @@ class InceptionHmvScreen(QWidget):
         self._progress_bar.setVisible(False)
         self._day_history = day_history
         self._as_of_date = as_of_date
+        self._rows = rows
+        self._history_built_for = {s["id"] for s in (self._worker._strategies if self._worker is not None else [])
+                                   if s.get("active")}
         self._streak_lookup_fn = self._worker.streak_lookup if self._worker is not None else None   # issue #101
 
         self._as_of_lbl.setText(f"As of {as_of_date.isoformat()}" if as_of_date else "No synced trading day in this range")
@@ -661,6 +693,17 @@ class InceptionHmvScreen(QWidget):
         # "Days True"/"Since" of a newly applied strategy are computed off the
         # GUI thread first (issue #101), then the grid is rebuilt once.
         lookup = self._streak_lookup()
+        extra = [s for s in self._strategies if s.get("active") and s["id"] not in self._history_built_for]
+        if extra and self._rows and self._as_of_date is not None and self._raw_headers:
+            self._history_built_for |= {s["id"] for s in extra}
+            applied = [s for s in self._strategies if s.get("active")]
+            self._streak_worker = _ExtraHistoryWorker(
+                self._rows, self._as_of_date, extra, applied, self._day_history, lookup,
+                self._raw_headers, self._raw_data, parent=self)
+            self._streak_worker.done.connect(self._recompute_display)
+            self._status_lbl.setText("Computing history for the newly applied strategies…")
+            self._streak_worker.start()
+            return
         if lookup is not None and self._raw_headers and any(
                 s.get("active") and s.get("row_filter") for s in self._strategies):
             self._streak_worker = _StreakWarmWorker(

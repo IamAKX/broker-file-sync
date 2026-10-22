@@ -167,6 +167,22 @@ def available_symbols() -> list[str]:
     return [r[0] for r in rows]
 
 
+def bar_summaries(date_to: date | None = None) -> dict[str, tuple]:
+    """{symbol: (bar_count, first_date, last_date)} over bars on or before
+    *date_to* — one grouped query. Lets a caller that only needs these (e.g.
+    a cache fingerprint) skip fetching every instrument's full ~5000-bar
+    history."""
+    sql = "SELECT symbol, COUNT(*), MIN(trade_date), MAX(trade_date) FROM eod_bars"
+    params: list = []
+    if date_to is not None:
+        sql += " WHERE trade_date <= ?"
+        params.append(date_to.isoformat())
+    sql += " GROUP BY symbol"
+    with _connect() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return {r[0]: (r[1], date.fromisoformat(r[2]), date.fromisoformat(r[3])) for r in rows}
+
+
 def bars_for_symbol(symbol: str, date_from: date | None = None, date_to: date | None = None) -> list[dict]:
     """Ascending-by-trade_date bars for one symbol — the shape
     services.inception_formula_engine.compute_group_a/compute_group_b

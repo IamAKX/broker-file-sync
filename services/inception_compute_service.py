@@ -122,22 +122,28 @@ def _compute_all_rows(symbols: list[str], as_of_date: date, settings: dict,
     # enough to route through compute_rows_parallel below.
     prepared: dict[str, tuple] = {}
     to_compute: list[tuple] = []
+    # The cache key needs only (bar count, first date, last date) — one grouped
+    # query for all symbols; the full bars are fetched just for a cache MISS
+    # (fetching ~5000 bars per instrument made even a fully warm View take
+    # seconds — issue #102).
+    summaries = inception_bars_store.bar_summaries(as_of_date)
     for symbol in symbols:
-        bars = inception_bars_store.bars_for_symbol(symbol, date_to=as_of_date)
-        if not bars or bars[-1]["trade_date"] != as_of_date:
+        summary = summaries.get(symbol)
+        if summary is None or summary[2] != as_of_date:
             _tick()
             continue
+        count, first_traded, last_date = summary
         fingerprint = (
-            len(bars), bars[-1]["trade_date"],
+            count, last_date,
             settings["gap_threshold_pct"], settings["week_window_days"], settings["fifo_cap"],
         )
         cache_key = (symbol, fingerprint)
         cached = _row_cache.get(cache_key)
-        first_traded = bars[0]["trade_date"]
         if cached is not None:
             prepared[symbol] = (cache_key, first_traded, dict(cached))   # copy — caller may mutate (range gate)
             _tick()
         else:
+            bars = inception_bars_store.bars_for_symbol(symbol, date_to=as_of_date)
             prepared[symbol] = (cache_key, first_traded, None)
             to_compute.append((symbol, bars, settings))
 

@@ -3135,3 +3135,43 @@ def test_settings_screen_vendor_sync_skipped_while_already_running(qapp, control
 
     assert len(calls) == 1
     assert screen._vendor_worker is first_worker
+
+
+def test_hmv_builds_day_history_only_for_active_strategies_then_on_demand(qapp, controller, monkeypatch, bars_db):
+    """Issue #102 — Load builds the history for the active strategies only; a
+    strategy applied later from the picker gets its own built in the background."""
+    from screens import inception_hmv
+    from screens.inception_hmv import InceptionHmvScreen, _HmvLoadWorker
+    from services import inception_strategy_store
+    from PySide6.QtCore import QDate
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+    strategies = [
+        {"id": "s1", "name": "A", "active": True, "row_filter": [], "columns": []},
+        {"id": "s2", "name": "B", "active": False, "row_filter": [], "columns": []},
+    ]
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [dict(s) for s in strategies])
+    calls = []
+    real = _HmvLoadWorker._merge_formula_builder_columns_and_day_history
+
+    def spy(rows, as_of, strats=None):
+        calls.append([s["id"] for s in strats] if strats is not None else None)
+        return real(rows, as_of, strats)
+    monkeypatch.setattr(_HmvLoadWorker, "_merge_formula_builder_columns_and_day_history", staticmethod(spy))
+
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2026, 1, 1))
+    screen._to_date.setDate(QDate(2026, 8, 18))
+    screen._on_load()
+    _run_worker(qapp, screen)
+    assert calls == [["s1"]]
+
+    updated = [dict(s, active=True) for s in screen._strategies]
+    screen._on_strategies_applied(updated)
+    import time
+    end = time.time() + 20
+    while screen._streak_worker is not None and screen._streak_worker.isRunning() and time.time() < end:
+        qapp.processEvents(); time.sleep(0.01)
+    qapp.processEvents()
+    assert calls == [["s1"], ["s2"]]
+    assert screen._strat_btn.text() == "⚡  Strategies  2/2"
