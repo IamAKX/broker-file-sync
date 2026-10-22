@@ -39,6 +39,10 @@ from services.notifications.payload import NotificationPayload
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="email-notify")
 
 
+_MAX_MESSAGE_CHARS = 10000
+_TRUNCATED_NOTE = "\n… (truncated)"
+
+
 class EmailChannel(NotificationChannel):
     CHANNEL_ID = "email"
 
@@ -51,6 +55,11 @@ class EmailChannel(NotificationChannel):
 
     @staticmethod
     def _send_now(title: str, message: str) -> None:
+        if len(message) > _MAX_MESSAGE_CHARS:
+            # The backend rejects bodies over 10,000 characters (a burst of
+            # alerts batched into one mail can exceed it) — truncate rather
+            # than lose the whole notification.
+            message = message[:_MAX_MESSAGE_CHARS - len(_TRUNCATED_NOTE)] + _TRUNCATED_NOTE
         try:
             notifications_api.send_email(title, message)
         except (ApiError, NetworkError) as exc:

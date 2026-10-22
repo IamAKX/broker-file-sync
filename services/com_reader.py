@@ -72,6 +72,7 @@ class ExcelLiveReader:
     def __init__(self):
         self._excel = None
         self._wb_cache: dict[str, object] = {}   # basename(lower) → Workbook COM obj
+        self._last_good: dict[str, tuple] = {}   # basename(lower) → (monotonic ts, result)
         self._com_inited = False
         # Why the most recent read_workbook_sheet() returned None ("" after a
         # success). Callers silently fall back to the stale on-disk file on
@@ -163,22 +164,25 @@ class ExcelLiveReader:
             return None
         self.last_failure = ""
         target_name = os.path.basename(workbook_path).lower()
-        wb = self._get_workbook(target_name)
-        if wb is None:
-            if self._excel is None and not self.last_failure:
-                self.last_failure = "no running Excel instance found (GetActiveObject failed)"
-            return None
-        try:
-            sheet = wb.Sheets(1)
-        except Exception as exc:
-            # Workbook handle went stale between lookup and use.
-            self.last_failure = f"could not open sheet 1: {exc!r}"
-            self._wb_cache.pop(target_name, None)
-            self._excel = None
-            return None
         # Excel rejects COM calls while a cell is being edited or a dialog is
-        # open — transient, so retry once before dropping to the stale disk copy.
+        # open, and a DDE-fed workbook's handle can go stale ("Member not
+        # found") — transient, so retry once on FRESH handles (re-attach and
+        # re-open the sheet) before the caller drops to a fallback.
         for attempt in (1, 2):
+            wb = self._get_workbook(target_name)
+            if wb is None:
+                if self._excel is None and not self.last_failure:
+                    self.last_failure = "no running Excel instance found (GetActiveObject failed)"
+                return None
+            try:
+                sheet = wb.Sheets(1)
+            except Exception as exc:
+                self.last_failure = f"could not open sheet 1: {exc!r}"
+                self._invalidate()
+                if attempt == 1:
+                    time.sleep(0.05)
+                    continue
+                return None
             try:
                 result, reason = _read_sheet_cells_ex(sheet, col_names, header_row_idx)
             except Exception as exc:
@@ -189,7 +193,19 @@ class ExcelLiveReader:
                     continue
             if result is None:
                 self.last_failure = reason
+            else:
+                self._last_good[target_name] = (time.monotonic(), result)
             return result
+        return None
+
+    def last_good(self, workbook_path: str, max_age: float):
+        """The most recent successful live read of *workbook_path* if it is at
+        most *max_age* seconds old, else None. Lets a caller ride out a brief
+        COM hiccup on near-live data instead of re-parsing a (much staler,
+        and far slower to read) file from disk on every tick."""
+        entry = self._last_good.get(os.path.basename(workbook_path).lower())
+        if entry and time.monotonic() - entry[0] <= max_age:
+            return entry[1]
         return None
 
 

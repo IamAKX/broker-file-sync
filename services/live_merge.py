@@ -118,6 +118,10 @@ def merge_broker_sources(
     return out_headers, merged
 
 
+# How long a failed live Excel read may be bridged with the last good live read.
+_COM_GRACE_SECONDS = 20.0
+
+
 class LiveDataReader:
     def __init__(self, sharekhan_path, reliable_path, nifty_paths,
                  script_name_data, expiry_date=None,
@@ -226,6 +230,12 @@ class LiveDataReader:
                 self._warned_reason = None
                 return result
             self._note_com_fallback(self._excel.last_failure)
+            # A brief COM hiccup: keep serving the last live read rather than
+            # re-parsing the (stale, slow-to-read) workbook file every tick.
+            last_good = getattr(self._excel, "last_good", None)
+            cached = last_good(self._sharekhan_path, _COM_GRACE_SECONDS) if last_good else None
+            if cached is not None:
+                return cached
         elif self._use_com:
             self._note_com_fallback("COM reader not started")
         return read_sharekhan(self._sharekhan_path)

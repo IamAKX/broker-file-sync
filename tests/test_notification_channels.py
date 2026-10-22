@@ -377,3 +377,13 @@ def test_notification_service_none_channels_delivers_to_all(qapp):
 
     assert tray.messages
     assert email_calls == [1]
+
+
+def test_email_body_over_backend_limit_is_truncated():
+    from unittest.mock import patch
+    from services.notifications.channels.email import EmailChannel, _MAX_MESSAGE_CHARS
+    from services.notifications.payload import NotificationPayload
+    with patch("services.notifications.channels.email.notifications_api.send_email") as send:
+        EmailChannel().send(NotificationPayload(title="T", message="x" * 25000)).result(timeout=5)
+    sent = send.call_args[0][1]
+    assert len(sent) == _MAX_MESSAGE_CHARS and sent.endswith("(truncated)")
