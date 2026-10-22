@@ -141,7 +141,7 @@ def compute_for_bars(symbol: str, bars: list[dict]) -> dict:
         for b in bars
     }
     hist = formula_engine.StockHistory(rows_by_date, _holidays_for(bars))
-    values = formula_engine.compute_for_symbol(hist, target)
+    values = formula_engine.compute_for_symbol(hist, target, exclude_target_from_current_ranges=True)
     for code, bar_key in _LMV_SYNCED_CODE_MAP.items():
         values[code] = bars[-1].get(bar_key)
     values["Avg Rate"] = bars[-1].get("avg_rate")

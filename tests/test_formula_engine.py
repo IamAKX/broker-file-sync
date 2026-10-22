@@ -404,3 +404,27 @@ def test_compute_custom_aggregate_none_for_uncomputable_or_empty_history():
     assert fe.compute_custom_aggregate(hist, target, [{"type": "field", "value": "HIGH"}]) is None
     empty_hist = fe.StockHistory({})
     assert fe.compute_custom_aggregate(empty_hist, target, _n_days_token()) is None
+
+
+def test_current_ranges_can_exclude_the_target_day():
+    """Inception opts in so Close < CML / Close > CMH can fire for a past date,
+    like they do in the LMV whose history ends yesterday (#104)."""
+    days, hist = _build_history(date(2026, 6, 1), 70)
+    target = next(d for d in days[30:] if d.weekday() == 3 and d.day > 5)   # mid-week, mid-month
+    month_start = target.replace(day=1)
+    week_start = target - timedelta(days=target.weekday())
+    mtd = [j for j, d in enumerate(days) if month_start <= d < target]
+    wtd = [j for j, d in enumerate(days) if week_start <= d < target]
+    out = fe.compute_for_symbol(hist, target, exclude_target_from_current_ranges=True)
+    assert out["CMH"] == 100 + max(mtd) and out["CML"] == 90 + min(mtd)
+    assert out["CWH"] == 100 + max(wtd) and out["CWL"] == 90 + min(wtd)
+    # default unchanged (LMV)
+    assert fe.compute_for_symbol(hist, target)["CMH"] == 100 + max(mtd + [days.index(target)])
+
+
+def test_current_ranges_are_none_on_the_first_trading_day_when_excluded():
+    days, hist = _build_history(date(2026, 6, 1), 70)
+    first = next(d for d in days if d.day <= 3 and d > days[0])
+    month_first = next(d for d in days if d.month == first.month)
+    out = fe.compute_for_symbol(hist, month_first, exclude_target_from_current_ranges=True)
+    assert out["CMH"] is None and out["CML"] is None

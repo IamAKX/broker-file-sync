@@ -268,7 +268,13 @@ def _compute_day_to(hist: StockHistory, d: date):
     return (qty * avgrate) / 10_000_000 * (abs(diffpcnt) / 100)
 
 
-def compute_for_symbol(hist: StockHistory, target: date) -> dict:
+def compute_for_symbol(hist: StockHistory, target: date, exclude_target_from_current_ranges: bool = False) -> dict:
+    """*exclude_target_from_current_ranges*: CMH/CML/CWH/CWL stop at the trading
+    day BEFORE *target* (None when there is none yet this week/month). That is
+    what the LMV sees — its history ends yesterday, so a live price can break
+    them. For a past date the target's own bar is in *hist*, which would make
+    "Close < CML" / "Close > CMH" impossible, so Inception (EMV) opts in to
+    replay LMV's meaning (#104)."""
     out = {}
 
     open_t = hist.get(RAW_OPEN, target)
@@ -285,10 +291,14 @@ def compute_for_symbol(hist: StockHistory, target: date) -> dict:
     mtd_dates = hist.trading_dates_in(month_start, target)
     wtd_dates = hist.trading_dates_in(week_start, target)
 
-    out["CMH"] = _max(hist, RAW_HIGH, mtd_dates)
-    out["CML"] = _min(hist, RAW_LOW, mtd_dates)
-    out["CWH"] = _max(hist, RAW_HIGH, wtd_dates)
-    out["CWL"] = _min(hist, RAW_LOW, wtd_dates)
+    range_mtd, range_wtd = mtd_dates, wtd_dates
+    if exclude_target_from_current_ranges:
+        range_mtd = [d for d in mtd_dates if d < target]
+        range_wtd = [d for d in wtd_dates if d < target]
+    out["CMH"] = _max(hist, RAW_HIGH, range_mtd)
+    out["CML"] = _min(hist, RAW_LOW, range_mtd)
+    out["CWH"] = _max(hist, RAW_HIGH, range_wtd)
+    out["CWL"] = _min(hist, RAW_LOW, range_wtd)
 
     cwo_day = hist.first_trading_day_on_or_after(week_start, limit=target)
     out["CWO"] = hist.get(RAW_OPEN, cwo_day) if cwo_day else None
