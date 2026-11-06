@@ -61,6 +61,11 @@ def save_special_trading_days(days) -> None:
     ordered = sorted(set(days))
     config_store.save_json(SPECIAL_TRADING_DAYS_KEY, [d.isoformat() for d in ordered])
     set_special_trading_days(ordered)
+    try:   # the alert gate caches today's answer; force a re-check
+        from services.strategy_alerts import alert_schedule
+        alert_schedule.invalidate_trading_day_cache()
+    except Exception:
+        pass
 
 
 def get_holiday_set(year_from: int, year_to: int) -> set:

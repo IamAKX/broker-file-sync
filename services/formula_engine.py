@@ -79,6 +79,9 @@ class StockHistory:
         return _to_float(row.get(metric))
 
     def is_trading_day(self, d: date) -> bool:
+        from services import trading_calendar
+        if d in trading_calendar.special_trading_days():
+            return True   # configured weekend/holiday session (e.g. Muhurat)
         return d.weekday() < 5 and d not in self._holidays
 
     def dates_in(self, d_from: date, d_to: date) -> list:

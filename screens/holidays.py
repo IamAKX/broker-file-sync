@@ -15,7 +15,7 @@ import font_scale
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QSpinBox, QMessageBox, QCalendarWidget, QInputDialog
+    QSpinBox, QMessageBox, QCalendarWidget, QInputDialog, QListWidget
 )
 from PySide6.QtCore import Qt, QByteArray, QSize, QTimer, QDate
 from PySide6.QtGui import QIcon, QPixmap, QPainter
@@ -229,6 +229,11 @@ class HolidaysScreen(QWidget):
         self._special_remove_btn.clicked.connect(self._remove_special_day)
         special_row.addWidget(self._special_remove_btn)
         layout.addLayout(special_row)
+        self._special_list = QListWidget()
+        self._special_list.setFont(font_scale.font(font_scale.SMALL, False))
+        self._special_list.setFixedHeight(90)
+        self._special_list.setToolTip("Saved special trading days")
+        layout.addWidget(self._special_list)
         self._refresh_special_label()
 
         bottom_row = QHBoxLayout()
@@ -254,10 +259,14 @@ class HolidaysScreen(QWidget):
 
     def _refresh_special_label(self):
         days = sorted(trading_calendar.special_trading_days())
-        text = ", ".join(d.strftime(_DATE_FORMAT) for d in days) if days else "none"
         self._special_lbl.setText(
-            "Special trading days (market open on a weekend/holiday, e.g. Muhurat): " + text
+            "Special trading days (market open on a weekend/holiday, e.g. Muhurat): "
+            + ("" if days else "none saved")
         )
+        self._special_list.clear()
+        for d in days:
+            self._special_list.addItem(d.strftime(_DATE_FORMAT + " (%A)"))
+        self._special_list.setVisible(bool(days))
 
     def _add_special_day(self):
         trading_calendar.load_special_trading_days()

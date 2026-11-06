@@ -130,6 +130,14 @@ def _do_check(today: date, on_ready) -> None:
         _safe_call(on_ready)
 
 
+def invalidate_trading_day_cache() -> None:
+    """Forget today's cached answer so the next ensure_* call re-checks
+    (used when special trading days change)."""
+    global _checked_date
+    with _lock:
+        _checked_date = None
+
+
 def ensure_trading_day_known_async(on_ready=None) -> None:
     """Kicks a one-time (per calendar date) background check of whether
     *today* is a real trading day. Idempotent for the same date — a second
