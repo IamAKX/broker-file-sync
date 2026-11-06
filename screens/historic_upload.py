@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QCheckBox, QScrollArea, QMessageBox
 )
 from PySide6.QtCore import Qt, QDate, QTimer
-from PySide6.QtGui import QPainter, QColor, QBrush
+from PySide6.QtGui import QPainter, QColor, QBrush, QTextCharFormat
 
 from config_defaults import SCRIPT_NAME_DATA
 from services import config_store
@@ -49,8 +49,29 @@ class _HolidayCalendar(QCalendarWidget):
         self._holiday_days = days
         self.updateCells()
 
+    def set_special_days(self, days: set):
+        """Weekend/holiday sessions (e.g. Muhurat): drawn as normal working
+        days (not the weekend red) with a green dot."""
+        for d in getattr(self, "_special_qdates", ()):
+            self.setDateTextFormat(d, QTextCharFormat())
+        fmt = QTextCharFormat()
+        fmt.setForeground(QColor(self._theme.get("text_primary")))
+        self._special_qdates = [QDate(d.year, d.month, d.day) for d in days]
+        self._special_set = set(days)
+        for q in self._special_qdates:
+            self.setDateTextFormat(q, fmt)
+        self.updateCells()
+
     def paintCell(self, painter, rect, date_obj):
         super().paintCell(painter, rect, date_obj)
+        if date(date_obj.year(), date_obj.month(), date_obj.day()) in getattr(self, "_special_set", ()):
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setBrush(QBrush(QColor(self._theme.get("status_teal"))))
+            painter.setPen(Qt.PenStyle.NoPen)
+            r = max(2, min(3, rect.height() // 10))
+            painter.drawEllipse(rect.center().x() - r, rect.bottom() - r * 2 - 2, r * 2, r * 2)
+            painter.restore()
         if (date_obj.year() == self.yearShown() and
                 date_obj.month() == self.monthShown() and
                 date_obj.day() in self._holiday_days):
@@ -378,6 +399,8 @@ class HistoricUploadScreen(QWidget):
         self._picker_holidays: set = set()
 
         def refresh_holidays(year, month):
+            from services import trading_calendar
+            cal.set_special_days(set(trading_calendar.load_special_trading_days()))
             try:
                 rows = holidays_api.list_holidays(year)
             except (ApiError, NetworkError):
