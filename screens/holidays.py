@@ -261,16 +261,23 @@ class HolidaysScreen(QWidget):
 
     def _add_special_day(self):
         trading_calendar.load_special_trading_days()
-        raw, ok = QInputDialog.getText(
-            self, "Special Trading Day", "Date (DD-Mon-YYYY, e.g. 08-Nov-2026):"
-        )
-        if not ok or not raw.strip():
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Special Trading Day")
+        dl = QVBoxLayout(dlg)
+        dl.addWidget(QLabel("Pick a date when the market is open on a weekend/holiday (e.g. Muhurat):"))
+        cal = QCalendarWidget()
+        cal.setGridVisible(True)
+        cal.setSelectedDate(QDate.currentDate())
+        dl.addWidget(cal)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        dl.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        try:
-            d = __import__("datetime").datetime.strptime(raw.strip(), _DATE_FORMAT).date()
-        except ValueError:
-            QMessageBox.warning(self, "Special Trading Day", "Use the format DD-Mon-YYYY, e.g. 08-Nov-2026.")
-            return
+        qd = cal.selectedDate()
+        d = date(qd.year(), qd.month(), qd.day())
         try:
             trading_calendar.save_special_trading_days(trading_calendar.special_trading_days() | {d})
         except (ApiError, NetworkError) as exc:
