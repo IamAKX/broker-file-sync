@@ -15,13 +15,14 @@ import font_scale
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QFrame,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QSpinBox, QMessageBox, QCalendarWidget
+    QSpinBox, QMessageBox, QCalendarWidget, QInputDialog
 )
 from PySide6.QtCore import Qt, QByteArray, QSize, QTimer, QDate
 from PySide6.QtGui import QIcon, QPixmap, QPainter
 from PySide6.QtSvg import QSvgRenderer
 
 from api import holidays_api
+from services import trading_calendar
 from api.exceptions import ApiError, NetworkError
 from components.error_popup import show_api_error
 
@@ -136,6 +137,7 @@ class HolidaysScreen(QWidget):
         # blocking QMessageBox popping up unprompted — with no user present
         # to dismiss it in an automated/headless run — hangs the process.
         QTimer.singleShot(0, lambda: self._load_holidays(show_popup_on_error=False))
+        QTimer.singleShot(0, self._load_special_days_quiet)
 
     def _build(self):
         t = self._theme
@@ -204,6 +206,31 @@ class HolidaysScreen(QWidget):
         hh.resizeSection(_DEL_COL, 44)
         layout.addWidget(self._table, 1)
 
+        # Weekend/holiday sessions the market is actually open (e.g. Diwali
+        # Muhurat). Independent of the holiday table above: scheduled jobs,
+        # live alerts and "previous trading day" treat these dates as trading
+        # days. Saved immediately (not via the Save button above).
+        special_row = QHBoxLayout()
+        self._special_lbl = QLabel("")
+        self._special_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._special_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
+        self._special_lbl.setWordWrap(True)
+        special_row.addWidget(self._special_lbl, 1)
+        self._special_add_btn = QPushButton("+ Special Trading Day")
+        self._special_add_btn.setFixedHeight(30)
+        self._special_add_btn.setFont(font_scale.font(font_scale.SMALL, False))
+        self._special_add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._special_add_btn.clicked.connect(self._add_special_day)
+        special_row.addWidget(self._special_add_btn)
+        self._special_remove_btn = QPushButton("Remove…")
+        self._special_remove_btn.setFixedHeight(30)
+        self._special_remove_btn.setFont(font_scale.font(font_scale.SMALL, False))
+        self._special_remove_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._special_remove_btn.clicked.connect(self._remove_special_day)
+        special_row.addWidget(self._special_remove_btn)
+        layout.addLayout(special_row)
+        self._refresh_special_label()
+
         bottom_row = QHBoxLayout()
         bottom_row.addStretch()
         self._save_btn = QPushButton("Save")
@@ -218,6 +245,79 @@ class HolidaysScreen(QWidget):
         self._save_btn.clicked.connect(self._save)
         bottom_row.addWidget(self._save_btn)
         layout.addLayout(bottom_row)
+
+    # ── Special trading days ─────────────────────────────────────────────
+
+    def _load_special_days_quiet(self):
+        trading_calendar.load_special_trading_days()
+        self._refresh_special_label()
+
+    def _refresh_special_label(self):
+        days = sorted(trading_calendar.special_trading_days())
+        text = ", ".join(d.strftime(_DATE_FORMAT) for d in days) if days else "none"
+        self._special_lbl.setText(
+            "Special trading days (market open on a weekend/holiday, e.g. Muhurat): " + text
+        )
+
+    def _add_special_day(self):
+        trading_calendar.load_special_trading_days()
+        from PySide6.QtWidgets import QDialog, QDialogButtonBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Special Trading Day")
+        dl = QVBoxLayout(dlg)
+        dl.addWidget(QLabel("Pick a date when the market is open on a weekend/holiday (e.g. Muhurat):"))
+        cal = QCalendarWidget()
+        cal.setGridVisible(True)
+        cal.setSelectedDate(QDate.currentDate())
+        dl.addWidget(cal)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(dlg.accept)
+        bb.rejected.connect(dlg.reject)
+        dl.addWidget(bb)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        qd = cal.selectedDate()
+        d = date(qd.year(), qd.month(), qd.day())
+        try:
+            trading_calendar.save_special_trading_days(trading_calendar.special_trading_days() | {d})
+        except (ApiError, NetworkError) as exc:
+            show_api_error(self, exc) if isinstance(exc, ApiError) else QMessageBox.warning(self, "Special Trading Day", str(exc))
+            return
+        self._refresh_special_label()
+        if any(row_date == d for row_date in self._current_holiday_dates()):
+            QMessageBox.information(
+                self, "Special Trading Day",
+                f"{d.strftime(_DATE_FORMAT)} is also listed as a market holiday above. "
+                "Delete that holiday row and Save, otherwise Historic Upload will still reject this date."
+            )
+
+    def _current_holiday_dates(self) -> list:
+        out = []
+        for r in range(self._table.rowCount()):
+            w = self._table.cellWidget(r, _DATE_COL)
+            try:
+                out.append(__import__("datetime").datetime.strptime(w.text(), _DATE_FORMAT).date())
+            except Exception:
+                continue
+        return out
+
+    def _remove_special_day(self):
+        trading_calendar.load_special_trading_days()
+        days = sorted(trading_calendar.special_trading_days())
+        if not days:
+            QMessageBox.information(self, "Special Trading Day", "No special trading days are set.")
+            return
+        labels = [d.strftime(_DATE_FORMAT) for d in days]
+        choice, ok = QInputDialog.getItem(self, "Remove Special Trading Day", "Date:", labels, 0, False)
+        if not ok:
+            return
+        d = days[labels.index(choice)]
+        try:
+            trading_calendar.save_special_trading_days(set(days) - {d})
+        except (ApiError, NetworkError) as exc:
+            show_api_error(self, exc) if isinstance(exc, ApiError) else QMessageBox.warning(self, "Special Trading Day", str(exc))
+            return
+        self._refresh_special_label()
 
     # ── Load ─────────────────────────────────────────────────────────────
 
@@ -433,6 +533,7 @@ class HolidaysScreen(QWidget):
             f"QPushButton {{ background: {t.get('accent')}; color: {t.get('background')};"
             "border: none; border-radius: 4px; }"
         )
+        self._special_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         if not self._status_lbl.text():
             self._status_lbl.setStyleSheet(f"color: {t.get('text_secondary')};")
         self._load_holidays(show_popup_on_error=False)
