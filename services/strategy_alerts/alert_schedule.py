@@ -161,7 +161,11 @@ def _is_trading_day_peek(today: date) -> bool:
     # whose holiday status isn't known yet), not "the app just started and
     # today happens to be a Saturday".
     if today.weekday() >= 5:
-        return False
+        from services import trading_calendar
+        if today not in trading_calendar.special_trading_days():
+            return False
+        # A configured weekend session (e.g. Muhurat) — fall through to the
+        # same fetched-per-date check as a weekday.
     with _lock:
         return _is_trading_day if _checked_date == today else True   # fail open — see module docstring
 
