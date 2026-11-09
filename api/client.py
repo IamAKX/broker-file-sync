@@ -63,6 +63,35 @@ class ApiClient:
         content_type)}, the same tuple shape `requests` itself expects."""
         return self._request("POST", path, data=data, files=files, auth=auth, timeout=timeout)
 
+    def post_stream(self, path: str, json_body: dict, timeout: int = 90, _retried: bool = False):
+        """POST and return the still-open streaming `requests.Response` (for
+        Server-Sent Events — see api.chat_api.ask). Same auth + 401-refresh +
+        error-parsing behavior as _request; the CALLER must close the response.
+        *timeout* is the per-read ceiling, not a total: an SSE stream may run
+        long as long as the server keeps sending events."""
+        headers = {"Accept": "text/event-stream"}
+        token = token_manager.get_access_token()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        api_logger.debug("-> POST %s (stream) body=%s", path, redact_body(json_body))
+        try:
+            response = self._session.post(
+                BASE_URL + path, json=json_body, headers=headers, timeout=timeout, stream=True,
+            )
+        except requests.RequestException as exc:
+            api_logger.warning("<- POST %s (stream) network error: %s", path, exc)
+            raise NetworkError(f"Could not reach server: {exc}") from exc
+        if response.status_code == 401 and not _retried:
+            response.close()
+            if self._refresh():
+                return self.post_stream(path, json_body, timeout, _retried=True)
+        if not response.ok:
+            detail, code = self._parse_error(response)
+            response.close()
+            api_logger.warning("<- POST %s (stream) %s code=%s detail=%s", path, response.status_code, code, detail)
+            raise ApiError(detail, code, response.status_code)
+        return response
+
     def patch(self, path: str, json_body: dict | None = None, auth: bool = True) -> dict:
         return self._request("PATCH", path, json_body=json_body, auth=auth)
 

@@ -29,6 +29,7 @@ NAV_ITEMS = [
     ("notifications",    "Notifications",   "notification.svg"),
     ("live_alerts",      "Live Alerts",     "database.svg"),
     ("reports",          "Reports",         "reports.svg"),
+    ("assistant",        "Ask Fuku",        "chat.svg"),
     ("profile",          "My Profile",      "profile.svg"),
 ]
 

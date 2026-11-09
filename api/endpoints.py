@@ -51,3 +51,6 @@ INCEPTION_FORMULA_VARIABLES = "/inception/formula-variables"
 INCEPTION_FORMULA_VARIABLES_IMPORT = "/inception/formula-variables/import"
 INCEPTION_VENDOR_SYNC = "/inception/vendor-sync"
 INCEPTION_ADMIN_SYNC_LMV_METRICS = "/inception/admin/sync-lmv-metrics"
+
+CHAT_STATUS = "/chat/status"
+CHAT_ASK = "/chat/ask"

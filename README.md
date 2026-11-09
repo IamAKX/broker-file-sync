@@ -34,6 +34,7 @@
 | [🧮 Strategy Builder](docs/strategy-builder.md) | Formula syntax, functions, conditional formatting |
 | [📐 Formula Builder Reference](docs/formula-builder.md) | Every function, every catalogue section, with examples |
 | [🔔 Strategy Notifications](docs/strategy-notifications.md) | Trade-signal alerts: trigger, debounce, metrics, lifecycle, channels |
+| [🤖 Ask Fuku (AI assistant)](docs/chatbot.md) | Chat over your data: usage, scope, streaming/animation architecture |
 | [🔄 Live Master View](docs/live-master-view.md) | File watcher, merge logic, column filter |
 | [🎨 Theming & Fonts](docs/theming.md) | Theme tokens, font scale constants, customisation |
 | [🧪 Testing](docs/testing.md) | Running tests, CI pipeline, writing new tests |
