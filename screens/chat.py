@@ -7,6 +7,10 @@ back the answer. This screen animates each pipeline stage while it works
 (components.chat_widgets.ThinkingIndicator), types the answer out as it
 arrives, and lets the user expand the rows behind any answer (the generated SQL is never shown).
 
+Voice mode (the switch in the header) makes it hands-free: the question is
+spoken, transcribed on this machine and asked like a typed one; the answer is
+read aloud while it also appears in the transcript (services/voice_io.py).
+
 Scope is enforced server-side (prompt + SQL validator) —
 see docs/chatbot.md. Nothing is stored locally: the conversation lives in
 memory for the session and the last few turns are sent along so follow-up
@@ -23,8 +27,9 @@ from PySide6.QtWidgets import (
 
 from api import chat_api
 from api.exceptions import ApiError, NetworkError
-from components.chat_widgets import MessageBubble
+from components.chat_widgets import MessageBubble, ToggleSwitch, VoiceStatusBar
 from components.page_header import page_header
+from services import voice_io
 
 _HISTORY_TURNS_SENT = 6
 
@@ -47,7 +52,15 @@ class ChatScreen(QWidget):
         self._status_loaded = False
         self._suggestions: list[str] = []
         self._event.connect(self._on_event)
+        self._voice = self._make_voice()
+        self._voice.state_changed.connect(self._on_voice_state)
+        self._voice.level.connect(lambda level: self._voice_bar.set_level(level))
+        self._voice.question.connect(self.ask)
+        self._voice.failed.connect(self._on_voice_failed)
         self._build()
+
+    def _make_voice(self) -> voice_io.VoiceConversation:
+        return voice_io.VoiceConversation(self)
 
     # ── build ────────────────────────────────────────────────────────────
 
@@ -64,7 +77,23 @@ class ChatScreen(QWidget):
         subtitle.setStyleSheet(f"color: {t.get('text_secondary')};")
         self._clear_btn = QPushButton("New chat")
         self._clear_btn.clicked.connect(self.clear_chat)
-        outer.addLayout(page_header(title, subtitle, trailing=self._clear_btn))
+        self._voice_switch = ToggleSwitch(t)
+        self._voice_switch.setToolTip(
+            "Voice mode: speak your question and hear the answer. Your speech is turned into text on this computer."
+        )
+        self._voice_switch.toggled.connect(self._on_voice_toggled)
+        voice_label = QLabel("Voice mode")
+        voice_label.setFont(font_scale.font(font_scale.SMALL, False))
+        voice_label.setStyleSheet(f"color: {t.get('text_secondary')};")
+        trailing = QWidget()
+        trailing_row = QHBoxLayout(trailing)
+        trailing_row.setContentsMargins(0, 0, 0, 0)
+        trailing_row.setSpacing(8)
+        trailing_row.addWidget(voice_label)
+        trailing_row.addWidget(self._voice_switch)
+        trailing_row.addSpacing(12)
+        trailing_row.addWidget(self._clear_btn)
+        outer.addLayout(page_header(title, subtitle, trailing=trailing))
 
         self._banner = QLabel("")
         self._banner.setWordWrap(True)
@@ -93,6 +122,15 @@ class ChatScreen(QWidget):
 
         self._welcome = self._build_welcome()
         self._messages_layout.insertWidget(0, self._welcome)
+
+        self._voice_notice = QLabel("")
+        self._voice_notice.setWordWrap(True)
+        self._voice_notice.setStyleSheet(self._banner.styleSheet())
+        self._voice_notice.hide()
+        outer.addWidget(self._voice_notice)
+        self._voice_bar = VoiceStatusBar(t)
+        self._voice_bar.hide()
+        outer.addWidget(self._voice_bar)
 
         row = QHBoxLayout()
         row.setSpacing(8)
@@ -168,6 +206,11 @@ class ChatScreen(QWidget):
             threading.Thread(target=self._load_status, name="chat-status", daemon=True).start()
         self._input.setFocus()
 
+    def hideEvent(self, event):
+        # The microphone must not stay open behind another screen (or in the tray).
+        self._voice.stop()
+        super().hideEvent(event)
+
     def _load_status(self):
         try:
             status = chat_api.get_status()
@@ -185,9 +228,11 @@ class ChatScreen(QWidget):
             self._token += 1
             self._cancel.set()
             self._busy = False
+            self._voice.interrupt()
             if self._history and self._history[-1]["role"] == "user":
                 self._history.pop()
         history, suggestions = list(self._history), list(self._suggestions)
+        voice_text = self._voice_bar.text()
         old_layout = self.layout()
         if old_layout is not None:
             QWidget().setLayout(old_layout)  # orphan the old layout + children so they are freed
@@ -200,12 +245,46 @@ class ChatScreen(QWidget):
             self._append_bubble(MessageBubble(self._controller.theme, turn["role"], turn["text"]), animate=False)
         if history:
             self._welcome.hide()
+        if self._voice.is_on():   # the rebuilt switch and status strip pick the session back up
+            self._voice.state_changed.emit(self._voice.state, voice_text)
+
+    # ── voice mode ───────────────────────────────────────────────────────
+
+    def _on_voice_toggled(self, on: bool):
+        if on:
+            self._voice_notice.hide()
+            self._voice.start()
+        else:
+            self._voice.stop()
+
+    def _on_voice_state(self, state: str, text: str):
+        on = state != voice_io.OFF
+        self._voice_bar.set_state(state, text)
+        self._voice_bar.setVisible(on)
+        if self._voice_switch.isChecked() != on:
+            self._voice_switch.blockSignals(True)
+            self._voice_switch.setChecked(on)
+            self._voice_switch.blockSignals(False)
+        self._sync_send_btn()
+
+    def _on_voice_failed(self, message: str):
+        self._on_voice_state(voice_io.OFF, "")
+        self._voice_notice.setText(f"Voice mode is off: {message}")
+        self._voice_notice.show()
+
+    def _sync_send_btn(self):
+        # "Stop" cancels a running question, and cuts a spoken answer short.
+        stop = self._busy or self._voice.state == voice_io.SPEAKING
+        self._send_btn.setText("Stop" if stop else "Send")
 
     # ── asking ───────────────────────────────────────────────────────────
 
     def _on_send_clicked(self):
         if self._busy:
             self._cancel.set()  # the button is "Stop" while a question is running
+            self._voice.interrupt()
+        elif self._voice.state == voice_io.SPEAKING:
+            self._voice.interrupt()
         else:
             self._send()
 
@@ -222,7 +301,8 @@ class ChatScreen(QWidget):
         self._busy = True
         self._cancel = threading.Event()
         self._welcome.hide()
-        self._send_btn.setText("Stop")
+        self._voice.begin_turn()
+        self._sync_send_btn()
         self._input.setEnabled(False)
 
         self._append_bubble(MessageBubble(self._controller.theme, "user", question))
@@ -276,11 +356,14 @@ class ChatScreen(QWidget):
         elif event == "token":
             self._current_text += data.get("text", "")
             bubble.add_text(data.get("text", ""))
+            self._voice.answer_text(data.get("text", ""))
         elif event == "answer":
             self._current_text = data.get("text", "")
             bubble.add_text(self._current_text)
+            self._voice.answer_text(self._current_text)
         elif event == "error":
             bubble.set_error(data.get("message", "Something went wrong."))
+            self._voice.answer_text(data.get("message", "Something went wrong."))
             self._finish_turn(record=False)
         elif event in ("_end", "_cancelled"):
             if event == "_cancelled" and not self._current_text:
@@ -299,7 +382,8 @@ class ChatScreen(QWidget):
             self._history.pop()  # a failed question shouldn't pollute follow-ups
         self._current = None
         self._busy = False
-        self._send_btn.setText("Send")
+        self._voice.answer_done()
+        self._sync_send_btn()
         self._input.setEnabled(True)
         self._input.setFocus()
 
@@ -312,6 +396,8 @@ class ChatScreen(QWidget):
             self._banner.show()
             self._send_btn.setEnabled(False)
             self._input.setEnabled(False)
+            self._voice.stop()
+            self._voice_switch.setEnabled(False)
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -337,7 +423,8 @@ class ChatScreen(QWidget):
         self._history.clear()
         self._current = None
         self._busy = False
-        self._send_btn.setText("Send")
+        self._voice.interrupt()
+        self._sync_send_btn()
         self._input.setEnabled(not self._banner.isVisible())
         while self._messages_layout.count() > 1:
             item = self._messages_layout.takeAt(0)

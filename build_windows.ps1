@@ -38,6 +38,9 @@ if ($Version) {
     Set-Content -Path version.py -Value "APP_VERSION = `"$Version`""
 }
 
+Write-Host "Fetching the voice-mode speech model (first build only, ~150 MB)..."
+python tools\fetch_voice_model.py
+
 Write-Host "Building (PyInstaller)..."
 pyinstaller --windowed --onedir --name "FukuLens" `
     --icon "assets\branding\fuku_lens_icon.ico" `
@@ -48,6 +51,11 @@ pyinstaller --windowed --onedir --name "FukuLens" `
     --add-data "components;components" `
     --add-data "font_scale.py;." `
     --collect-data openpyxl `
+    --collect-all faster_whisper `
+    --collect-all ctranslate2 `
+    --collect-all tokenizers `
+    --hidden-import PySide6.QtMultimedia `
+    --hidden-import PySide6.QtTextToSpeech `
     --collect-all win32com `
     --collect-all pythoncom `
     --hidden-import win32com `

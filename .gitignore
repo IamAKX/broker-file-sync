@@ -88,3 +88,6 @@ docs/superpowers/
 .claude
 
 auth_session.json
+
+# Voice-mode speech model — fetched at build time by tools/fetch_voice_model.py
+assets/voice_models/

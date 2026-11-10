@@ -11,7 +11,7 @@ import font_scale
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
-    QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
+    QAbstractButton, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -301,3 +301,104 @@ class MessageBubble(QFrame):
         # work (and blurs streaming text) once the fade is over — drop it.
         anim.finished.connect(lambda: self.setGraphicsEffect(None))
         anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)
+
+
+class ToggleSwitch(QAbstractButton):
+    """A painted on/off pill (voice mode). Checkable; emits toggled(bool)."""
+
+    def __init__(self, theme, parent=None):
+        super().__init__(parent)
+        self._theme = theme
+        self.setCheckable(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFixedSize(40, 22)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        track = QColor(self._theme.get("accent" if self.isChecked() else "border"))
+        if not self.isEnabled():
+            track.setAlphaF(0.4)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(track)
+        p.drawRoundedRect(QRectF(0, 0, self.width(), self.height()), self.height() / 2, self.height() / 2)
+        d = self.height() - 6
+        x = self.width() - d - 3 if self.isChecked() else 3
+        p.setBrush(QColor("#ffffff"))
+        p.drawEllipse(QRectF(x, 3, d, d))
+        p.end()
+
+
+class VoiceStatusBar(QFrame):
+    """The strip above the input while voice mode is on: an animated glyph for
+    what Fuku is doing (live microphone level while listening, a wave while
+    speaking, a slow pulse otherwise) and one line of status text."""
+
+    def __init__(self, theme, parent=None):
+        super().__init__(parent)
+        self._theme = theme
+        self._state = "off"
+        self._level = 0.0
+        self._t = 0.0
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._tick)
+        self.setObjectName("voiceBar")
+        self.setStyleSheet(
+            f"#voiceBar {{ background: {theme.get('card_bg')}; border: 1px solid {theme.get('border')}; "
+            f"border-radius: 8px; }}"
+        )
+        self.setFixedHeight(40)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(64, 0, 12, 0)   # the glyph is painted in the left 64px
+        self._label = QLabel("")
+        self._label.setFont(font_scale.font(font_scale.SMALL, False))
+        self._label.setStyleSheet(f"color: {theme.get('text_secondary')}; background: transparent; border: none;")
+        row.addWidget(self._label, 1)
+
+    def set_state(self, state: str, text: str) -> None:
+        self._state = state
+        self._label.setText(text)
+        self.update()
+
+    def set_level(self, level: float) -> None:
+        self._level = max(level, self._level * 0.7)   # fast attack, soft decay
+        self.update()
+
+    def text(self) -> str:
+        return self._label.text()
+
+    def showEvent(self, event):
+        self._timer.start(_FRAME_MS)
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def _tick(self):
+        self._t += 1.0
+        self._level *= 0.92
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        listening = self._state in ("listening", "hearing")
+        color = QColor(self._theme.get("accent" if self._state in ("listening", "hearing", "speaking")
+                                       else "text_secondary"))
+        p.setPen(Qt.PenStyle.NoPen)
+        mid = self.height() / 2
+        for i in range(5):
+            if listening:
+                shape = (0.45, 0.75, 1.0, 0.75, 0.45)[i]
+                h = 4 + 20 * min(1.0, self._level * 1.6) * shape
+            elif self._state == "speaking":
+                h = 6 + 14 * (0.5 + 0.5 * math.sin(self._t * 0.22 + i * 0.9))
+            else:
+                h = 5 + 5 * (0.5 + 0.5 * math.sin(self._t * 0.1 + i * 0.6))
+            c = QColor(color)
+            c.setAlphaF(0.55 + 0.45 * (h / 24))
+            p.setBrush(c)
+            p.drawRoundedRect(QRectF(16 + i * 8, mid - h / 2, 4, h), 2, 2)
+        p.end()

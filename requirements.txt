@@ -5,6 +5,12 @@ requests
 pytest
 pytest-xdist
 
+# Ask Fuku voice mode — offline speech-to-text (services/voice_io.py). The app
+# runs without it; voice mode then reports that it is unavailable.
+# Intel Macs: one dependency (onnxruntime) has no wheel there, so install with
+#   pip install av ctranslate2 tokenizers huggingface_hub tqdm && pip install --no-deps faster-whisper
+faster-whisper; sys_platform != "darwin" or platform_machine == "arm64"
+
 # Windows only — enables COM automation for live TradeTiger data via Snap to Excel
 # Install on Windows: pip install pywin32 && python -m pywin32_postinstall -install
 # pywin32

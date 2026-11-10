@@ -105,6 +105,9 @@ jobs:
         shell: pwsh
         run: Set-Content -Path version.py -Value 'APP_VERSION = "${{ needs.compute-version.outputs.version }}"'
 
+      - name: Fetch voice-mode speech model (bundled into the build)
+        run: python tools/fetch_voice_model.py
+
       - name: Build Windows
         shell: pwsh
         run: |
@@ -117,6 +120,11 @@ jobs:
             --add-data "components;components" `
             --add-data "font_scale.py;." `
             --collect-data openpyxl `
+            --collect-all faster_whisper `
+            --collect-all ctranslate2 `
+            --collect-all tokenizers `
+            --hidden-import PySide6.QtMultimedia `
+            --hidden-import PySide6.QtTextToSpeech `
             --collect-all win32com `
             --collect-all pythoncom `
             --hidden-import win32com `
