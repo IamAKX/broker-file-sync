@@ -8,7 +8,10 @@ Everything runs on the user's machine — no audio leaves it:
                       taken from ``assets/voice_models/<name>`` when the build
                       bundled it (tools/fetch_voice_model.py), otherwise it is
                       downloaded once into the Hugging Face cache.
-* ``Speaker``       — the operating system's voice through Qt's QTextToSpeech.
+* ``NeuralSpeaker`` — a natural-sounding offline neural voice (Kokoro or Piper,
+                      run by sherpa-onnx) from ``assets/voice_models/<name>``.
+* ``Speaker``       — the operating system's voice through Qt's QTextToSpeech;
+                      the fallback when the neural voice isn't installed.
 * ``SpeechChunker`` — turns the streamed Markdown answer into speakable sentences.
 * ``VoiceConversation`` — the hands-free loop tying them together:
                       listen → transcribe → (screen asks) → speak → listen again.
@@ -20,6 +23,7 @@ See docs/chatbot.md ("Voice mode").
 """
 
 import os
+import queue
 import re
 import threading
 from array import array
@@ -33,6 +37,13 @@ _BYTES_PER_SAMPLE = 2
 MODEL_NAME = os.environ.get("FUKU_VOICE_MODEL", "base.en")
 _APP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUNDLED_MODELS_DIR = os.path.join(_APP_ROOT, "assets", "voice_models")
+
+# The neural voice: a sherpa-onnx TTS model folder under BUNDLED_MODELS_DIR
+# (Kokoro if it has voices.bin, otherwise a Piper/VITS voice) and, for Kokoro,
+# which of its speakers to use (1 = "af_bella"; see docs/chatbot.md for the list).
+TTS_MODEL_NAME = os.environ.get("FUKU_TTS_MODEL", "kokoro-en-v0_19")
+TTS_SPEAKER_ID = int(os.environ.get("FUKU_TTS_SPEAKER", "1"))
+TTS_SPEED = float(os.environ.get("FUKU_TTS_SPEED", "1.0"))
 
 # Whisper leans towards words it has just "seen"; this nudges it to spell
 # market vocabulary the way the chatbot expects it.
@@ -137,6 +148,7 @@ class UtteranceDetector:
 # ── answer text → speakable sentences ────────────────────────────────────────
 
 _BOUNDARY = re.compile(r"\n+|[.!?][\"')\]*_]*[ \t]+")
+_CLAUSE = re.compile(r"[,;:—–]\s")
 _TABLE_NOTE = "The full table is on screen."
 
 
@@ -437,6 +449,203 @@ class Speaker(QObject):
             self._next()
 
 
+class NeuralVoice:
+    """The offline neural TTS model. load()/synthesize() block (seconds) — they
+    run on NeuralSpeaker's worker thread."""
+
+    def __init__(self, model_name: str = TTS_MODEL_NAME, speaker_id: int = TTS_SPEAKER_ID, speed: float = TTS_SPEED):
+        self.model_dir = os.path.join(BUNDLED_MODELS_DIR, model_name)
+        self._speaker_id, self._speed = speaker_id, speed
+        self._tts = None
+
+    def _onnx_file(self) -> str | None:
+        if not os.path.isfile(os.path.join(self.model_dir, "tokens.txt")):
+            return None
+        names = sorted(f for f in os.listdir(self.model_dir) if f.endswith(".onnx"))
+        return os.path.join(self.model_dir, names[0]) if names else None
+
+    def check_available(self) -> None:
+        """Cheap (no model load). Raises VoiceUnavailable if it can't work here."""
+        if self._onnx_file() is None:
+            raise VoiceUnavailable("The neural voice model isn't installed.")
+        try:
+            import numpy  # noqa: F401
+            import sherpa_onnx  # noqa: F401
+        except ImportError as exc:
+            raise VoiceUnavailable("The neural voice component is missing from this build.") from exc
+
+    def load(self) -> None:
+        if self._tts is not None:
+            return
+        import sherpa_onnx
+
+        d = self.model_dir
+        common = {"tokens": os.path.join(d, "tokens.txt"), "data_dir": os.path.join(d, "espeak-ng-data")}
+        voices = os.path.join(d, "voices.bin")
+        if os.path.isfile(voices):
+            model = sherpa_onnx.OfflineTtsModelConfig(
+                kokoro=sherpa_onnx.OfflineTtsKokoroModelConfig(model=self._onnx_file(), voices=voices, **common))
+        else:
+            model = sherpa_onnx.OfflineTtsModelConfig(
+                vits=sherpa_onnx.OfflineTtsVitsModelConfig(model=self._onnx_file(), **common))
+        model.num_threads = max(1, min(4, os.cpu_count() or 2))
+        tts = sherpa_onnx.OfflineTts(sherpa_onnx.OfflineTtsConfig(model=model))
+        self._speaker_id = self._speaker_id if 0 <= self._speaker_id < max(1, tts.num_speakers) else 0
+        self._tts = tts
+
+    def synthesize(self, text: str) -> tuple[bytes, int]:
+        """→ (mono PCM16, sample rate)."""
+        import numpy as np
+
+        self.load()
+        audio = self._tts.generate(text, sid=self._speaker_id, speed=self._speed)
+        samples = np.clip(np.asarray(audio.samples, dtype=np.float32), -1.0, 1.0)
+        return (samples * 32767).astype(np.int16).tobytes(), int(audio.sample_rate)
+
+
+class _ClipPlayer(QObject):
+    """Plays one PCM16 mono clip at a time on the default output; ``finished``
+    fires when a clip has played to its end (not when it is stopped)."""
+
+    finished = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._sink = None
+        self._rate = 0
+        self._buffer = None
+        self._playing = False
+
+    def play(self, pcm: bytes, rate: int) -> None:
+        from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+        from PySide6.QtMultimedia import QAudio, QAudioFormat, QAudioSink, QMediaDevices
+
+        if self._sink is None or rate != self._rate:
+            fmt = QAudioFormat()
+            fmt.setSampleRate(rate)
+            fmt.setChannelCount(1)
+            fmt.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+            self._sink = QAudioSink(QMediaDevices.defaultAudioOutput(), fmt, self)
+            self._rate = rate
+            self._idle_state = QAudio.State.IdleState
+            self._sink.stateChanged.connect(self._on_state)
+        self._buffer = QBuffer(self)
+        self._buffer.setData(QByteArray(pcm))
+        self._buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+        self._playing = True
+        self._sink.start(self._buffer)
+
+    def stop(self) -> None:
+        self._playing = False
+        if self._sink is not None:
+            self._sink.stop()
+
+    def _on_state(self, state) -> None:
+        # Idle = the sink has drained everything we gave it.
+        if self._playing and state == self._idle_state:
+            self._playing = False
+            self._sink.stop()
+            self.finished.emit()
+
+
+class NeuralSpeaker(QObject):
+    """Same contract as Speaker, with the neural voice: sentences are synthesized
+    in order on a worker thread (running ahead of playback) and played back to
+    back. Raises VoiceUnavailable from the constructor when the model or its
+    runtime is missing, so the caller can fall back to the system voice."""
+
+    idle = Signal()
+    _clip_ready = Signal(int, bytes, int)      # epoch, pcm16 (b"" = failed), sample rate
+
+    _GAP_MS = 180                              # breathing room between sentences
+
+    def __init__(self, parent=None, voice=None, player=None):
+        super().__init__(parent)
+        self._voice = voice or NeuralVoice()
+        self._voice.check_available()
+        self._player = player or _ClipPlayer(self)
+        self._player.finished.connect(self._on_clip_finished)
+        self._clip_ready.connect(self._on_clip_ready)
+        self._epoch = 0                        # bumped by stop(); older clips are discarded
+        self._outstanding = 0                  # sentences said but not yet played to the end
+        self._clips: deque[tuple[bytes, int]] = deque()
+        self._playing = False
+        self._jobs: queue.Queue = queue.Queue()
+        threading.Thread(target=self._work, name="voice-tts", daemon=True).start()
+        self._jobs.put((self._epoch, None))    # warm the model up before the first answer
+
+    def is_busy(self) -> bool:
+        return self._outstanding > 0
+
+    def say(self, text: str) -> None:
+        self._outstanding += 1
+        self._jobs.put((self._epoch, text))
+
+    def stop(self) -> None:
+        self._epoch += 1
+        self._outstanding = 0
+        self._clips.clear()
+        self._playing = False
+        self._player.stop()
+        self.idle.emit()
+
+    def _work(self) -> None:
+        while True:
+            epoch, text = self._jobs.get()
+            try:
+                if text is None:
+                    self._voice.load()
+                    continue
+                if epoch != self._epoch:
+                    continue                   # stopped while it was waiting its turn
+                pcm, rate = self._voice.synthesize(text)
+                pcm += b"\0\0" * (rate * self._GAP_MS // 1000)
+            except Exception:
+                pcm, rate = b"", 0
+            self._clip_ready.emit(epoch, pcm, rate)
+
+    def _on_clip_ready(self, epoch: int, pcm: bytes, rate: int) -> None:
+        if epoch != self._epoch:
+            return
+        self._clips.append((pcm, rate))
+        if not self._playing:
+            self._play_next()
+
+    def _on_clip_finished(self) -> None:
+        if self._playing:
+            self._playing = False
+            self._done_one()
+
+    def _done_one(self) -> None:
+        self._outstanding = max(0, self._outstanding - 1)
+        if self._clips:
+            QTimer.singleShot(0, self._play_next)   # not from inside the sink's state callback
+        elif self._outstanding == 0:
+            self.idle.emit()
+
+    def _play_next(self) -> None:
+        if self._playing or not self._clips:
+            return
+        pcm, rate = self._clips.popleft()
+        if not pcm:                            # that sentence failed to synthesize; skip it
+            self._done_one()
+            return
+        self._playing = True
+        try:
+            self._player.play(pcm, rate)
+        except Exception:
+            self._playing = False
+            self._done_one()
+
+
+def make_speaker(parent=None):
+    """The neural voice when it is installed, otherwise the system voice."""
+    try:
+        return NeuralSpeaker(parent)
+    except VoiceUnavailable:
+        return Speaker(parent)
+
+
 # ── the hands-free loop ──────────────────────────────────────────────────────
 
 OFF, LOADING, LISTENING, HEARING, TRANSCRIBING, THINKING, SPEAKING = (
@@ -465,7 +674,7 @@ class VoiceConversation(QObject):
 
     _RELISTEN_DELAY_MS = 250           # let the speaker's tail die out first
 
-    def __init__(self, parent=None, transcriber=None, mic_factory=MicListener, speaker_factory=Speaker):
+    def __init__(self, parent=None, transcriber=None, mic_factory=MicListener, speaker_factory=make_speaker):
         super().__init__(parent)
         self._transcriber = transcriber or Transcriber()
         self._mic_factory, self._speaker_factory = mic_factory, speaker_factory
@@ -474,6 +683,7 @@ class VoiceConversation(QObject):
         self._chunker = SpeechChunker()
         self._gen = 0                  # bumped on stop(); stale thread results are dropped
         self._answer_open = False
+        self._spoke_this_turn = False
         self.state = OFF
         self._loaded.connect(self._on_loaded)
         self._transcribed.connect(self._on_transcribed)
@@ -588,6 +798,7 @@ class VoiceConversation(QObject):
         self._speaker.stop()
         self._chunker = SpeechChunker()
         self._answer_open = True
+        self._spoke_this_turn = False
         self._set(THINKING, "Fuku is thinking…")
 
     def answer_text(self, text: str) -> None:
@@ -613,7 +824,16 @@ class VoiceConversation(QObject):
 
     def _speak(self, sentences: list[str]) -> None:
         for sentence in sentences:
-            self._speaker.say(sentence)
+            if not self._spoke_this_turn:
+                # A neural voice needs a moment per sentence; a long opening one
+                # is cut at its first clause so the answer starts sooner.
+                self._spoke_this_turn = True
+                m = _CLAUSE.search(sentence, 25) if len(sentence) > 90 else None
+                if m is not None:
+                    self._speaker.say(sentence[:m.end()].strip())
+                    sentence = sentence[m.end():].strip()
+            if sentence:
+                self._speaker.say(sentence)
         if sentences and self.state == THINKING:
             self._set(SPEAKING, "Speaking… press Stop to interrupt")
 

@@ -36,8 +36,9 @@ Switch **Voice mode** on (top right of the screen) to talk to Fuku hands-free:
   also means you can't interrupt by talking; use **Stop**.
 - Voice mode switches itself off when you leave the screen or minimise the app.
 - Your speech is turned into text **on your computer** (offline Whisper model); no audio is
-  uploaded. Only the resulting text goes to the server, like any typed question. The voice is the
-  operating system's own (Windows/macOS speech voices; an Indian-English voice is used if installed).
+  uploaded. Only the resulting text goes to the server, like any typed question. The voice is
+  a neural one that also runs on your computer (Kokoro); if a build doesn't include it, the
+  operating system's own voice is used instead.
 - If the strip says it *can't hear anything*, check the microphone and the OS microphone
   permission (Windows: Settings → Privacy & security → Microphone → "Let desktop apps access your
   microphone"; macOS: System Settings → Privacy & Security → Microphone).
@@ -52,8 +53,8 @@ If the banner says *"not enabled for this deployment"*, the server has `CHAT_ENA
 |---|---|
 | `screens/chat.py` | `ChatScreen`: transcript, input, suggestion chips, Stop/New chat, event handling |
 | `components/chat_widgets.py` | `ThinkingIndicator` (painted animation), `TypewriterLabel` (smooth streamed text), `MessageBubble` (+ collapsible query/data, fade-in) |
-| `services/voice_io.py` | Voice mode: `MicListener` (QtMultimedia capture) + `UtteranceDetector` (end-of-speech), `Transcriber` (faster-whisper, offline), `Speaker` (QTextToSpeech), `SpeechChunker` (Markdown → sentences), `VoiceConversation` (the listen → transcribe → ask → speak loop) |
-| `tools/fetch_voice_model.py` | Build step: downloads the Whisper model into `assets/voice_models/` so it ships inside the build |
+| `services/voice_io.py` | Voice mode: `MicListener` (QtMultimedia capture) + `UtteranceDetector` (end-of-speech), `Transcriber` (faster-whisper, offline), `NeuralSpeaker` (offline neural voice via sherpa-onnx, played with QAudioSink) with `Speaker` (QTextToSpeech, the OS voice) as fallback, `SpeechChunker` (Markdown → sentences), `VoiceConversation` (the listen → transcribe → ask → speak loop) |
+| `tools/fetch_voice_model.py` | Build step: downloads the Whisper model and the neural voice into `assets/voice_models/` so they ship inside the build |
 | `api/chat_api.py` | `get_status()`, `ask()` (generator of `(event, data)`), `parse_sse()` |
 | `api/client.py` → `post_stream()` | Authenticated streaming POST with the same 401-refresh behaviour as other calls |
 | `api/endpoints.py` | `CHAT_STATUS`, `CHAT_ASK` |
@@ -81,6 +82,13 @@ Nothing is persisted locally; the conversation lives in memory for the session.
   `FUKU_VOICE_MODEL` environment variable, e.g. `small.en` for better accuracy at ~480 MB and slower
   transcription). A build bundles whatever `tools/fetch_voice_model.py` downloaded; a dev run without
   the bundled copy downloads the model on first use into the Hugging Face cache.
+- **The voice** — `TTS_MODEL_NAME` / `TTS_SPEAKER_ID` / `TTS_SPEED` in `services/voice_io.py`, or the
+  `FUKU_TTS_MODEL`, `FUKU_TTS_SPEAKER`, `FUKU_TTS_SPEED` environment variables. The default is Kokoro
+  (`kokoro-en-v0_19`, ~360 MB) speaker 1. Its speakers: 0 af, 1 af_bella, 2 af_nicole, 3 af_sarah,
+  4 af_sky, 5 am_adam, 6 am_michael (American); 7 bf_emma, 8 bf_isabella, 9 bm_george, 10 bm_lewis
+  (British). Any sherpa-onnx Kokoro or Piper model folder works — e.g. `vits-piper-en_US-amy-medium`
+  (~80 MB) is less natural but about 8x faster, for slow PCs. Run `python tools/fetch_voice_model.py`
+  after changing the model; dev runs without the folder fall back to the OS voice.
 - **Recognition vocabulary / end-of-speech timing** — `_VOCABULARY_HINT` and `UtteranceDetector`'s
   `silence_ms` in `services/voice_io.py`.
 - **Backend URL** — the usual `BROKER_SYNC_API_URL` environment variable (`api/config.py`).

@@ -235,6 +235,95 @@ def test_stop_drops_a_transcription_still_in_flight(qapp):
     assert questions == [] and conv.state == voice_io.OFF
 
 
+def test_long_opening_sentence_is_split_so_speech_starts_sooner(qapp):
+    conv = _conversation(qapp)
+    conv.start()
+    _pump(qapp, lambda: conv.state == voice_io.LISTENING)
+    conv.begin_turn()
+    long = ("Across the latest trading day the weakest names were concentrated in IT, with TCS down 2.1% "
+            "and Infosys down 1.8%. ")
+    conv.answer_text(long + long)
+    assert conv._speaker.said[0] == "Across the latest trading day the weakest names were concentrated in IT,"
+    assert conv._speaker.said[1].startswith("with TCS down 2.1%")
+    assert conv._speaker.said[2] == long.strip()               # only the first sentence is split
+    conv.stop()
+
+
+# ── the neural voice ─────────────────────────────────────────────────────
+
+class FakeVoice:
+    def __init__(self, fail_on=()):
+        self.fail_on = fail_on
+
+    def check_available(self):
+        pass
+
+    def load(self):
+        pass
+
+    def synthesize(self, text):
+        if text in self.fail_on:
+            raise RuntimeError("synthesis failed")
+        return text.encode() + b"!", 24000
+
+
+class FakePlayer(QObject):
+    finished = Signal()
+
+    def __init__(self):
+        super().__init__()
+        self.played, self.stopped = [], 0
+
+    def play(self, pcm, rate):
+        self.played.append(pcm.rstrip(b"\0"))
+
+    def stop(self):
+        self.stopped += 1
+
+
+def test_neural_speaker_plays_sentences_in_order_then_goes_idle(qapp):
+    player = FakePlayer()
+    sp = voice_io.NeuralSpeaker(voice=FakeVoice(fail_on=("broken",)), player=player)
+    idles = []
+    sp.idle.connect(lambda: idles.append(1))
+    for text in ("one", "broken", "two"):
+        sp.say(text)
+    assert sp.is_busy()
+    _pump(qapp, lambda: player.played == [b"one!"])
+    for _ in range(20):
+        qapp.processEvents()
+    assert player.played == [b"one!"] and idles == []           # waits for the clip to end
+    player.finished.emit()
+    _pump(qapp, lambda: player.played == [b"one!", b"two!"])    # the failed sentence is skipped
+    assert sp.is_busy()
+    player.finished.emit()
+    _pump(qapp, lambda: idles == [1])
+    assert not sp.is_busy()
+
+
+def test_neural_speaker_stop_discards_everything_pending(qapp):
+    player = FakePlayer()
+    sp = voice_io.NeuralSpeaker(voice=FakeVoice(), player=player)
+    sp.say("one")
+    sp.say("two")
+    _pump(qapp, lambda: player.played == [b"one!"])
+    sp.stop()
+    assert not sp.is_busy() and player.stopped == 1
+    for _ in range(40):
+        qapp.processEvents()
+        time.sleep(0.005)
+    assert player.played == [b"one!"]                           # "two" never plays
+    sp.say("three")                                             # and it still works afterwards
+    _pump(qapp, lambda: player.played == [b"one!", b"three!"])
+
+
+def test_make_speaker_falls_back_to_the_system_voice(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(voice_io, "BUNDLED_MODELS_DIR", str(tmp_path))   # no neural model here
+    made = []
+    monkeypatch.setattr(voice_io, "Speaker", lambda parent=None: made.append("system") or "system-voice")
+    assert voice_io.make_speaker() == "system-voice" and made == ["system"]
+
+
 # ── chat screen wiring ───────────────────────────────────────────────────
 
 @pytest.fixture

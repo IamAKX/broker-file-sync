@@ -18,7 +18,7 @@ install:
   - "%PYTHON%\\python.exe -m pip install --upgrade pip"
   - "%PYTHON%\\python.exe -m pip install -r requirements.txt"
   - "%PYTHON%\\python.exe -m pip install openpyxl xlrd pyinstaller pywin32"
-  # Voice-mode speech model, bundled into the build via --add-data "assets;assets"
+  # Voice-mode models (speech recognition + neural voice), bundled into the build via --add-data "assets;assets"
   - "%PYTHON%\\python.exe tools\\fetch_voice_model.py"
 
 build_script:
@@ -44,6 +44,7 @@ build_script:
         --collect-all faster_whisper `
         --collect-all ctranslate2 `
         --collect-all tokenizers `
+        --collect-all sherpa_onnx `
         --hidden-import PySide6.QtMultimedia `
         --hidden-import PySide6.QtTextToSpeech `
         --collect-all win32com `
