@@ -227,7 +227,8 @@ class HistoricDataViewer(QWidget):
         # Right-click a header -> Filter by colour (#99), on top of Symbol search + Sector.
         self._color_filter = ColorColumnFilter(
             self._table, lambda c: self._headers[c] if c < len(self._headers) else "",
-            on_changed=self._apply_row_filters, extra_headers=(self._freeze.overlay_header(),))
+            on_changed=self._apply_row_filters, extra_headers=(self._freeze.overlay_header(),),
+            sort_fn=self._sorter.sort_by)
 
     def _freeze_style(self) -> str:
         t = self._theme
@@ -287,6 +288,7 @@ class HistoricDataViewer(QWidget):
     def _apply_row_filters(self):
         query = self._search_box.text().strip().lower()
         sector_sel = self._sector_combo.currentText() if self._sector_combo is not None else "All"
+        passing = []
         for row in range(self._table.rowCount()):
             symbol_ok = True
             if self._symbol_col >= 0:
@@ -297,7 +299,16 @@ class HistoricDataViewer(QWidget):
                 item = self._table.item(row, self._sector_col)
                 sector_ok = item is not None and item.text() == sector_sel
             color_ok = self._color_filter.row_passes(row)
-            self._table.setRowHidden(row, not (symbol_ok and sector_ok and color_ok))
+            ok = symbol_ok and sector_ok and color_ok
+            self._table.setRowHidden(row, not ok)
+            if ok:
+                passing.append(row)
+        # Top / bottom N (#110) ranks only the rows every other filter kept.
+        if self._color_filter.topn() is not None:
+            keep = self._color_filter.limit_rows(passing)
+            for row in passing:
+                if row not in keep:
+                    self._table.setRowHidden(row, True)
         # The frozen Sector/Symbol overlay (self._freeze) shares the table's
         # model but not its row-hidden view state — without this, filtering
         # out non-matching rows leaves the overlay showing its own

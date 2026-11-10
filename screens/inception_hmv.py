@@ -457,7 +457,8 @@ class InceptionHmvScreen(QWidget):
         self._color_filter = ColorColumnFilter(
             self._table, lambda c: self._headers[c] if 0 <= c < len(self._headers) else "",
             on_changed=lambda: self._apply_color_filter_rows(),
-            extra_headers=(self._freeze.overlay_header(),))
+            extra_headers=(self._freeze.overlay_header(),),
+            sort_fn=self._sorter.sort_by)
 
         bottom = QHBoxLayout()
         self._status_lbl = QLabel("")
@@ -852,8 +853,10 @@ class InceptionHmvScreen(QWidget):
     def _apply_color_filter_rows(self):
         """Hide rows that fail the active header colour filter(s); the frozen
         Sector/Symbol overlay shares the model but not row-hidden state."""
+        passing = [r for r in range(self._table.rowCount()) if self._color_filter.row_passes(r)]
+        keep = self._color_filter.limit_rows(passing)        # top / bottom N (#110)
         for r in range(self._table.rowCount()):
-            self._table.setRowHidden(r, not self._color_filter.row_passes(r))
+            self._table.setRowHidden(r, r not in keep)
         self._freeze.sync_row_hidden()
 
     def _restore_saved_column_order(self):

@@ -1457,6 +1457,7 @@ class LiveViewerWindow(QWidget):
             base_colors=lambda: {QColor(self._theme.get("card_bg") if self._theme else "#1c2128").name()},
             cell_color_fn=self._cell_fill_color,
             extra_headers=(self._frozen_table.horizontalHeader(),),
+            sort_fn=self._sort_by_column_name,
         )
 
         # ── Busy indicator ───────────────────────────────────────────────────
@@ -2518,14 +2519,26 @@ class LiveViewerWindow(QWidget):
         else:
             self._sort_col_name = name
             self._sort_descending = False
-        self._resort_now()
+        self._apply_column_sort(logical_index)
 
+    def _apply_column_sort(self, logical_index: int):
+        self._resort_now()
         order = (Qt.SortOrder.DescendingOrder if self._sort_descending
                  else Qt.SortOrder.AscendingOrder)
         self._table.horizontalHeader().setSortIndicator(logical_index, order)
         self._frozen_table.horizontalHeader().setSortIndicator(logical_index, order)
 
         self._populate_table(self._data, set())
+
+    def _sort_by_column_name(self, name: str, descending: bool):
+        """Sort by *name* in a given direction (top/bottom N picks one, #110)."""
+        for c in range(self._table.columnCount()):
+            hdr_item = self._table.horizontalHeaderItem(c)
+            if hdr_item is not None and self._header_name(hdr_item) == name:
+                self._sort_col_name = name
+                self._sort_descending = descending
+                self._apply_column_sort(c)
+                return
 
     def _resort_now(self):
         """Capture the current on-screen order for self._sort_col_name as a
@@ -3304,6 +3317,7 @@ class LiveViewerWindow(QWidget):
         selected = self._sector_combo.currentText()
         color_filter = getattr(self, "_color_filter", None)
         color_active = color_filter is not None and color_filter.active
+        hidden_rows = {}
         for r in range(self._table.rowCount()):
             if selected == "All":
                 hidden = False
@@ -3312,6 +3326,15 @@ class LiveViewerWindow(QWidget):
                 hidden = item is None or item.text() != selected
             if color_active and not hidden:
                 hidden = not color_filter.row_passes(r)
+            hidden_rows[r] = hidden
+        # Top / bottom N (#110): rank only the rows the sector / colour
+        # filters (and the strategy filter upstream) let through.
+        if color_filter is not None and color_filter.topn() is not None:
+            keep = color_filter.limit_rows([r for r, h in hidden_rows.items() if not h])
+            for r, h in hidden_rows.items():
+                if not h and r not in keep:
+                    hidden_rows[r] = True
+        for r, hidden in hidden_rows.items():
             self._table.setRowHidden(r, hidden)
             # The frozen "Scrip Name" overlay shares the model but not view
             # state — row visibility has to be mirrored by hand.

@@ -105,6 +105,14 @@ class HeaderSorter(QObject):
         if self._on_sorted is not None:
             self._on_sorted()
 
+    def sort_by(self, column_name: str, descending: bool):
+        """Sort by the column whose header text is *column_name* (no-op if absent)."""
+        for c in range(self._table.columnCount()):
+            if self._header_text(c) == column_name:
+                self._col_name, self._desc = column_name, descending
+                self._apply(c)
+                return
+
     def reapply(self):
         """Call after the table is repopulated: sort the fresh rows by the
         column the user last sorted on (matched by header text); if it's
