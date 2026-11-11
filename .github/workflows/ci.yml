@@ -105,7 +105,7 @@ jobs:
         shell: pwsh
         run: Set-Content -Path version.py -Value 'APP_VERSION = "${{ needs.compute-version.outputs.version }}"'
 
-      - name: Fetch voice-mode models: speech recognition + neural voice (bundled into the build)
+      - name: Fetch voice-mode models (speech recognition + neural voice, bundled into the build)
         run: python tools/fetch_voice_model.py
 
       - name: Build Windows
