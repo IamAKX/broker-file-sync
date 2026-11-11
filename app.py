@@ -122,6 +122,17 @@ class AppController:
             return None
         return list(viewer._headers), [list(r) for r in viewer._data]
 
+    def get_lmv_chat_context(self, include_rows: bool = True) -> dict:
+        """The "live" block Ask Fuku sends with a question: the running LMV grid,
+        or why it isn't available (see services.lmv_chat_context). Never raises."""
+        from services import lmv_chat_context
+        try:
+            from config_defaults import SCRIPT_NAME_DATA
+            data_import = self._main_window._screens.get("data_import") if self._main_window is not None else None
+            return lmv_chat_context.build(data_import, SCRIPT_NAME_DATA, include_rows)
+        except Exception:
+            return {"running": False, "reason": lmv_chat_context.NOT_OPEN}
+
     def show_and_navigate(self, screen_name: str):
         """Un-hide + focus the main window, then navigate — a bare navigate()
         has no visible effect on a hidden tray-only window."""

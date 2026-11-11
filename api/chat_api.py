@@ -8,7 +8,7 @@ from collections.abc import Iterable, Iterator
 
 from api.client import api_client
 from api.endpoints import CHAT_ASK, CHAT_STATUS
-from api.exceptions import NetworkError
+from api.exceptions import ApiError, NetworkError
 
 # Per-read ceiling while streaming. A model call can sit silent for a while
 # (SQL generation) before the first event, but never this long.
@@ -44,13 +44,30 @@ def parse_sse(lines: Iterable[str]) -> Iterator[tuple[str, dict]]:
             pass
 
 
-def ask(question: str, history: list[dict]) -> Iterator[tuple[str, dict]]:
+_LIVE_NOT_SENT = {
+    "running": False,
+    "reason": "The Live Master View is running, but its data could not be sent to the server just now.",
+}
+
+
+def ask(question: str, history: list[dict], live: dict | None = None) -> Iterator[tuple[str, dict]]:
     """Yields (event, data) as the server streams them. Raises ApiError for a
     rejected request (chat disabled, rate-limited, ...) and NetworkError if the
-    connection drops mid-stream. *history*: [{"role": "user"|"assistant", "text": ...}]."""
-    response = api_client.post_stream(
-        CHAT_ASK, {"question": question, "history": history}, timeout=_STREAM_READ_TIMEOUT_SECONDS,
-    )
+    connection drops mid-stream. *history*: [{"role": "user"|"assistant", "text": ...}].
+    *live*: the Live Master View block from services.lmv_chat_context.build()."""
+    body = {"question": question, "history": history}
+    if live is not None:
+        body["live"] = {k: v for k, v in live.items() if k != "stocks"}
+    try:
+        response = api_client.post_stream(CHAT_ASK, body, timeout=_STREAM_READ_TIMEOUT_SECONDS)
+    except ApiError as exc:
+        # The grid is the only large/irregular part of the request: if the server
+        # (or a proxy in front of it) rejects the body, the question itself must
+        # still be answered — without live data.
+        if not (live and live.get("running") and exc.status_code in (400, 413, 422)):
+            raise
+        body["live"] = _LIVE_NOT_SENT
+        response = api_client.post_stream(CHAT_ASK, body, timeout=_STREAM_READ_TIMEOUT_SECONDS)
     try:
         # requests decodes SSE as latin-1 unless told otherwise (no charset in the header).
         response.encoding = "utf-8"

@@ -20,6 +20,26 @@ the HTTP/SSE contract is `broker-sync-api/docs/API_CONTRACT.md#chat`.
 - Some things are not in the database and it will say so: sector/index reports, EMV/HMV trend
   classifications, backtests, Market Profile, option chain, real-time ticks.
 
+## Live market questions (from the running LMV)
+
+Ask about the market **right now** — "What is Reliance trading at now?", "Which stocks are falling
+the most right now?", "Which sector is strongest in the live market?", "Show the current DT and DB
+for TCS" — and Fuku answers from your **Live Master View** as it is at that moment, starting the
+answer with *Live as of <time>*.
+
+- The line under the input shows the state: **● Live market data: on — LMV as of 10:32:05, 216
+  stocks**, or **○ Live market data: off — …** with what is missing.
+- Before answering a live question Fuku checks that LMV is running with data. If it isn't, it
+  does not fall back to old data; it tells you exactly what to do — which Data Import files are
+  not loaded yet, or that the files are loaded and **Run Watcher** has not been clicked, or that
+  the LMV window was closed.
+- Any column in your LMV grid can be asked about, including your active strategy columns.
+- If the live Excel feed is unreadable (LMV shows the stale-prices warning) or the grid has not
+  updated for more than 5 minutes, the answer says so.
+- It is one snapshot taken when you ask. It cannot tell what a value was a few minutes ago or how
+  it moved between two moments today.
+- Questions about past dates, closes and history work exactly as before, whether or not LMV is running.
+
 ## Voice mode
 
 Switch **Voice mode** on (top right of the screen) to talk to Fuku hands-free:
@@ -55,6 +75,7 @@ If the banner says *"not enabled for this deployment"*, the server has `CHAT_ENA
 | `components/chat_widgets.py` | `ThinkingIndicator` (painted animation), `TypewriterLabel` (smooth streamed text), `MessageBubble` (+ collapsible query/data, fade-in) |
 | `services/voice_io.py` | Voice mode: `MicListener` (QtMultimedia capture) + `UtteranceDetector` (end-of-speech), `Transcriber` (faster-whisper, offline), `NeuralSpeaker` (offline neural voice via sherpa-onnx, played with QAudioSink) with `Speaker` (QTextToSpeech, the OS voice) as fallback, `SpeechChunker` (Markdown → sentences), `VoiceConversation` (the listen → transcribe → ask → speak loop) |
 | `tools/fetch_voice_model.py` | Build step: downloads the Whisper model and the neural voice into `assets/voice_models/` so they ship inside the build |
+| `services/lmv_chat_context.py` | The "live" block sent with every question: the LMV grid as displayed (`build()`), or `running: False` + the reason (which files are missing / Run Watcher not clicked); `summary()` for the status line. Read via `AppController.get_lmv_chat_context()` |
 | `api/chat_api.py` | `get_status()`, `ask()` (generator of `(event, data)`), `parse_sse()` |
 | `api/client.py` → `post_stream()` | Authenticated streaming POST with the same 401-refresh behaviour as other calls |
 | `api/endpoints.py` | `CHAT_STATUS`, `CHAT_ASK` |
@@ -69,6 +90,15 @@ follow-ups.
 Animation is all `QPainter` + `QTimer` (no assets), follows the active theme, and its timers
 stop when the widget is hidden. Theme changes rebuild the screen and keep the transcript
 (`refresh_theme`); a theme change mid-question abandons that question.
+
+Live questions: `ChatScreen.ask()` snapshots the LMV on the GUI thread
+(`LiveViewerWindow._chat_disp` / `_chat_updated_at`, recorded on every tick) and sends it as
+`live` in the `/chat/ask` body (columnar, ~230 KB for 216 stocks × 110 columns). The backend loads
+it into a per-request `lmv_live` table next to the archive views, so the same query pipeline
+answers it; when LMV is off the backend replies with the `reason` text. If the server or a proxy
+rejects the body (400/413/422) the question is re-sent without the grid, and if the LMV state
+can't be read at all the question goes out without a `live` block — a live-data problem never
+stops a question from being answered.
 
 Nothing is persisted locally; the conversation lives in memory for the session.
 
@@ -98,6 +128,11 @@ Nothing is persisted locally; the conversation lives in memory for the session.
 `tests/test_chat_screen.py` — SSE parsing, a full streamed turn (history, thinking → answer,
 details toggle), server error handling, refusals, follow-up history, clear/stale events,
 disabled banner, theme refresh, and the indicator's painting/stage tracking.
+
+`tests/test_lmv_chat_context.py` — LMV not running (never opened, files missing, watcher not
+started, window closed, no data), the grid payload (symbols, sector, empty/NaN cells, strict JSON),
+feed/staleness warnings, request body with and without `live`, the rejected-grid retry, and the
+screen's status line and failure fallback.
 
 `tests/test_voice_io.py` — end-of-speech detection on synthetic audio, Markdown → speech
 chunking, the conversation loop with a fake microphone/speaker/transcriber (noise, interrupt,

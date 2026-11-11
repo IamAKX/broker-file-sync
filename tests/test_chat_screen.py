@@ -47,7 +47,7 @@ def test_parse_sse_skips_garbage_and_flushes_trailing_event():
 # ── screen flow ──────────────────────────────────────────────────────────
 
 def _fake_ask(events):
-    def ask(question, history):
+    def ask(question, history, live=None):
         yield from events
     return ask
 
@@ -80,7 +80,7 @@ def test_full_turn_streams_answer_and_records_history(qapp, screen, monkeypatch)
 
 
 def test_server_error_shows_message_and_does_not_pollute_history(qapp, screen, monkeypatch):
-    def boom(question, history):
+    def boom(question, history, live=None):
         raise ApiError("You can ask up to 12 questions per minute.", "chat_rate_limited", 429)
         yield  # pragma: no cover
     monkeypatch.setattr(chat_api, "ask", boom)
@@ -104,7 +104,7 @@ def test_refusal_answer_is_recorded_like_any_answer(qapp, screen, monkeypatch):
 def test_second_question_sends_prior_turns_as_history(qapp, screen, monkeypatch):
     seen = []
 
-    def ask(question, history):
+    def ask(question, history, live=None):
         seen.append((question, list(history)))
         yield "answer", {"text": f"re: {question}"}
         yield "done", {}

@@ -11,6 +11,11 @@ Voice mode (the switch in the header) makes it hands-free: the question is
 spoken, transcribed on this machine and asked like a typed one; the answer is
 read aloud while it also appears in the transcript (services/voice_io.py).
 
+Live questions ("what is Reliance trading at now?") are answered from the
+running Live Master View: every question carries the LMV grid, or the reason
+it isn't available (services/lmv_chat_context.py), and the line under the
+input shows which of the two it is.
+
 Scope is enforced server-side (prompt + SQL validator) —
 see docs/chatbot.md. Nothing is stored locally: the conversation lives in
 memory for the session and the last few turns are sent along so follow-up
@@ -29,7 +34,7 @@ from api import chat_api
 from api.exceptions import ApiError, NetworkError
 from components.chat_widgets import MessageBubble, ToggleSwitch, VoiceStatusBar
 from components.page_header import page_header
-from services import voice_io
+from services import lmv_chat_context, voice_io
 
 _HISTORY_TURNS_SENT = 6
 
@@ -153,6 +158,15 @@ class ChatScreen(QWidget):
         row.addWidget(self._send_btn)
         outer.addLayout(row)
 
+        self._live_lbl = QLabel("")
+        self._live_lbl.setFont(font_scale.font(font_scale.SMALL, False))
+        self._live_lbl.setWordWrap(True)
+        outer.addWidget(self._live_lbl)
+        self._live_timer = QTimer(self)
+        self._live_timer.setInterval(5000)
+        self._live_timer.timeout.connect(self._refresh_live_status)
+        self._refresh_live_status()
+
         disclaimer = QLabel("Answers are generated from Fuku Lens data and may contain mistakes. Not investment advice.")
         disclaimer.setFont(font_scale.font(font_scale.SMALL, False))
         disclaimer.setStyleSheet(f"color: {t.get('text_secondary')};")
@@ -205,11 +219,36 @@ class ChatScreen(QWidget):
             self._status_loaded = True
             threading.Thread(target=self._load_status, name="chat-status", daemon=True).start()
         self._input.setFocus()
+        self._refresh_live_status()
+        self._live_timer.start()
 
     def hideEvent(self, event):
         # The microphone must not stay open behind another screen (or in the tray).
         self._voice.stop()
+        self._live_timer.stop()
         super().hideEvent(event)
+
+    # ── live market data (the running LMV) ───────────────────────────────
+
+    def _live_context(self, include_rows: bool = True) -> dict | None:
+        """The Live Master View block for a question; None if it can't be built
+        (the question is then asked exactly as before this feature existed)."""
+        try:
+            return self._controller.get_lmv_chat_context(include_rows)
+        except Exception:
+            return None
+
+    def _refresh_live_status(self, block: dict | None = None):
+        t = self._controller.theme
+        block = block if block is not None else self._live_context(include_rows=False)
+        if block is None:
+            self._live_lbl.hide()
+            return
+        connected, text = lmv_chat_context.summary(block)
+        color = t.get("accent") if connected and not block.get("warning") else t.get("text_secondary")
+        self._live_lbl.setStyleSheet(f"color: {color};")
+        self._live_lbl.setText(("● " if connected else "○ ") + text)
+        self._live_lbl.show()
 
     def _load_status(self):
         try:
@@ -313,14 +352,17 @@ class ChatScreen(QWidget):
 
         history = self._history[-(_HISTORY_TURNS_SENT * 2):]
         self._history.append({"role": "user", "text": question})
+        live = self._live_context()   # snapshot of the LMV grid at the moment of asking (GUI thread)
+        if live is not None:
+            self._refresh_live_status(live)
         threading.Thread(
-            target=self._stream, args=(self._token, question, history, self._cancel),
+            target=self._stream, args=(self._token, question, history, self._cancel, live),
             name="chat-ask", daemon=True,
         ).start()
 
-    def _stream(self, token: int, question: str, history: list, cancel: threading.Event):
+    def _stream(self, token: int, question: str, history: list, cancel: threading.Event, live: dict | None = None):
         try:
-            for event, data in chat_api.ask(question, history):
+            for event, data in chat_api.ask(question, history, live):
                 if cancel.is_set():
                     break
                 self._event.emit(token, event, data)

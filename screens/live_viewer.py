@@ -1655,6 +1655,8 @@ class LiveViewerWindow(QWidget):
         headers, data = _inject_opening_range_columns(headers, data, {}, self._or_name_to_symbol)
         self._headers = headers
         self._data    = data
+        from datetime import datetime
+        self._chat_updated_at = datetime.now()
         self._initial_load_done = True
         # All columns visible by default
         self._visible_cols = set(range(len(headers)))
@@ -1953,6 +1955,7 @@ class LiveViewerWindow(QWidget):
         try:
             self._data    = new_data
             self._headers = headers
+            self._chat_updated_at = datetime.now()
             if not self._initial_load_done:
                 self._initial_load_done = True
                 self._visible_cols = set(range(len(headers)))
@@ -2169,6 +2172,9 @@ class LiveViewerWindow(QWidget):
             disp_headers, disp_data = self._headers, data
 
         disp_data = self._apply_row_order(disp_headers, disp_data)
+        # The grid as displayed (incl. strategy columns) + when it was built —
+        # read by services.lmv_chat_context for Ask Fuku's live questions.
+        self._chat_disp = (disp_headers, disp_data)
 
         base_col_count = len(self._headers)
 
@@ -3357,6 +3363,7 @@ class LiveViewerWindow(QWidget):
     # ── Controls ─────────────────────────────────────────────────────────────
 
     def _stop(self):
+        self._chat_stopped = True   # Ask Fuku must not treat a stopped grid as live
         self._fs_watcher.removePaths(self._fs_watcher.files())
         self._debounce.stop()
         if hasattr(self, "_com_timer"):

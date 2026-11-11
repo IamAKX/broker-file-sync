@@ -337,7 +337,7 @@ def screen(qapp, monkeypatch):
 
 
 def test_spoken_question_lands_in_the_transcript_and_the_answer_is_spoken(qapp, screen, monkeypatch):
-    monkeypatch.setattr(chat_api, "ask", lambda q, h: iter([
+    monkeypatch.setattr(chat_api, "ask", lambda q, h, live=None: iter([
         ("token", {"text": "**TCS** closed "}), ("token", {"text": "at 3,500.5."}), ("done", {}),
     ]))
     voice = screen._voice
@@ -368,7 +368,7 @@ def test_spoken_question_lands_in_the_transcript_and_the_answer_is_spoken(qapp, 
 def test_typed_question_is_spoken_too_and_errors_are_read_out(qapp, screen, monkeypatch):
     from api.exceptions import ApiError
 
-    def boom(question, history):
+    def boom(question, history, live=None):
         raise ApiError("You can ask up to 12 questions per minute.", "chat_rate_limited", 429)
         yield  # pragma: no cover
     monkeypatch.setattr(chat_api, "ask", boom)

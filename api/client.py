@@ -73,7 +73,13 @@ class ApiClient:
         token = token_manager.get_access_token()
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        api_logger.debug("-> POST %s (stream) body=%s", path, redact_body(json_body))
+        logged = redact_body(json_body)
+        if isinstance(logged, dict) and isinstance(logged.get("live"), dict) and "rows" in logged["live"]:
+            # Ask Fuku's live LMV grid: hundreds of rows per question — log its size, not its contents.
+            live = logged["live"]
+            logged = {**logged, "live": {**live, "rows": f"<{len(live['rows'])} rows>",
+                                         "columns": f"<{len(live.get('columns', []))} columns>"}}
+        api_logger.debug("-> POST %s (stream) body=%s", path, logged)
         try:
             response = self._session.post(
                 BASE_URL + path, json=json_body, headers=headers, timeout=timeout, stream=True,
