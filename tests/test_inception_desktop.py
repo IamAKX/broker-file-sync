@@ -2843,8 +2843,10 @@ def test_settings_screen_loads_defaults_when_nothing_saved(qapp, controller, mon
     monkeypatch.setattr("services.config_store.load_json", lambda key, default: default)
     screen = InceptionSettingsScreen(controller)
     assert screen._threshold_spin.value() == pytest.approx(DEFAULT_GAP_THRESHOLD_PCT)
-    assert screen._window_spin.value() == DEFAULT_WEEK_WINDOW_DAYS
     assert screen._fifo_spin.value() == DEFAULT_FIFO_CAP
+    # The 52-week window is fixed, not an editable field (see services.inception_settings).
+    assert not hasattr(screen, "_window_spin")
+    assert DEFAULT_WEEK_WINDOW_DAYS == 364
 
 
 def test_settings_screen_save_params_persists_via_config_store(qapp, controller, monkeypatch, bars_db):
@@ -2856,11 +2858,44 @@ def test_settings_screen_save_params_persists_via_config_store(qapp, controller,
 
     screen = InceptionSettingsScreen(controller)
     screen._threshold_spin.setValue(1.5)
-    screen._window_spin.setValue(300)
     screen._fifo_spin.setValue(5)
     screen._save_params()
 
-    assert captured["value"] == {"gap_threshold_pct": 1.5, "week_window_days": 300, "fifo_cap": 5}
+    # week_window_days is always written back as the fixed 52 weeks, which also
+    # corrects a wrong value an older build left on the server.
+    assert captured["value"] == {"gap_threshold_pct": 1.5, "week_window_days": 364, "fifo_cap": 5}
+
+
+def test_saved_52_week_window_is_ignored_so_52wh_is_a_real_52_week_high(monkeypatch):
+    """Regression: every account had "week_window_days": 750 saved (set once on
+    the admin account, copied to each new signup), so 52WH was a ~2-year high —
+    AMBUJACEM showed its July 2025 high (627.2) as the 52-week high in Nov 2026
+    instead of ~574. The saved value must no longer reach the calculation."""
+    from datetime import date, timedelta
+
+    from services import inception_settings
+    from services.inception_formula_engine import compute_group_a
+
+    monkeypatch.setattr(
+        "services.config_store.load_json",
+        lambda key, default: {"gap_threshold_pct": 0.5, "week_window_days": 750, "fifo_cap": 3},
+    )
+    settings = inception_settings.load()
+    assert settings == {"gap_threshold_pct": 0.5, "week_window_days": 364, "fifo_cap": 3}
+
+    # A stock in a downtrend: the old peak is 475 days before the as-of date.
+    as_of = date(2026, 11, 9)
+
+    def bar(d, high):
+        return {"trade_date": d, "open": high - 5, "high": high, "low": high - 10, "close": high - 5,
+                "volume": 1, "open_interest": 1}
+
+    bars = [bar(date(2025, 7, 22), 627.2), bar(date(2026, 1, 5), 574.8), bar(as_of - timedelta(days=1), 398.0),
+            bar(as_of, 395.0)]
+    row = compute_group_a(bars, week_window_days=settings["week_window_days"])[as_of]
+    assert row["52WH"] == 574.8          # not the previous year's 627.2
+    assert row["PYH"] == 627.2           # the previous-year high is still its own column
+    assert row["ATH"] == 627.2
 
 
 def test_settings_screen_sync_progress_slots_update_label(qapp, controller, monkeypatch, bars_db):

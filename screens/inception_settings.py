@@ -269,10 +269,10 @@ class InceptionSettingsScreen(QWidget):
 
         hint = QLabel(
             "These are the only user-editable parts of the Group A/B "
-            "computation (52-week high/low, gap tracking, …) — the "
-            "algorithms themselves aren't row-level formulas, so a formula "
-            "field wouldn't apply to them. Changes apply the next time you "
-            "load View by Date or HMV."
+            "computation (gap tracking) — the algorithms themselves aren't "
+            "row-level formulas, so a formula field wouldn't apply to them. "
+            "52WH / 52WL always use the last 52 weeks (364 days). Changes "
+            "apply the next time you load View by Date or HMV."
         )
         hint.setFont(font_scale.font(font_scale.SMALL, False))
         hint.setStyleSheet(f"color: {t.get('text_secondary')};")
@@ -283,11 +283,6 @@ class InceptionSettingsScreen(QWidget):
             params_lay, "Gap threshold (%):",
             "A day's open counts as a gap only when it moves more than this % from the previous close.",
             0.01, 50.0, 2,
-        )
-        self._window_spin = self._labeled_int_spin(
-            params_lay, "52-week window (days):",
-            "Calendar-day window 52WH/52WL roll over — 364 is the standard \"52 weeks\".",
-            7, 3650,
         )
         self._fifo_spin = self._labeled_int_spin(
             params_lay, "Gap FIFO depth:",
@@ -439,13 +434,10 @@ class InceptionSettingsScreen(QWidget):
     def _load_params(self):
         saved = inception_settings.load()
         self._threshold_spin.setValue(saved["gap_threshold_pct"])
-        self._window_spin.setValue(saved["week_window_days"])
         self._fifo_spin.setValue(saved["fifo_cap"])
 
     def _save_params(self):
-        inception_settings.save(
-            self._threshold_spin.value(), self._window_spin.value(), self._fifo_spin.value(),
-        )
+        inception_settings.save(self._threshold_spin.value(), self._fifo_spin.value())
         # Not required for correctness — inception_compute_service's row
         # cache keys on these settings too, so it self-invalidates on next
         # read — just tidies up entries computed under the old settings
