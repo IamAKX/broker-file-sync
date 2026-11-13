@@ -191,7 +191,9 @@ def test_options_button_appears_only_on_a_finished_answer(qapp, screen, monkeypa
     from components.chat_widgets import MessageBubble
     bubble = _answered(qapp, screen, monkeypatch, [_ROWS, ("token", {"text": "TCS closed at 3,500.5."}), ("done", {})])
     assert not bubble.options_btn.isHidden()
-    assert [a.text() for a in bubble.build_options_menu().actions()] == ["Save chat as PDF", "Translate to Tamil"]
+    assert [a.text() for a in bubble.build_options_menu().actions()] == [
+        "Save chat as PDF", "Translate to Tamil", "Translate to Tanglish",
+    ]
     # the options button stays the last thing in the bubble, below the data table
     assert bubble.layout().indexOf(bubble.options_btn) > bubble.layout().indexOf(bubble._details)
     user = [b for b in screen.findChildren(MessageBubble) if b.role == "user"][0]
@@ -207,35 +209,48 @@ def test_options_button_appears_only_on_a_finished_answer(qapp, screen, monkeypa
     assert failed.is_error and failed.options_btn.isHidden()
 
 
-def test_translate_to_tamil_and_back_without_a_second_server_call(qapp, screen, monkeypatch):
+def _menu(bubble):
+    return [a.text() for a in bubble.build_options_menu().actions()]
+
+
+def test_translate_to_tamil_tanglish_and_back_with_one_server_call_each(qapp, screen, monkeypatch):
+    import font_scale
+    from PySide6.QtGui import QFontDatabase
     bubble = _answered(qapp, screen, monkeypatch, [("token", {"text": "TCS closed at 3,500.5."}), ("done", {})])
+    replies = {"ta": "TCS 3,500.5 இல் முடிந்தது.", "ta-Latn": "TCS 3,500.5 la close aachu."}
     calls = []
 
     def translate(text, target="ta"):
         calls.append((text, target))
-        return "TCS 3,500.5 இல் முடிந்தது."
+        return replies[target]
     monkeypatch.setattr(chat_api, "translate", translate)
+    app_font = font_scale.font(font_scale.SMALL, False).families()
 
-    bubble.toggle_language()
-    assert bubble.is_translating()
-    assert [a.text() for a in bubble.build_options_menu().actions()][1] == "Translating to Tamil…"
+    bubble.set_language("ta")
+    assert bubble.is_translating() and _menu(bubble) == ["Save chat as PDF", "Translating to Tamil…"]
     _wait(qapp, lambda: bubble.language() == "ta")
-    assert bubble.body.full_text() == "TCS 3,500.5 இல் முடிந்தது."
+    assert bubble.body.full_text() == replies["ta"]
     assert bubble.original_text() == "TCS closed at 3,500.5."
-    assert [a.text() for a in bubble.build_options_menu().actions()][1] == "Show in English"
+    assert _menu(bubble) == ["Save chat as PDF", "Translate to Tanglish", "Show in English"]
+    # Tamil script is drawn with a Tamil-capable font behind the Latin one (the macOS
+    # system font alone renders it as empty boxes).
+    tamil_fonts = set(QFontDatabase.families(QFontDatabase.WritingSystem.Tamil))
+    if tamil_fonts:
+        assert set(bubble.body.font().families()) & tamil_fonts
 
-    # Tamil is drawn with a Tamil-capable font behind the Latin one (the macOS
-    # system font alone renders it as empty boxes); English goes back to the app font.
-    from PySide6.QtGui import QFontDatabase
-    if QFontDatabase.families(QFontDatabase.WritingSystem.Tamil):
-        assert set(bubble.body.font().families()) & set(QFontDatabase.families(QFontDatabase.WritingSystem.Tamil))
+    bubble.set_language("ta-Latn")                   # straight from Tamil to Tanglish
+    _wait(qapp, lambda: bubble.language() == "ta-Latn")
+    assert bubble.body.full_text() == replies["ta-Latn"]
+    assert bubble.body.font().families() == app_font         # plain English letters: the app font
+    assert _menu(bubble) == ["Save chat as PDF", "Translate to Tamil", "Show in English"]
+    # both were translated from the English answer, never from each other
+    assert calls == [("TCS closed at 3,500.5.", "ta"), ("TCS closed at 3,500.5.", "ta-Latn")]
 
-    bubble.toggle_language()
-    assert bubble.language() == "en" and bubble.body.full_text() == "TCS closed at 3,500.5."
-    import font_scale
-    assert bubble.body.font().families() == font_scale.font(font_scale.SMALL, False).families()
-    bubble.toggle_language()                         # Tamil again: served from the bubble's own copy
-    assert bubble.language() == "ta" and calls == [("TCS closed at 3,500.5.", "ta")]
+    bubble.set_language("en")
+    assert bubble.body.full_text() == "TCS closed at 3,500.5." and bubble.body.font().families() == app_font
+    bubble.set_language("ta")                        # again: served from the bubble's own copy
+    bubble.set_language("ta-Latn")
+    assert bubble.language() == "ta-Latn" and len(calls) == 2
     # follow-up questions still carry the original English answer
     assert screen._history[-1] == {"role": "assistant", "text": "TCS closed at 3,500.5."}
 
@@ -246,7 +261,7 @@ def test_translate_failure_keeps_english_and_says_why(qapp, screen, monkeypatch)
     def translate(text, target="ta"):
         raise ApiError("Not Found", "not_found", 404)
     monkeypatch.setattr(chat_api, "translate", translate)
-    bubble.toggle_language()
+    bubble.set_language("ta-Latn")
     _wait(qapp, lambda: not bubble.is_translating())
     assert bubble.language() == "en" and bubble.body.full_text() == "Hello."
     assert "newer server version" in bubble._note.text() and not bubble._note.isHidden()
@@ -254,7 +269,7 @@ def test_translate_failure_keeps_english_and_says_why(qapp, screen, monkeypatch)
 
 def test_export_turns_carry_shown_language_and_data_rows(qapp, screen, monkeypatch):
     bubble = _answered(qapp, screen, monkeypatch, [_ROWS, ("token", {"text": "TCS closed at 3,500.5."}), ("done", {})])
-    bubble.set_translation("TCS 3,500.5 இல் முடிந்தது.")
+    bubble.set_translation("ta", "TCS 3,500.5 இல் முடிந்தது.")
     turns = screen.export_turns()
     assert [t["role"] for t in turns] == ["user", "assistant"]
     assert turns[1]["text"] == "TCS 3,500.5 இல் முடிந்தது."

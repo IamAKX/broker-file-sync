@@ -194,12 +194,14 @@ class MessageBubble(QFrame):
     """One chat message. Assistant bubbles can also carry a collapsible
     'data' section (a preview of the result rows; never the SQL), and once the
     answer is complete a small options button: save the chat as a PDF, or show
-    this answer in Tamil / back in English."""
+    this answer in Tamil or Tanglish / back in English."""
 
     save_requested = Signal()
-    # The screen fetches the Tamil text (a server call) and answers with
-    # set_translation() or translation_failed().
-    translate_requested = Signal()
+    # (target language) - the screen fetches the translation (a server call) and
+    # answers with set_translation() or translation_failed().
+    translate_requested = Signal(str)
+    # target -> name in the menu. Tanglish = Tamil words typed in English letters.
+    LANGUAGES = {"ta": "Tamil", "ta-Latn": "Tanglish"}
 
     def __init__(self, theme, role: str, text: str = "", parent=None):
         super().__init__(parent)
@@ -224,9 +226,9 @@ class MessageBubble(QFrame):
         self.is_error = False
         self.details_data: dict | None = None   # the rows behind the answer, for the PDF export
         self._language = "en"
-        self._original = ""                      # the English answer, kept while Tamil is shown
-        self._translated: str | None = None
-        self._translating = False
+        self._original = ""                      # the English answer, kept while a translation is shown
+        self._translations: dict[str, str] = {}  # target -> text, so switching back costs no server call
+        self._translating = ""                   # the target being fetched, "" when idle
         self.indicator: ThinkingIndicator | None = None
         self.body = TypewriterLabel()
         self.body.setFont(font_scale.font(font_scale.SMALL, False))
@@ -362,11 +364,13 @@ class MessageBubble(QFrame):
         menu = QMenu(self)
         menu.addAction("Save chat as PDF", self.save_requested.emit)
         if self._translating:
-            menu.addAction("Translating to Tamil…").setEnabled(False)
-        elif self._language == "ta":
-            menu.addAction("Show in English", self.toggle_language)
-        else:
-            menu.addAction("Translate to Tamil", self.toggle_language)
+            menu.addAction(f"Translating to {self.LANGUAGES[self._translating]}…").setEnabled(False)
+            return menu
+        for target, name in self.LANGUAGES.items():
+            if target != self._language:
+                menu.addAction(f"Translate to {name}", lambda t=target: self.set_language(t))
+        if self._language != "en":
+            menu.addAction("Show in English", lambda: self.set_language("en"))
         return menu
 
     def _show_options(self) -> None:
@@ -378,42 +382,43 @@ class MessageBubble(QFrame):
         return self._language
 
     def is_translating(self) -> bool:
-        return self._translating
+        return bool(self._translating)
 
     def original_text(self) -> str:
         """The answer as it was given (English), whatever is on screen."""
-        return self._original if self._language == "ta" else self.body.full_text()
+        return self.body.full_text() if self._language == "en" else self._original
 
-    def toggle_language(self) -> None:
-        if self._translating:
+    def set_language(self, target: str) -> None:
+        """"en", or a LANGUAGES key. A translation not fetched yet is requested
+        from the screen; the answer stays as it is until it arrives."""
+        if self._translating or target == self._language:
             return
         self._set_note("")
-        if self._language == "ta":
-            self._language = "en"
-            self.body.setFont(font_scale.font(font_scale.SMALL, False))
-            self.body.set_text(self._original)
-        elif self._translated is not None:
-            self._show_translation()
-        else:
-            self._translating = True
-            self._set_note("Translating to Tamil…")
-            self.translate_requested.emit()
+        if target == "en" or target in self._translations:
+            self._show(target)
+        elif target in self.LANGUAGES:
+            self._translating = target
+            self._set_note(f"Translating to {self.LANGUAGES[target]}…")
+            self.translate_requested.emit(target)
 
-    def set_translation(self, text: str) -> None:
-        self._translating = False
+    def set_translation(self, target: str, text: str) -> None:
+        self._translating = ""
         self._set_note("")
-        self._translated = text
-        self._show_translation()
+        self._translations[target] = text
+        self._show(target)
 
     def translation_failed(self, message: str) -> None:
-        self._translating = False
+        self._translating = ""
         self._set_note(f"Could not translate: {message}", error=True)
 
-    def _show_translation(self) -> None:
-        self._original = self.body.full_text()
-        self._language = "ta"
-        self.body.setFont(tamil_font(font_scale.font(font_scale.SMALL, False)))
-        self.body.set_text(self._translated or "")
+    def _show(self, target: str) -> None:
+        if self._language == "en":
+            self._original = self.body.full_text()
+        self._language = target
+        base = font_scale.font(font_scale.SMALL, False)
+        # Only Tamil script needs the Tamil font; Tanglish is plain English letters.
+        self.body.setFont(tamil_font(base) if target == "ta" else base)
+        self.body.set_text(self._original if target == "en" else self._translations[target])
 
     def _set_note(self, text: str, error: bool = False) -> None:
         color = self._theme.get("destructive" if error else "text_secondary")

@@ -18,8 +18,9 @@ input shows which of the two it is.
 
 Every finished answer has a small options button (⋯): "Save chat as PDF"
 exports the whole transcript, data tables included (services/chat_export.py),
-and "Translate to Tamil" / "Show in English" switches that one answer's
-language (the server translates; names, symbols and numbers stay as they are).
+and "Translate to Tamil" / "Translate to Tanglish" / "Show in English" switches
+that one answer's language - Tanglish is Tamil typed in English letters (the
+server translates; names, symbols and numbers stay as they are).
 
 Scope is enforced server-side (prompt + SQL validator) —
 see docs/chatbot.md. Nothing is stored locally: the conversation lives in
@@ -406,12 +407,12 @@ class ChatScreen(QWidget):
             self._apply_status(data)
             return
         if event == "_translated":
-            target, text, error = data
-            if shiboken6.isValid(target):   # the bubble may be gone (theme rebuild)
+            bubble, target, text, error = data
+            if shiboken6.isValid(bubble):   # the bubble may be gone (theme rebuild)
                 if error:
-                    target.translation_failed(error)
+                    bubble.translation_failed(error)
                 else:
-                    target.set_translation(text)
+                    bubble.set_translation(target, text)
             return
         bubble = self._current
         if bubble is None:
@@ -483,7 +484,7 @@ class ChatScreen(QWidget):
 
     def export_turns(self) -> list[dict]:
         """What "Save chat as PDF" writes: every message as it is shown (an answer
-        switched to Tamil is saved in Tamil) with the data rows behind it. An
+        switched to Tamil or Tanglish is saved that way) with the data rows behind it. An
         answer still being written is left out."""
         turns = []
         for bubble in self._bubbles():
@@ -524,26 +525,28 @@ class ChatScreen(QWidget):
             chat_export.build_html(turns), path, on_done, margins_mm=chat_export.PAGE_MARGINS_MM,
         )
 
-    def _translate_bubble(self, bubble: MessageBubble):
+    def _translate_bubble(self, bubble: MessageBubble, target: str):
         text = bubble.original_text()
         threading.Thread(
-            target=self._translate_worker, args=(self._token, bubble, text), name="chat-translate", daemon=True,
+            target=self._translate_worker, args=(self._token, bubble, target, text),
+            name="chat-translate", daemon=True,
         ).start()
 
-    def _translate_worker(self, token: int, bubble: MessageBubble, text: str):
+    def _translate_worker(self, token: int, bubble: MessageBubble, target: str, text: str):
         translated, error = "", ""
         try:
-            translated = chat_api.translate(text, "ta")
+            translated = chat_api.translate(text, target)
             if not translated.strip():
                 error = "The server sent back an empty translation."
         except ApiError as exc:
-            error = ("Translation needs a newer server version." if exc.status_code in (404, 405)
+            # 404: no translate endpoint yet; 422: it doesn't know this language yet.
+            error = ("Translation needs a newer server version." if exc.status_code in (404, 405, 422)
                      else exc.detail)
         except NetworkError as exc:
             error = f"Could not reach the server. {exc}"
         except Exception as exc:
             error = str(exc)
-        self._event.emit(token, "_translated", (bubble, translated, error))
+        self._event.emit(token, "_translated", (bubble, target, translated, error))
 
     # ── helpers ──────────────────────────────────────────────────────────
 
@@ -551,7 +554,7 @@ class ChatScreen(QWidget):
         is_user = bubble.role == "user"
         if not is_user:
             bubble.save_requested.connect(self.save_chat_pdf)
-            bubble.translate_requested.connect(lambda b=bubble: self._translate_bubble(b))
+            bubble.translate_requested.connect(lambda target, b=bubble: self._translate_bubble(b, target))
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)

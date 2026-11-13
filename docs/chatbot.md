@@ -16,9 +16,10 @@ the HTTP/SSE contract is `broker-sync-api/docs/API_CONTRACT.md#chat`.
 - The small **⋯** button under a finished answer opens two options:
   - **Save chat as PDF** — saves the whole conversation to a PDF you pick a place for. Any answer
     with a *Show data* table has that table saved too, whether or not it is expanded.
-  - **Translate to Tamil** / **Show in English** — switches that one answer between English and
-    Tamil. Stock names, symbols, codes and numbers stay as they are. An answer showing in Tamil is
-    saved to the PDF in Tamil.
+  - **Translate to Tamil** / **Translate to Tanglish** / **Show in English** — switches that one
+    answer's language. *Tamil* is written in Tamil script; *Tanglish* is Tamil typed in English
+    letters. Stock names, symbols, codes and numbers stay as they are. An answer showing in Tamil or
+    Tanglish is saved to the PDF that way.
 - **Stop** (the Send button while a question runs) cancels it. **New chat** clears the
   conversation. Follow-up questions ("and for Banking?") work — the last 6 turns are sent along.
 - It only answers about markets, stocks and Fuku Lens data. Anything else gets a polite
@@ -78,7 +79,7 @@ If the banner says *"not enabled for this deployment"*, the server has `CHAT_ENA
 | File | Role |
 |---|---|
 | `screens/chat.py` | `ChatScreen`: transcript, input, suggestion chips, Stop/New chat, event handling |
-| `components/chat_widgets.py` | `ThinkingIndicator` (painted animation), `TypewriterLabel` (smooth streamed text), `MessageBubble` (+ collapsible query/data, the ⋯ options menu and the English/Tamil switch, fade-in) |
+| `components/chat_widgets.py` | `ThinkingIndicator` (painted animation), `TypewriterLabel` (smooth streamed text), `MessageBubble` (+ collapsible query/data, the ⋯ options menu and the English/Tamil/Tanglish switch, fade-in) |
 | `services/voice_io.py` | Voice mode: `MicListener` (QtMultimedia capture) + `UtteranceDetector` (end-of-speech), `Transcriber` (faster-whisper, offline), `NeuralSpeaker` (offline neural voice via sherpa-onnx, played with QAudioSink) with `Speaker` (QTextToSpeech, the OS voice) as fallback, `SpeechChunker` (Markdown → sentences), `VoiceConversation` (the listen → transcribe → ask → speak loop) |
 | `tools/fetch_voice_model.py` | Build step: downloads the Whisper model and the neural voice into `assets/voice_models/` so they ship inside the build |
 | `services/lmv_chat_context.py` | The "live" block sent with every question: the LMV grid as displayed (`build()`), or `running: False` + the reason (which files are missing / Run Watcher not clicked); `summary()` for the status line. Read via `AppController.get_lmv_chat_context()` |
@@ -135,7 +136,7 @@ Nothing is persisted locally; the conversation lives in memory for the session.
 `tests/test_chat_screen.py` — SSE parsing, a full streamed turn (history, thinking → answer,
 details toggle), server error handling, refusals, follow-up history, clear/stale events,
 disabled banner, theme refresh, the indicator's painting/stage tracking, and the answer options
-(menu contents, Tamil and back with one server call, translation failure, PDF content and file choice).
+(menu contents, Tamil / Tanglish and back with one server call each, translation failure, PDF content and file choice).
 
 `tests/test_lmv_chat_context.py` — LMV not running (never opened, files missing, watcher not
 started, window closed, no data), the grid payload (symbols, sector, empty/NaN cells, strict JSON),

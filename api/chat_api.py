@@ -21,7 +21,8 @@ def get_status() -> dict:
 
 
 def translate(text: str, target: str = "ta") -> str:
-    """One chat answer in another language ("ta" = Tamil); stock names, symbols
+    """One chat answer in another language ("ta" = Tamil script, "ta-Latn" =
+    Tanglish, Tamil typed in English letters); stock names, symbols
     and numbers come back unchanged. One model call on the server, so it gets the
     same patience as a streamed answer. Raises ApiError / NetworkError."""
     reply = api_client.post(
