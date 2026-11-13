@@ -7,7 +7,7 @@ import json
 from collections.abc import Iterable, Iterator
 
 from api.client import api_client
-from api.endpoints import CHAT_ASK, CHAT_STATUS
+from api.endpoints import CHAT_ASK, CHAT_STATUS, CHAT_TRANSLATE
 from api.exceptions import ApiError, NetworkError
 
 # Per-read ceiling while streaming. A model call can sit silent for a while
@@ -18,6 +18,16 @@ _STREAM_READ_TIMEOUT_SECONDS = 90
 def get_status() -> dict:
     """{"enabled", "model_id", "suggested_questions"}."""
     return api_client.get(CHAT_STATUS)
+
+
+def translate(text: str, target: str = "ta") -> str:
+    """One chat answer in another language ("ta" = Tamil); stock names, symbols
+    and numbers come back unchanged. One model call on the server, so it gets the
+    same patience as a streamed answer. Raises ApiError / NetworkError."""
+    reply = api_client.post(
+        CHAT_TRANSLATE, {"text": text, "target": target}, timeout=_STREAM_READ_TIMEOUT_SECONDS,
+    )
+    return str(reply.get("text") or "")
 
 
 def parse_sse(lines: Iterable[str]) -> Iterator[tuple[str, dict]]:

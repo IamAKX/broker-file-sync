@@ -6,12 +6,13 @@ widget is not visible.
 """
 
 import math
+import sys
 
 import font_scale
-from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QRectF, Qt, QTimer
-from PySide6.QtGui import QColor, QLinearGradient, QPainter, QPen
+from PySide6.QtCore import QEasingCurve, QPoint, QPropertyAnimation, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QLinearGradient, QPainter, QPen
 from PySide6.QtWidgets import (
-    QAbstractButton, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QPushButton, QSizePolicy,
+    QAbstractButton, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QLabel, QMenu, QPushButton, QSizePolicy,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -23,6 +24,28 @@ STAGES = [
     ("writing_answer", "Writing the answer"),
 ]
 _FRAME_MS = 33
+
+
+_TAMIL_FAMILIES = ("Nirmala UI", "Tamil Sangam MN", "Tamil MN", "Noto Sans Tamil", "Latha")
+_tamil_family: str | None = None   # looked up once; "" = this machine has no Tamil font
+
+
+def tamil_font(base: QFont) -> QFont:
+    """*base* with a Tamil-capable family behind it, for an answer shown in Tamil.
+    Needed because Qt does not fall back by itself from the macOS system font
+    (the app default there): Tamil text drawn with it comes out as empty boxes.
+    So the Latin part gets a named family and the Tamil part an installed Tamil one."""
+    global _tamil_family
+    if _tamil_family is None:
+        installed = set(QFontDatabase.families())
+        tamil = QFontDatabase.families(QFontDatabase.WritingSystem.Tamil)
+        _tamil_family = next((f for f in _TAMIL_FAMILIES if f in installed), tamil[0] if tamil else "")
+    if not _tamil_family:
+        return base
+    font = QFont(base)
+    latin = "Helvetica Neue" if sys.platform == "darwin" else base.family()
+    font.setFamilies([f for f in (latin, _tamil_family) if f])
+    return font
 
 
 class ThinkingIndicator(QWidget):
@@ -148,6 +171,12 @@ class TypewriterLabel(QLabel):
     def full_text(self) -> str:
         return self._shown + self._pending
 
+    def set_text(self, text: str) -> None:
+        """Replace everything at once (no typing) - switching an answer's language."""
+        self._timer.stop()
+        self._shown, self._pending = text, ""
+        self._render()
+
     def _step(self):
         if not self._pending:
             self._timer.stop()
@@ -163,7 +192,14 @@ class TypewriterLabel(QLabel):
 
 class MessageBubble(QFrame):
     """One chat message. Assistant bubbles can also carry a collapsible
-    'data' section (a preview of the result rows; never the SQL)."""
+    'data' section (a preview of the result rows; never the SQL), and once the
+    answer is complete a small options button: save the chat as a PDF, or show
+    this answer in Tamil / back in English."""
+
+    save_requested = Signal()
+    # The screen fetches the Tamil text (a server call) and answers with
+    # set_translation() or translation_failed().
+    translate_requested = Signal()
 
     def __init__(self, theme, role: str, text: str = "", parent=None):
         super().__init__(parent)
@@ -185,6 +221,12 @@ class MessageBubble(QFrame):
         layout.setContentsMargins(14, 10, 14, 10)
         layout.setSpacing(8)
 
+        self.is_error = False
+        self.details_data: dict | None = None   # the rows behind the answer, for the PDF export
+        self._language = "en"
+        self._original = ""                      # the English answer, kept while Tamil is shown
+        self._translated: str | None = None
+        self._translating = False
         self.indicator: ThinkingIndicator | None = None
         self.body = TypewriterLabel()
         self.body.setFont(font_scale.font(font_scale.SMALL, False))
@@ -202,6 +244,26 @@ class MessageBubble(QFrame):
 
         self._details: QWidget | None = None
         self._details_btn: QPushButton | None = None
+
+        self._note = QLabel("")
+        self._note.setFont(font_scale.font(font_scale.SMALL, False))
+        self._note.setWordWrap(True)
+        self._note.hide()
+        layout.addWidget(self._note)
+        self.options_btn: QPushButton | None = None
+        if not is_user:
+            self.options_btn = QPushButton("⋯")
+            self.options_btn.setToolTip("Options: save the chat as a PDF, or translate this answer")
+            self.options_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.options_btn.setFixedSize(30, 20)
+            self.options_btn.setStyleSheet(
+                f"QPushButton {{ color: {theme.get('text_secondary')}; background: transparent; "
+                f"border: 1px solid {theme.get('border')}; border-radius: 6px; padding: 0; font-weight: bold; }}"
+                f"QPushButton:hover {{ color: {theme.get('accent')}; border-color: {theme.get('accent')}; }}"
+            )
+            self.options_btn.clicked.connect(self._show_options)
+            self.options_btn.setVisible(bool(text))   # a streamed answer gets it when it is complete
+            layout.addWidget(self.options_btn, 0, Qt.AlignmentFlag.AlignRight)
 
     # ── thinking state ───────────────────────────────────────────────────
     def start_thinking(self) -> None:
@@ -227,8 +289,11 @@ class MessageBubble(QFrame):
     def finish(self) -> None:
         self.stop_thinking()
         self.body.finish()
+        if self.options_btn is not None and not self.is_error and self.body.full_text().strip():
+            self.options_btn.show()
 
     def set_error(self, message: str) -> None:
+        self.is_error = True
         self.stop_thinking()
         self.body.setStyleSheet(f"color: {self._theme.get('destructive')};")
         self.body.push(message)
@@ -237,6 +302,10 @@ class MessageBubble(QFrame):
     # ── query & data details ─────────────────────────────────────────────
     def set_details(self, columns: list, rows: list, row_count: int, truncated: bool) -> None:
         t = self._theme
+        self.details_data = {"columns": list(columns), "rows": list(rows), "row_count": row_count,
+                             "truncated": truncated}
+        # Above the note and the options button, which close the bubble.
+        at = self.layout().indexOf(self._note)
         self._details_btn = QPushButton("Show data")
         self._details_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._details_btn.setFlat(True)
@@ -246,7 +315,7 @@ class MessageBubble(QFrame):
         )
         self._details_btn.setFont(font_scale.font(font_scale.SMALL, False))
         self._details_btn.clicked.connect(self._toggle_details)
-        self.layout().addWidget(self._details_btn)
+        self.layout().insertWidget(at, self._details_btn)
 
         box = QWidget()
         v = QVBoxLayout(box)
@@ -276,7 +345,7 @@ class MessageBubble(QFrame):
 
         box.setVisible(False)
         self._details = box
-        self.layout().addWidget(box)
+        self.layout().insertWidget(at + 1, box)
 
     def _toggle_details(self) -> None:
         if self._details is None or self._details_btn is None:
@@ -287,6 +356,70 @@ class MessageBubble(QFrame):
 
     def details_visible(self) -> bool:
         return self._details is not None and not self._details.isHidden()
+
+    # ── options: save / translate ────────────────────────────────────────
+    def build_options_menu(self) -> QMenu:
+        menu = QMenu(self)
+        menu.addAction("Save chat as PDF", self.save_requested.emit)
+        if self._translating:
+            menu.addAction("Translating to Tamil…").setEnabled(False)
+        elif self._language == "ta":
+            menu.addAction("Show in English", self.toggle_language)
+        else:
+            menu.addAction("Translate to Tamil", self.toggle_language)
+        return menu
+
+    def _show_options(self) -> None:
+        menu = self.build_options_menu()
+        menu.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        menu.popup(self.options_btn.mapToGlobal(QPoint(0, self.options_btn.height() + 2)))
+
+    def language(self) -> str:
+        return self._language
+
+    def is_translating(self) -> bool:
+        return self._translating
+
+    def original_text(self) -> str:
+        """The answer as it was given (English), whatever is on screen."""
+        return self._original if self._language == "ta" else self.body.full_text()
+
+    def toggle_language(self) -> None:
+        if self._translating:
+            return
+        self._set_note("")
+        if self._language == "ta":
+            self._language = "en"
+            self.body.setFont(font_scale.font(font_scale.SMALL, False))
+            self.body.set_text(self._original)
+        elif self._translated is not None:
+            self._show_translation()
+        else:
+            self._translating = True
+            self._set_note("Translating to Tamil…")
+            self.translate_requested.emit()
+
+    def set_translation(self, text: str) -> None:
+        self._translating = False
+        self._set_note("")
+        self._translated = text
+        self._show_translation()
+
+    def translation_failed(self, message: str) -> None:
+        self._translating = False
+        self._set_note(f"Could not translate: {message}", error=True)
+
+    def _show_translation(self) -> None:
+        self._original = self.body.full_text()
+        self._language = "ta"
+        self.body.setFont(tamil_font(font_scale.font(font_scale.SMALL, False)))
+        self.body.set_text(self._translated or "")
+
+    def _set_note(self, text: str, error: bool = False) -> None:
+        color = self._theme.get("destructive" if error else "text_secondary")
+        self._note.setStyleSheet(f"color: {color};")
+        self._note.setText(text)
+        self._note.setVisible(bool(text))
 
     # ── entrance animation ───────────────────────────────────────────────
     def fade_in(self) -> None:

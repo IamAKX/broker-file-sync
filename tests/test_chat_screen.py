@@ -163,3 +163,140 @@ def test_thinking_indicator_tracks_stage(qapp):
     ind.set_stage("nonsense")                       # unknown stages are ignored
     assert ind.stage_index() == 2
     ind.grab()                                       # paints without raising
+
+
+# ── answer options: save as PDF / translate to Tamil ─────────────────────
+
+_ROWS = ("rows", {"columns": ["symbol", "close"], "rows": [["TCS", 3500.5]], "row_count": 1, "truncated": False})
+
+
+def _answered(qapp, screen, monkeypatch, events):
+    from components.chat_widgets import MessageBubble
+    monkeypatch.setattr(chat_api, "ask", _fake_ask(events))
+    screen.ask("How did TCS close?")
+    _drain(qapp, screen)
+    return [b for b in screen.findChildren(MessageBubble) if b.role == "assistant"][-1]
+
+
+def _wait(qapp, condition, timeout_s=3.0):
+    import time
+    end = time.time() + timeout_s
+    while not condition() and time.time() < end:
+        qapp.processEvents()
+        time.sleep(0.01)
+    assert condition()
+
+
+def test_options_button_appears_only_on_a_finished_answer(qapp, screen, monkeypatch):
+    from components.chat_widgets import MessageBubble
+    bubble = _answered(qapp, screen, monkeypatch, [_ROWS, ("token", {"text": "TCS closed at 3,500.5."}), ("done", {})])
+    assert not bubble.options_btn.isHidden()
+    assert [a.text() for a in bubble.build_options_menu().actions()] == ["Save chat as PDF", "Translate to Tamil"]
+    # the options button stays the last thing in the bubble, below the data table
+    assert bubble.layout().indexOf(bubble.options_btn) > bubble.layout().indexOf(bubble._details)
+    user = [b for b in screen.findChildren(MessageBubble) if b.role == "user"][0]
+    assert user.options_btn is None
+
+    def boom(question, history, live=None):
+        raise ApiError("nope", "x", 500)
+        yield  # pragma: no cover
+    monkeypatch.setattr(chat_api, "ask", boom)
+    screen.ask("again")
+    _drain(qapp, screen)
+    failed = [b for b in screen.findChildren(MessageBubble) if b.role == "assistant"][-1]
+    assert failed.is_error and failed.options_btn.isHidden()
+
+
+def test_translate_to_tamil_and_back_without_a_second_server_call(qapp, screen, monkeypatch):
+    bubble = _answered(qapp, screen, monkeypatch, [("token", {"text": "TCS closed at 3,500.5."}), ("done", {})])
+    calls = []
+
+    def translate(text, target="ta"):
+        calls.append((text, target))
+        return "TCS 3,500.5 இல் முடிந்தது."
+    monkeypatch.setattr(chat_api, "translate", translate)
+
+    bubble.toggle_language()
+    assert bubble.is_translating()
+    assert [a.text() for a in bubble.build_options_menu().actions()][1] == "Translating to Tamil…"
+    _wait(qapp, lambda: bubble.language() == "ta")
+    assert bubble.body.full_text() == "TCS 3,500.5 இல் முடிந்தது."
+    assert bubble.original_text() == "TCS closed at 3,500.5."
+    assert [a.text() for a in bubble.build_options_menu().actions()][1] == "Show in English"
+
+    # Tamil is drawn with a Tamil-capable font behind the Latin one (the macOS
+    # system font alone renders it as empty boxes); English goes back to the app font.
+    from PySide6.QtGui import QFontDatabase
+    if QFontDatabase.families(QFontDatabase.WritingSystem.Tamil):
+        assert set(bubble.body.font().families()) & set(QFontDatabase.families(QFontDatabase.WritingSystem.Tamil))
+
+    bubble.toggle_language()
+    assert bubble.language() == "en" and bubble.body.full_text() == "TCS closed at 3,500.5."
+    import font_scale
+    assert bubble.body.font().families() == font_scale.font(font_scale.SMALL, False).families()
+    bubble.toggle_language()                         # Tamil again: served from the bubble's own copy
+    assert bubble.language() == "ta" and calls == [("TCS closed at 3,500.5.", "ta")]
+    # follow-up questions still carry the original English answer
+    assert screen._history[-1] == {"role": "assistant", "text": "TCS closed at 3,500.5."}
+
+
+def test_translate_failure_keeps_english_and_says_why(qapp, screen, monkeypatch):
+    bubble = _answered(qapp, screen, monkeypatch, [("answer", {"text": "Hello."}), ("done", {})])
+
+    def translate(text, target="ta"):
+        raise ApiError("Not Found", "not_found", 404)
+    monkeypatch.setattr(chat_api, "translate", translate)
+    bubble.toggle_language()
+    _wait(qapp, lambda: not bubble.is_translating())
+    assert bubble.language() == "en" and bubble.body.full_text() == "Hello."
+    assert "newer server version" in bubble._note.text() and not bubble._note.isHidden()
+
+
+def test_export_turns_carry_shown_language_and_data_rows(qapp, screen, monkeypatch):
+    bubble = _answered(qapp, screen, monkeypatch, [_ROWS, ("token", {"text": "TCS closed at 3,500.5."}), ("done", {})])
+    bubble.set_translation("TCS 3,500.5 இல் முடிந்தது.")
+    turns = screen.export_turns()
+    assert [t["role"] for t in turns] == ["user", "assistant"]
+    assert turns[1]["text"] == "TCS 3,500.5 இல் முடிந்தது."
+    assert turns[1]["details"]["rows"] == [["TCS", 3500.5]]      # saved even though "Show data" is collapsed
+    assert not bubble.details_visible()
+
+    from datetime import datetime
+    from services import chat_export
+    html = chat_export.build_html(turns, datetime(2026, 11, 13, 12, 30))
+    assert "How did TCS close?" in html and "இல் முடிந்தது" in html
+    assert "<th>symbol</th><th>close</th>" in html and '<td class="num">3500.5</td>' in html
+    assert "Saved 13 Nov 2026, 12:30" in html
+    assert chat_export.default_filename(datetime(2026, 11, 13, 12, 30)) == "Ask_Fuku_chat_2026-11-13_1230.pdf"
+
+
+def test_export_html_escapes_questions_and_renders_answer_markdown(qapp):
+    from services import chat_export
+    html = chat_export.build_html([
+        {"role": "user", "text": "is 5 < 6 & <b>bold</b>?"},
+        {"role": "assistant", "text": "**RELIANCE** rose.\n\n- one\n- two", "details": None},
+    ])
+    assert "is 5 &lt; 6 &amp; &lt;b&gt;bold&lt;/b&gt;?" in html
+    assert "font-weight:700" in html and "<li" in html and "**RELIANCE**" not in html
+
+
+def test_save_chat_pdf_writes_the_chosen_file(qapp, screen, monkeypatch, tmp_path):
+    from screens import chat as chat_screen
+    _answered(qapp, screen, monkeypatch, [_ROWS, ("token", {"text": "TCS closed at 3,500.5."}), ("done", {})])
+    target = tmp_path / "my chat"
+    monkeypatch.setattr(chat_screen.QFileDialog, "getSaveFileName", lambda *a, **k: (str(target), ""))
+    seen = {}
+    monkeypatch.setattr(screen, "_export_pdf", lambda turns, path: seen.update(turns=turns, path=path))
+    screen.save_chat_pdf()
+    assert seen["path"] == str(target) + ".pdf" and len(seen["turns"]) == 2
+
+    monkeypatch.setattr(chat_screen.QFileDialog, "getSaveFileName", lambda *a, **k: ("", ""))
+    seen.clear()
+    screen.save_chat_pdf()                           # cancelled dialog: nothing is written
+    assert seen == {}
+
+
+def test_theme_refresh_keeps_data_rows_for_export(qapp, screen, monkeypatch):
+    _answered(qapp, screen, monkeypatch, [_ROWS, ("token", {"text": "kept"}), ("done", {})])
+    screen.refresh_theme()
+    assert screen.export_turns()[1]["details"]["rows"] == [["TCS", 3500.5]]

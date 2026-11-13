@@ -16,6 +16,11 @@ running Live Master View: every question carries the LMV grid, or the reason
 it isn't available (services/lmv_chat_context.py), and the line under the
 input shows which of the two it is.
 
+Every finished answer has a small options button (⋯): "Save chat as PDF"
+exports the whole transcript, data tables included (services/chat_export.py),
+and "Translate to Tamil" / "Show in English" switches that one answer's
+language (the server translates; names, symbols and numbers stay as they are).
+
 Scope is enforced server-side (prompt + SQL validator) —
 see docs/chatbot.md. Nothing is stored locally: the conversation lives in
 memory for the session and the last few turns are sent along so follow-up
@@ -25,16 +30,18 @@ questions work.
 import threading
 
 import font_scale
+import shiboken6
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (
-    QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton, QScrollArea,
+    QVBoxLayout, QWidget,
 )
 
 from api import chat_api
 from api.exceptions import ApiError, NetworkError
 from components.chat_widgets import MessageBubble, ToggleSwitch, VoiceStatusBar
 from components.page_header import page_header
-from services import lmv_chat_context, voice_io
+from services import chat_export, lmv_chat_context, voice_io
 
 _HISTORY_TURNS_SENT = 6
 
@@ -271,6 +278,14 @@ class ChatScreen(QWidget):
             if self._history and self._history[-1]["role"] == "user":
                 self._history.pop()
         history, suggestions = list(self._history), list(self._suggestions)
+        # The data rows behind each recorded answer, so a theme switch doesn't drop
+        # the "Show data" tables (and with them the tables in a saved PDF).
+        details = [
+            b.details_data for b in self._bubbles()
+            if b.role == "assistant" and not b.is_error and b is not self._current and b.body.full_text().strip()
+        ]
+        if len(details) != sum(1 for turn in history if turn["role"] == "assistant"):
+            details = []
         voice_text = self._voice_bar.text()
         old_layout = self.layout()
         if old_layout is not None:
@@ -281,7 +296,12 @@ class ChatScreen(QWidget):
         if suggestions:
             self._fill_chips(suggestions)
         for turn in history:
-            self._append_bubble(MessageBubble(self._controller.theme, turn["role"], turn["text"]), animate=False)
+            bubble = MessageBubble(self._controller.theme, turn["role"], turn["text"])
+            if turn["role"] == "assistant" and details:
+                kept = details.pop(0)
+                if kept:
+                    bubble.set_details(kept["columns"], kept["rows"], kept["row_count"], kept["truncated"])
+            self._append_bubble(bubble, animate=False)
         if history:
             self._welcome.hide()
         if self._voice.is_on():   # the rebuilt switch and status strip pick the session back up
@@ -385,6 +405,14 @@ class ChatScreen(QWidget):
         if event == "_status":
             self._apply_status(data)
             return
+        if event == "_translated":
+            target, text, error = data
+            if shiboken6.isValid(target):   # the bubble may be gone (theme rebuild)
+                if error:
+                    target.translation_failed(error)
+                else:
+                    target.set_translation(text)
+            return
         bubble = self._current
         if bubble is None:
             return
@@ -441,10 +469,89 @@ class ChatScreen(QWidget):
             self._voice.stop()
             self._voice_switch.setEnabled(False)
 
+    # ── answer options: save as PDF / translate ──────────────────────────
+
+    def _bubbles(self) -> list[MessageBubble]:
+        """The transcript in order, top to bottom."""
+        out = []
+        for i in range(self._messages_layout.count()):
+            row = self._messages_layout.itemAt(i).widget()
+            bubble = row.findChild(MessageBubble) if row is not None and row is not self._welcome else None
+            if bubble is not None:
+                out.append(bubble)
+        return out
+
+    def export_turns(self) -> list[dict]:
+        """What "Save chat as PDF" writes: every message as it is shown (an answer
+        switched to Tamil is saved in Tamil) with the data rows behind it. An
+        answer still being written is left out."""
+        turns = []
+        for bubble in self._bubbles():
+            text = bubble.body.full_text().strip()
+            if bubble is self._current or not text:
+                continue
+            turns.append({
+                "role": bubble.role, "text": text, "error": bubble.is_error,
+                "details": bubble.details_data,
+            })
+        return turns
+
+    def save_chat_pdf(self):
+        turns = self.export_turns()
+        if not turns:
+            return
+        path, _unused = QFileDialog.getSaveFileName(
+            self, "Save chat as PDF", chat_export.default_filename(), "PDF Files (*.pdf)",
+        )
+        if not path:
+            return
+        if not path.lower().endswith(".pdf"):
+            path += ".pdf"
+        self._export_pdf(turns, path)
+
+    def _export_pdf(self, turns: list[dict], path: str):
+        from services.report_engine import pdf_export   # QtWebEngine: only loaded when a PDF is made
+
+        def on_done(success: bool, error: str | None):
+            if not shiboken6.isValid(self):
+                return
+            if success:
+                QMessageBox.information(self, "Chat saved", f"Saved to:\n{path}")
+            else:
+                QMessageBox.warning(self, "Save failed", error or "Unknown error generating the PDF.")
+
+        pdf_export.render_to_pdf(
+            chat_export.build_html(turns), path, on_done, margins_mm=chat_export.PAGE_MARGINS_MM,
+        )
+
+    def _translate_bubble(self, bubble: MessageBubble):
+        text = bubble.original_text()
+        threading.Thread(
+            target=self._translate_worker, args=(self._token, bubble, text), name="chat-translate", daemon=True,
+        ).start()
+
+    def _translate_worker(self, token: int, bubble: MessageBubble, text: str):
+        translated, error = "", ""
+        try:
+            translated = chat_api.translate(text, "ta")
+            if not translated.strip():
+                error = "The server sent back an empty translation."
+        except ApiError as exc:
+            error = ("Translation needs a newer server version." if exc.status_code in (404, 405)
+                     else exc.detail)
+        except NetworkError as exc:
+            error = f"Could not reach the server. {exc}"
+        except Exception as exc:
+            error = str(exc)
+        self._event.emit(token, "_translated", (bubble, translated, error))
+
     # ── helpers ──────────────────────────────────────────────────────────
 
     def _append_bubble(self, bubble: MessageBubble, animate: bool = True):
         is_user = bubble.role == "user"
+        if not is_user:
+            bubble.save_requested.connect(self.save_chat_pdf)
+            bubble.translate_requested.connect(lambda b=bubble: self._translate_bubble(b))
         row = QWidget()
         h = QHBoxLayout(row)
         h.setContentsMargins(0, 0, 0, 0)

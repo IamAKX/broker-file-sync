@@ -54,3 +54,4 @@ INCEPTION_ADMIN_SYNC_LMV_METRICS = "/inception/admin/sync-lmv-metrics"
 
 CHAT_STATUS = "/chat/status"
 CHAT_ASK = "/chat/ask"
+CHAT_TRANSLATE = "/chat/translate"
