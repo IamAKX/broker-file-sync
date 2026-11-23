@@ -1,4 +1,6 @@
 """services.master_generator — broker-source name matching."""
+
+
 def test_script_name_lookup_ignores_trailing_dot_and_spacing():
     """Issue #118: ReliableSoftware's "City Union Bank Ltd..rolling.20D"
     strips to "City Union Bank Ltd." while the Script Name tab says
