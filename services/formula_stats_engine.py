@@ -115,6 +115,23 @@ def _needed_date_specs(compiled_by_name: dict) -> list:
     return out
 
 
+def _as_number(value):
+    """A snapshot metric as a number — LMV daily snapshots carry many metrics
+    as numeric strings ("1163.85"); evaluate() converts those itself, so the
+    look-back history must too (issue #128: every VAH string was dropped and
+    AVG_DAYS([VAH], 20) inside VALUE_DAYS_AGO came back blank)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        try:
+            return float(value.replace(",", ""))
+        except ValueError:
+            return None
+    return None
+
+
 def _self_contained_day_history(hist: list, int_specs: list, date_specs: list, symbol: str) -> dict:
     """Builds the {(col_name, window): {symbol: {agg_key: value}}} shape
     evaluate_compiled expects for VALUE_DAYS_AGO/VALUE_ON_DATE/_DAYS-family
@@ -135,14 +152,17 @@ def _self_contained_day_history(hist: list, int_specs: list, date_specs: list, s
     for agg_key, col_name, window in int_specs:
         if window <= 0 or len(hist) < window:
             continue
-        window_vals = [row.get(col_name) for _, row in hist[-window:]]
+        window_vals = [_as_number(row.get(col_name)) for _, row in hist[-window:]]
         if agg_key == "First":
-            value = window_vals[0] if isinstance(window_vals[0], (int, float)) else None
+            value = window_vals[0]
         else:
-            numeric = [v for v in window_vals if isinstance(v, (int, float))]
+            numeric = [v for v in window_vals if v is not None]
             agg_fn = AGGREGATES.get(agg_key)
             value = agg_fn(numeric) if agg_fn and numeric else None
-        out[(col_name, window)] = {symbol: {agg_key: value}}
+        # Merged, not replaced: AVG_DAYS([VAH], 20) + STDDEV_DAYS([VAH], 20)
+        # share this (col, window) key — the second used to wipe the first
+        # (issue #128).
+        out.setdefault((col_name, window), {}).setdefault(symbol, {})[agg_key] = value
     for agg_key, col_name, date_window in date_specs:
         date_from, date_to = date_window[0], date_window[-1]
         if agg_key == "First":
@@ -150,15 +170,14 @@ def _self_contained_day_history(hist: list, int_specs: list, date_specs: list, s
             value = None
             for trade_date, row in hist:
                 if trade_date == date_from:
-                    v = row.get(col_name)
-                    value = v if isinstance(v, (int, float)) else None
+                    value = _as_number(row.get(col_name))
                     break
         else:
             # AVG_DATES/MAX_DATES/... (issue #114): aggregate every day of
             # the range seen so far.
-            numeric = [row.get(col_name) for trade_date, row in hist
+            numeric = [n for trade_date, row in hist
                        if date_from <= trade_date <= date_to
-                       and isinstance(row.get(col_name), (int, float))]
+                       and (n := _as_number(row.get(col_name))) is not None]
             agg_fn = AGGREGATES.get(agg_key)
             value = agg_fn(numeric) if agg_fn and numeric else None
         out.setdefault((col_name, date_window), {}).setdefault(symbol, {})[agg_key] = value
@@ -358,17 +377,72 @@ def _slice_window(full_response: dict, window) -> dict:
     return {**full_response, "days": days}
 
 
-def _fetch_windows_single_pass(range_fetcher, windows) -> dict:
+def _fetch_windows_single_pass(range_fetcher, windows, extra_by_window: dict | None = None) -> dict:
     """Resolve every distinct *window* with ONE range_fetcher call, sized to
     the largest window, then sliced per window (see _slice_window). See
     compute_day_history's docstring for why a fetch-per-window is a
-    live-update-freezing liability on the LMV worker thread."""
+    live-update-freezing liability on the LMV worker thread.
+
+    *extra_by_window*: {window: N} — that window's slice also gets the N
+    trading days BEFORE it (for an inner look-back, see
+    compute_day_history); its "_window_dates" key then lists the dates of
+    the window proper."""
     windows = list(windows)
     if not windows:
         return {}
-    max_days = max(_window_day_count(w) for w in windows)
+    extra_by_window = extra_by_window or {}
+    max_days = max(_window_day_count(w) + extra_by_window.get(w, 0) for w in windows)
     full_response = range_fetcher(max_days) if max_days > 0 else {"days": []}
-    return {w: _slice_window(full_response, w) for w in windows}
+    out = {}
+    for w in windows:
+        sliced = _slice_window(full_response, w)
+        extra = extra_by_window.get(w, 0)
+        if extra:
+            all_days = full_response.get("days", [])
+            window_dates = [d.get("trade_date") for d in sliced.get("days", [])]
+            first = window_dates[0] if window_dates else None
+            before = [d for d in all_days if first is None or d.get("trade_date", "") < first]
+            sliced = {**sliced, "days": before[-extra:] + sliced.get("days", []), "_window_dates": window_dates}
+        out[w] = sliced
+    return out
+
+
+def _inner_lookback_days(formula: list) -> int:
+    """How many trading days of history *formula*'s own look-back functions
+    need before the day it is evaluated on (largest int window; a date
+    range needs back to its start). 0 when it has none."""
+    from services.strategy_engine import get_compiled
+    compiled = get_compiled(formula)
+    if compiled is None:
+        return 0
+    needed = 0
+    for _var, _agg, _col, window in compiled.day_specs:
+        if isinstance(window, int):
+            needed = max(needed, window)
+        elif isinstance(window, tuple) and window and isinstance(window[0], str):
+            try:
+                needed = max(needed, _window_day_count(window))
+            except ValueError:
+                pass
+    for _var, _col, _driver, window, _want_max in compiled.extreme_specs:
+        needed = max(needed, window if isinstance(window, int) else _window_day_count(window))
+    return needed
+
+
+def _trim_to_window(computed: dict, window_dates) -> dict:
+    """compute_stats output restricted to *window_dates* — the extra
+    earlier days only fed the inner look-backs; aggregates and "First" are
+    rebuilt over the window proper."""
+    keep = set(window_dates or [])
+    for entry in computed.values():
+        for col_data in entry["columns"].values():
+            col_data["daily"] = [(d, v) for d, v in col_data["daily"] if d in keep]
+            numeric = [v for _, v in col_data["daily"] if isinstance(v, (int, float))]
+            for agg_name, agg_fn in AGGREGATES.items():
+                col_data[agg_name] = agg_fn(numeric) if numeric else None
+            numeric_daily = [(d, v) for d, v in col_data["daily"] if isinstance(v, (int, float))]
+            col_data["First"] = numeric_daily[0][1] if numeric_daily else None
+    return computed
 
 
 def compute_day_history(requests: list, range_fetcher) -> dict:
@@ -399,13 +473,25 @@ def compute_day_history(requests: list, range_fetcher) -> dict:
     for col_name, window, formula in requests:
         by_window.setdefault(window, []).append((col_name, formula))
 
-    range_by_window = _fetch_windows_single_pass(range_fetcher, by_window.keys())
+    # A requested formula can carry its OWN look-back — VALUE_DAYS_AGO(
+    # [UPPER SD 1], 1) where UPPER SD 1 = AVG_DAYS([VAH], 20) + STDDEV_DAYS(
+    # [VAH], 20). Evaluated over just the 2-day window, the inner 20-day
+    # aggregates had no history and the whole value came back blank (issue
+    # #128). Such a window is evaluated over that many extra earlier days
+    # and its results then trimmed back to the window itself.
+    extra_by_window = {
+        window: max((_inner_lookback_days(formula) for _, formula in entries), default=0)
+        for window, entries in by_window.items()
+    }
+    range_by_window = _fetch_windows_single_pass(range_fetcher, by_window.keys(), extra_by_window)
 
     out: dict = {}
     for window, entries in by_window.items():
         range_response = range_by_window[window]
         columns = [{"name": col_name, "formula": formula} for col_name, formula in entries]
         computed = compute_stats(columns, range_response)
+        if extra_by_window.get(window):
+            computed = _trim_to_window(computed, range_response.get("_window_dates"))
         for col_name, _formula in entries:
             out[(col_name, window)] = {
                 symbol: entry["columns"].get(col_name, {})
