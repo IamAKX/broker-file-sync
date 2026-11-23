@@ -25,10 +25,12 @@ def test_has_tab_widget(screen):
     assert len(tabs) == 1
 
 
-def test_has_five_tabs(screen):
+def test_has_six_tabs(screen):
     from PySide6.QtWidgets import QTabWidget
     tab = screen.findChildren(QTabWidget)[0]
-    assert tab.count() == 5
+    assert tab.count() == 6
+    # Issue #112: old -> new stock symbol mapping.
+    assert "Symbol Rename" in [tab.tabText(i) for i in range(tab.count())]
 
 
 def test_has_add_row_button(screen):

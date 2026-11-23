@@ -456,6 +456,16 @@ class ConfigEditorScreen(QWidget):
                             store_key="main_column_name"),
             "Main Column Name"
         )
+        # Old exchange symbol -> new one (e.g. ICICIPRULI -> ICICILIFE): the
+        # old symbol's saved LMV history and Inception bars are joined onto
+        # the new symbol (services/symbol_renames.py, issue #112).
+        from config_defaults import SYMBOL_RENAME_DATA
+        from services.symbol_renames import STORE_KEY as SYMBOL_RENAME_KEY
+        tabs.addTab(
+            ConfigTabWidget(["Old Symbol", "New Symbol"], SYMBOL_RENAME_DATA, t,
+                            store_key=SYMBOL_RENAME_KEY),
+            "Symbol Rename"
+        )
         tabs.addTab(
             ConfigTabWidget(["Column Name"], MAIN_COLUMN_ORDER_DATA, t,
                             reorderable=True, store_key="main_column_order",

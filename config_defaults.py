@@ -521,3 +521,12 @@ SCHEDULER_TRIGGER_DEFAULTS = [
      "18:30"),
 ]
 
+
+
+# Stock symbol renames (Config Editor > "Symbol Rename" tab): (Old Symbol,
+# New Symbol). History saved under the old symbol (LMV daily snapshots,
+# Inception EOD bars) is joined onto the new one — see
+# services/symbol_renames.py (issue #112).
+SYMBOL_RENAME_DATA = [
+    ("ICICIPRULI", "ICICILIFE"),
+]

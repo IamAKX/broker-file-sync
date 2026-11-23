@@ -208,11 +208,14 @@ def clear_cache() -> None:
 # ── Loading ────────────────────────────────────────────────────────────────
 
 def _fingerprint() -> str:
-    from services import inception_bars_store, inception_settings
+    from services import inception_bars_store, inception_settings, symbol_renames
     settings = inception_settings.load()
     last = inception_bars_store.last_synced_date()
     return "|".join(str(x) for x in (
         inception_bars_store.row_count(),
+        # A renamed stock's history is joined differently once the rename
+        # list changes (issue #112).
+        sorted(symbol_renames.rename_map().items()),
         last.isoformat() if last else "none",
         settings["gap_threshold_pct"],
         settings["week_window_days"],

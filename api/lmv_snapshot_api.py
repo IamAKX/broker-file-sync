@@ -57,7 +57,12 @@ def get_range(days: int, timeout: int | None = None) -> dict:
     one once it's had a warm response so a mid-session backend slowdown
     doesn't stall the live worker thread for a full minute (issue #40).
     """
-    return api_client.get(
+    response = api_client.get(
         LMV_SNAPSHOT_RANGE, params={"days": days},
         timeout=timeout if timeout is not None else _RANGE_TIMEOUT_SECONDS,
     )
+    # A renamed stock's days before the rename are saved under its OLD
+    # symbol — report them under the new one so N-day / day-history
+    # formulas see the full history (issue #112).
+    from services import symbol_renames
+    return symbol_renames.apply_to_range_response(response)

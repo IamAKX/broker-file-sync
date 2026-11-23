@@ -161,10 +161,25 @@ def row_count() -> int:
         return conn.execute("SELECT COUNT(*) FROM eod_bars").fetchone()[0]
 
 
+def _hidden_renamed(symbols) -> dict:
+    """{old_symbol: new_symbol} for every renamed stock (services.
+    symbol_renames) whose NEW symbol is also present in *symbols* — the old
+    one's bars are folded into the new one's history, so it isn't listed as
+    a separate instrument (issue #112)."""
+    from services import symbol_renames
+    present = set(symbols)
+    return {
+        old: new for old, new in symbol_renames.inception_rename_map().items()
+        if old in present and new in present
+    }
+
+
 def available_symbols() -> list[str]:
     with _connect() as conn:
         rows = conn.execute("SELECT DISTINCT symbol FROM eod_bars ORDER BY symbol").fetchall()
-    return [r[0] for r in rows]
+    symbols = [r[0] for r in rows]
+    hidden = _hidden_renamed(symbols)
+    return [s for s in symbols if s not in hidden]
 
 
 def bar_summaries(date_to: date | None = None) -> dict[str, tuple]:
@@ -180,13 +195,50 @@ def bar_summaries(date_to: date | None = None) -> dict[str, tuple]:
     sql += " GROUP BY symbol"
     with _connect() as conn:
         rows = conn.execute(sql, params).fetchall()
-    return {r[0]: (r[1], date.fromisoformat(r[2]), date.fromisoformat(r[3])) for r in rows}
+    out = {r[0]: (r[1], date.fromisoformat(r[2]), date.fromisoformat(r[3])) for r in rows}
+    for old, new in _hidden_renamed(out).items():
+        o_count, o_first, o_last = out.pop(old)
+        n_count, n_first, n_last = out[new]
+        # Only the old bars dated before the new symbol's first bar are
+        # used (see bars_for_symbol) — an approximation of that count is
+        # all a cache fingerprint needs.
+        out[new] = (n_count + o_count, min(o_first, n_first), max(o_last, n_last))
+    return out
 
 
 def bars_for_symbol(symbol: str, date_from: date | None = None, date_to: date | None = None) -> list[dict]:
     """Ascending-by-trade_date bars for one symbol — the shape
     services.inception_formula_engine.compute_group_a/compute_group_b
-    expect (trade_date as a date object, not a string)."""
+    expect (trade_date as a date object, not a string).
+
+    For a renamed stock (services.symbol_renames) the OLD symbol's bars
+    dated before the new symbol's first bar are prepended, so the new name
+    carries its whole history (issue #112)."""
+    from services import symbol_renames
+    own = _bars_for_raw_symbol(symbol, date_from, date_to)
+    older = [
+        _bars_for_raw_symbol(old, date_from, date_to)
+        for old in symbol_renames.inception_old_symbols_for(symbol)
+    ]
+    older = [b for b in older if b]
+    if not older:
+        return own
+    if date_from is not None:
+        # *own* may start later than the new symbol's real first bar (the
+        # window cut it) — the old bars only count when they predate that.
+        first_new = _first_bar_date(symbol)
+        if first_new is not None:
+            older = [[b for b in bars if b["trade_date"] < first_new] for bars in older]
+    return symbol_renames.merge_bar_histories(own, older)
+
+
+def _first_bar_date(symbol: str) -> date | None:
+    with _connect() as conn:
+        row = conn.execute("SELECT MIN(trade_date) FROM eod_bars WHERE symbol = ?", (symbol,)).fetchone()
+    return date.fromisoformat(row[0]) if row and row[0] else None
+
+
+def _bars_for_raw_symbol(symbol: str, date_from: date | None = None, date_to: date | None = None) -> list[dict]:
     metric_cols_sql = ", " + ", ".join(LMV_METRIC_COLUMNS)
     sql = (
         f"SELECT trade_date, open, high, low, close, volume, open_interest{metric_cols_sql} "
@@ -215,15 +267,29 @@ def bars_for_date(trade_date: date) -> list[dict]:
             "FROM eod_bars WHERE trade_date = ?",
             (trade_date.isoformat(),),
         ).fetchall()
-    return [
-        {
-            "symbol": r[0], "trade_date": date.fromisoformat(r[1]),
-            "open": r[2], "high": r[3], "low": r[4], "close": r[5],
-            "volume": r[6], "open_interest": r[7],
-            **dict(zip(LMV_METRIC_COLUMNS, r[8:])),
-        }
-        for r in rows
-    ]
+    from services import symbol_renames
+    renames = symbol_renames.inception_rename_map()
+    present = {r[0] for r in rows}
+    out = []
+    for r in rows:
+        sym = r[0]
+        new = renames.get(sym)
+        if new is not None:
+            if new in present:
+                continue
+            sym = new
+            present.add(new)
+        out.append(_date_row_to_bar(sym, r))
+    return out
+
+
+def _date_row_to_bar(symbol: str, r) -> dict:
+    return {
+        "symbol": symbol, "trade_date": date.fromisoformat(r[1]),
+        "open": r[2], "high": r[3], "low": r[4], "close": r[5],
+        "volume": r[6], "open_interest": r[7],
+        **dict(zip(LMV_METRIC_COLUMNS, r[8:])),
+    }
 
 
 def _row_to_bar(r) -> dict:
