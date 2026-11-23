@@ -23,6 +23,10 @@ Supported:
              MEDIAN_DAYS  VARIANCE_DAYS  RANGE_DAYS  (per stock, over the last
              N historic trading days — see "Historic (N days) aggregates"
              below)
+  Dates    : SUM_DATES  MIN_DATES  MAX_DATES  AVG_DATES  COUNT_DATES
+             STDDEV_DATES  MEDIAN_DATES  VARIANCE_DATES  RANGE_DATES  (same
+             aggregates over a fixed calendar date range you pick —
+             AVG_DATES([High], 2026-10-01, 2026-10-31); issue #114)
   Point    : VALUE_DAYS_AGO  VALUE_ON_DATE  (per stock, a single historic
              value — N trading days before the most recent saved day, or on
              one specific calendar date — see "Historic value (point
@@ -415,7 +419,7 @@ def _tokens_to_expr(tokens: list, row_data: dict, all_data: list,
         elif t == "func":
             # aggregate functions have _ALL suffix; map to a single computed number
             fname = v.rstrip("(").upper()
-            if (fname in _DAYS_AGG_BASE or fname in _POINT_LOOKUP_FUNCS
+            if (fname in _DAYS_AGG_BASE or fname in _DATES_AGG_BASE or fname in _POINT_LOOKUP_FUNCS
                     or fname in ("VALUE_BEFORE_CHANGE", "VALUE_BEFORE_CHANGE_N")
                     or fname in _VALUE_AT_EXTREME_FUNCS or fname in _VALUE_AT_EXTREME_DATE_FUNCS):
                 # No historic fetch happens at compile-test time (see the
@@ -496,6 +500,13 @@ _DAYS_AGG_BASE = {
     "SUM_DAYS": "Sum", "COUNT_DAYS": "Count", "STDDEV_DAYS": "Std Dev",
     "MEDIAN_DAYS": "Median", "VARIANCE_DAYS": "Variance", "RANGE_DAYS": "Range",
 }
+
+# Same aggregates as _DAYS_AGG_BASE, but over an explicit (date_from,
+# date_to) calendar range instead of "the last N trading days" — e.g.
+# AVG_DATES([High], 2026-10-01, 2026-10-31) (issue #114). The window is the
+# same (date_from, date_to) tuple VALUE_AT_MAX_DATES already uses, so every
+# day_history builder that slices a tuple window serves these too.
+_DATES_AGG_BASE = {name.replace("_DAYS", "_DATES"): key for name, key in _DAYS_AGG_BASE.items()}
 
 # Point lookups (one historic value, not an aggregate) — see this module's
 # "Historic value (point lookup)" docstring section. Both resolve via the
@@ -671,6 +682,12 @@ def _build_compiled(tokens: list, variable_store=None):
                 agg_key = _DAYS_AGG_BASE[fname]
                 var = f"_d{len(day_specs)}"
                 day_specs.append((var, agg_key, col_name, int(days_arg)))
+                parts.append(var)
+            elif (fname in _DATES_AGG_BASE and tok.get("col_arg")
+                  and date_from_arg and date_to_arg):
+                col_name = tok.get("col_arg", "")
+                var = f"_d{len(day_specs)}"
+                day_specs.append((var, _DATES_AGG_BASE[fname], col_name, (date_from_arg, date_to_arg)))
                 parts.append(var)
             elif fname == "VALUE_DAYS_AGO" and tok.get("col_arg") and days_arg is not None:
                 # Same day_specs list/day_history cache as the _DAYS branch
@@ -1015,7 +1032,7 @@ def _uses_day_funcs(tokens: list) -> bool:
     return any(
         tok.get("type") == "func"
         and tok.get("value", "").rstrip("(").upper() in (
-            _DAYS_AGG_BASE.keys() | _POINT_LOOKUP_FUNCS
+            _DAYS_AGG_BASE.keys() | _DATES_AGG_BASE.keys() | _POINT_LOOKUP_FUNCS
             | _VALUE_AT_EXTREME_FUNCS.keys() | _VALUE_AT_EXTREME_DATE_FUNCS.keys()
         )
         for tok in tokens
@@ -1051,6 +1068,8 @@ def scan_day_funcs(tokens: list) -> list:
         date_to_arg = tok.get("date_to_arg")
         if fname in _DAYS_AGG_BASE and col_arg and days_arg is not None:
             out.append((col_arg, int(days_arg)))
+        elif fname in _DATES_AGG_BASE and col_arg and date_from_arg and date_to_arg:
+            out.append((col_arg, (date_from_arg, date_to_arg)))
         elif fname == "VALUE_DAYS_AGO" and col_arg and days_arg is not None:
             out.append((col_arg, int(days_arg) + 1))
         elif fname == "VALUE_ON_DATE" and col_arg and date_arg:

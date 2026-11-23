@@ -94,9 +94,10 @@ def _needed_int_day_specs(compiled_by_name: dict) -> list:
 
 
 def _needed_date_specs(compiled_by_name: dict) -> list:
-    """Distinct (col_name, (date_from, date_to)) pairs — every VALUE_ON_DATE
-    referenced by any compiled column's day_specs (always paired with
-    agg_key "First" — see services.strategy_engine._build_compiled). A
+    """Distinct (agg_key, col_name, (date_from, date_to)) triples — every
+    VALUE_ON_DATE ("First") or AVG_DATES/MAX_DATES/... aggregate referenced
+    by any compiled column's day_specs (see services.strategy_engine.
+    _build_compiled). A
     fixed calendar date/range needs no per-day lookback padding (unlike an
     int window it isn't relative to whichever day is currently being
     evaluated), so it's resolved directly against a stock's history-so-far,
@@ -106,8 +107,8 @@ def _needed_date_specs(compiled_by_name: dict) -> list:
     for compiled in compiled_by_name.values():
         if compiled is None:
             continue
-        for _, _agg_key, col_name, window in compiled.day_specs:
-            key = (col_name, window)
+        for _, agg_key, col_name, window in compiled.day_specs:
+            key = (agg_key, col_name, window)
             if isinstance(window, tuple) and key not in seen:
                 seen.add(key)
                 out.append(key)
@@ -142,15 +143,25 @@ def _self_contained_day_history(hist: list, int_specs: list, date_specs: list, s
             agg_fn = AGGREGATES.get(agg_key)
             value = agg_fn(numeric) if agg_fn and numeric else None
         out[(col_name, window)] = {symbol: {agg_key: value}}
-    for col_name, date_window in date_specs:
-        target_date = date_window[0]   # date_from == date_to for VALUE_ON_DATE
-        value = None
-        for trade_date, row in hist:
-            if trade_date == target_date:
-                v = row.get(col_name)
-                value = v if isinstance(v, (int, float)) else None
-                break
-        out[(col_name, date_window)] = {symbol: {"First": value}}
+    for agg_key, col_name, date_window in date_specs:
+        date_from, date_to = date_window[0], date_window[-1]
+        if agg_key == "First":
+            # VALUE_ON_DATE: date_from == date_to
+            value = None
+            for trade_date, row in hist:
+                if trade_date == date_from:
+                    v = row.get(col_name)
+                    value = v if isinstance(v, (int, float)) else None
+                    break
+        else:
+            # AVG_DATES/MAX_DATES/... (issue #114): aggregate every day of
+            # the range seen so far.
+            numeric = [row.get(col_name) for trade_date, row in hist
+                       if date_from <= trade_date <= date_to
+                       and isinstance(row.get(col_name), (int, float))]
+            agg_fn = AGGREGATES.get(agg_key)
+            value = agg_fn(numeric) if agg_fn and numeric else None
+        out.setdefault((col_name, date_window), {}).setdefault(symbol, {})[agg_key] = value
     return out
 
 

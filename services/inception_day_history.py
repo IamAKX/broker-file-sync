@@ -156,6 +156,17 @@ def build(specs: list, symbol: str, bars: list) -> dict:
     out: dict = {}
     for agg_key, col_name, window in specs:
         bar_key = _BAR_KEY[col_name]
+        if isinstance(window, tuple) and agg_key != "First":
+            # AVG_DATES/MAX_DATES/... over a calendar range (issue #114).
+            from services.formula_stats_engine import AGGREGATES
+            date_from, date_to = window[0], window[-1]
+            numeric = [b.get(bar_key) for b in bars
+                       if date_from <= b["trade_date"].isoformat() <= date_to
+                       and isinstance(b.get(bar_key), (int, float))]
+            agg_fn = AGGREGATES.get(agg_key)
+            out.setdefault((col_name, window), {}).setdefault(symbol, {})[agg_key] = (
+                agg_fn(numeric) if agg_fn and numeric else None)
+            continue
         if isinstance(window, tuple):
             target_date = window[0]
             value = None

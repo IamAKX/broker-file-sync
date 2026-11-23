@@ -96,6 +96,17 @@ FUNCTION_CATALOGUE = [
     {"name": "MEDIAN_DAYS",   "signature": "MEDIAN_DAYS(column, days)",   "description": "Median over the last N historic trading days, per stock.", "token": {"type": "func", "value": "MEDIAN_DAYS("}},
     {"name": "VARIANCE_DAYS", "signature": "VARIANCE_DAYS(column, days)", "description": "Variance over the last N historic trading days, per stock.", "token": {"type": "func", "value": "VARIANCE_DAYS("}},
     {"name": "RANGE_DAYS",    "signature": "RANGE_DAYS(column, days)",    "description": "Max minus Min over the last N historic trading days, per stock.", "token": {"type": "func", "value": "RANGE_DAYS("}},
+    # Historic (per stock, between two calendar dates you pick) — issue #114.
+    # Clicking one opens a column + From/To date picker.
+] + [
+    {"name": f"{base}_DATES", "signature": f"{base}_DATES(column, date_from, date_to)",
+     "description": f"{label} of this stock's own column value over every trading day from date_from to date_to (both included), per stock. The range is fixed (typed into the formula, not rolling) — re-edit it to point at a new range.",
+     "token": {"type": "func", "value": f"{base}_DATES(", "needs_point_picker": "date_range"}}
+    for base, label in (
+        ("AVG", "Average"), ("MIN", "Minimum"), ("MAX", "Maximum"), ("SUM", "Sum"),
+        ("COUNT", "Count of days with usable data"), ("STDDEV", "Standard deviation"),
+        ("MEDIAN", "Median"), ("VARIANCE", "Variance"), ("RANGE", "Max minus Min"),
+    )
 ]
 
 # Historic value (point lookup) — a single historic value, not an aggregate.
@@ -263,6 +274,8 @@ def _token_insert_text(tok: dict) -> str:
             return f"{fname}([{col_arg}], [{driver_col_arg}], {days_arg})"
         if days_arg is not None:
             return f"{fname}([{col_arg}], {days_arg})"
+        if date_from_arg and date_to_arg:
+            return f"{fname}([{col_arg}], {date_from_arg}, {date_to_arg})"
         if date_arg:
             return f"{fname}([{col_arg}], {date_arg})"
         return f"{fname}([{col_arg}])" if col_arg else f"{fname}("
@@ -296,6 +309,9 @@ _DAYS_AGG_FUNCS = {
 # shape with the _DAYS family above (column, N); VALUE_ON_DATE takes a
 # column + one calendar date instead. See services/strategy_engine.py's
 # "Historic value (point lookup)" docstring section.
+# Same aggregates over a fixed calendar range: AVG_DATES(column, date_from,
+# date_to) — issue #114, services/strategy_engine.py's _DATES_AGG_BASE.
+_DATES_AGG_FUNCS = {f.replace("_days", "_dates") for f in _DAYS_AGG_FUNCS}
 _POINT_DAYS_AGO_FUNCS = {"value_days_ago"}
 _ON_DATE_FUNCS = {"value_on_date"}
 # Same (column, N) text shape as the days-ago family above, but N means
@@ -374,6 +390,13 @@ _TWO_COL_DATE_RANGE_ARG_RE = re.compile(
     r"""\s*,\s*(\d{4}-\d{2}-\d{2})\s*,\s*(\d{4}-\d{2}-\d{2})\s*\)"""
 )
 
+# One column argument plus ", <date_from>, <date_to>" — e.g.
+# "[High], 2026-10-01, 2026-10-31)". Used by the _DATES aggregates.
+_DATE_RANGE_ARG_RE = re.compile(
+    r"""\s*(?:\[([^\]]*)\]|([A-Za-z_][A-Za-z0-9_]*)|"([^"]*)"|'([^']*)')"""
+    r"""\s*,\s*(\d{4}-\d{2}-\d{2})\s*,\s*(\d{4}-\d{2}-\d{2})\s*\)"""
+)
+
 # Splits "[Open of Nifty]" bracket content on the LAST " of " (greedy left
 # group backtracks to the rightmost match), so "X of Y of Z" reads as
 # column "X of Y", stock "Z" — the stock name is what trails.
@@ -440,6 +463,13 @@ def _try_consume_aggregate_arg(text: str, start: int, func_name_lower: str):
                 col = next(g for g in m.groups() if g is not None)
                 return m.end(), col, {}
         return start, None, {}
+    if func_name_lower in _DATES_AGG_FUNCS:
+        m = _DATE_RANGE_ARG_RE.match(text, start)
+        if not m:
+            return start, None, {}
+        *col_groups, date_from, date_to = m.groups()
+        col = next(g for g in col_groups if g is not None)
+        return m.end(), col, {"date_from_arg": date_from, "date_to_arg": date_to}
     if func_name_lower in _ON_DATE_FUNCS:
         m = _ON_DATE_ARG_RE.match(text, start)
         if not m:
@@ -1594,6 +1624,13 @@ class ExpressionEditorDialog(QDialog):
                 return
             self._insert_at_cursor(
                 f"{fname}([{column}], [{driver_column}], {n_dlg.selected_n()})")
+        elif picker == "date_range":
+            range_dlg = _DateRangePickerDialog(self._theme, self)
+            if range_dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            date_from, date_to = range_dlg.selected_range()
+            self._insert_at_cursor(
+                f"{fname}([{column}], {date_from.isoformat()}, {date_to.isoformat()})")
         elif picker == "extreme_dates":
             driver_dlg = _ColumnPickerDialog(columns, self._theme, self)
             driver_dlg.setWindowTitle("Pick the Driver Column (decides which day)")
