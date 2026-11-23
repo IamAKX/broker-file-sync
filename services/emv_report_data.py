@@ -151,8 +151,11 @@ def build_stock_report_data(symbol: str, field: str, date_from: date, date_to: d
         for e in normalize_extra_fields(extra_fields) if e["field"].upper() != str(field).upper()
     ]
     return {
-        "symbol": symbol, "field": field, "date_from": date_from, "date_to": date_to,
-        "sector": inception_sector.sector_for(symbol),
+        # The display symbol (RVNL, not the stored RVNL_I) — the Reports
+        # screen passes the resolved stored symbol, and the header read
+        # "RVNL_I (—)": no sector matches the suffixed name (#126 report).
+        "symbol": _display_symbol(symbol), "field": field, "date_from": date_from, "date_to": date_to,
+        "sector": inception_sector.sector_for(_display_symbol(symbol)),
         "field_color": field_color or DEFAULT_FIELD_COLOR, "extras": extras,
         "compare_close": compare_close,
         "series": series, "stats": stats,

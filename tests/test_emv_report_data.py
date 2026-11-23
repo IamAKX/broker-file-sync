@@ -38,7 +38,7 @@ def test_build_stock_report_data_has_series_and_stats():
     data = emv_report_data.build_stock_report_data(
         "DIVISLAB_I", "DT", date(2026, 1, 20), date(2026, 1, 30)
     )
-    assert data["symbol"] == "DIVISLAB_I"
+    assert data["symbol"] == "DIVISLAB"          # display symbol, not the stored DIVISLAB_I
     assert len(data["series"]) > 0
     assert data["stats"]["current_state"] in ("above", "below", None)
 
@@ -50,7 +50,7 @@ def test_build_stock_report_pages_flows_short_series_onto_one_page():
     )
     pages = emv_report_data.build_stock_report_pages(data)
     assert len(pages) == 1
-    assert "DIVISLAB_I" in pages[0]
+    assert "DIVISLAB" in pages[0] and "DIVISLAB_I" not in pages[0]
 
 
 def test_build_stock_report_html_is_a_full_document():
@@ -199,7 +199,7 @@ def test_stock_report_shows_sector_legend_and_level_change_basis(monkeypatch):
     html = "".join(emv_report_data.build_stock_report_pages(data))
 
     assert data["sector"] == "PHARMA"
-    assert "DIVISLAB_I (PHARMA)" in html                      # sector in the report header
+    assert "DIVISLAB (PHARMA)" in html                        # sector in the report header
     assert ">CLOSE<" in html and ">Close<" in html            # legend names both plotted lines
     assert "CLOSE value per period" in html                   # caption under the bar chart
     values = [e["value"] for e in data["series"] if e["value"] is not None]
@@ -651,3 +651,15 @@ def test_strategy_report_table_shows_own_and_other_strategy_columns(monkeypatch)
     html = "".join(pages)
     assert "Prev Close [Above 150]" in html and "Double [Other]" in html
     assert f'{row["values"]["CLOSE"] * 2:,.2f}' in html
+
+
+def test_stock_report_header_uses_display_symbol_and_sector(monkeypatch):
+    """The Reports screen passes the stored symbol (RVNL_I); the header must
+    still read "RVNL (INFRA)", not "RVNL_I (—)"."""
+    from services import inception_sector
+    monkeypatch.setattr(inception_sector, "sector_for", lambda s: "INFRA" if s == "RVNL" else None)
+    _seed("RVNL_I", date(2026, 1, 1), 10)
+    data = emv_report_data.build_stock_report_data(
+        emv_report_data.resolve_symbol("RVNL"), "CLOSE", date(2026, 1, 1), date(2026, 1, 14))
+    assert data["symbol"] == "RVNL" and data["sector"] == "INFRA"
+    assert "RVNL (INFRA)" in emv_report_data.build_stock_report_html(data)
