@@ -628,6 +628,52 @@ def resolve_group_a_b_day(specs: list, as_of_date: date, range_response: dict = 
     return out
 
 
+def resolve_group_a_b_for_symbol(specs: list, symbol: str, bars: list, rows_by_date: dict) -> dict:
+    """{(col_name, window): {symbol: {agg_key: value}}} for Group A/B
+    *specs* ([(agg_key, col_name, window), ...]) of ONE symbol, as of
+    bars[-1] — the per-symbol counterpart of resolve_group_a_b_day (which
+    needs a whole-universe range pass). *rows_by_date*: {trade_date:
+    Group A/B values} for this symbol, covering every day a window reaches
+    (services.inception_compute_service._compute_rows_for_days). Used where
+    one stock is walked day by day: the EMV stock report's strategy-column
+    trend and the EMV back-test (issue #116: VALUE_DAYS_AGO([52WH], 1)
+    plotted blank there)."""
+    from services.formula_stats_engine import AGGREGATES
+    out: dict = {}
+    for agg_key, col_name, window in specs:
+        if isinstance(window, tuple):
+            lo, hi = window[0], window[-1]
+            days = [b["trade_date"] for b in bars if lo <= b["trade_date"].isoformat() <= hi]
+        elif isinstance(window, int) and 0 < window <= len(bars):
+            days = [b["trade_date"] for b in bars[-window:]]
+        else:
+            continue
+        values = [(rows_by_date.get(d) or {}).get(col_name) for d in days]
+        if agg_key == "First":
+            v = values[0] if values else None
+            value = v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+        else:
+            numeric = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+            agg_fn = AGGREGATES.get(agg_key)
+            value = agg_fn(numeric) if agg_fn and numeric else None
+        out.setdefault((col_name, window), {}).setdefault(symbol, {})[agg_key] = value
+    return out
+
+
+def lookback_start_index(specs: list, bars: list, first_index: int) -> int:
+    """Earliest bars index a per-day walk starting at bars[first_index]
+    needs Group A/B rows for, given *specs*' windows."""
+    start = first_index
+    for _agg, _col, window in specs:
+        if isinstance(window, tuple):
+            lo = window[0]
+            idx = next((i for i, b in enumerate(bars) if b["trade_date"].isoformat() >= lo), first_index)
+            start = min(start, idx)
+        elif isinstance(window, int) and window > 0:
+            start = min(start, first_index - window + 1)
+    return max(start, 0)
+
+
 def resolve_group_a_b_extreme(pairs, as_of_date: date, range_response: dict = None, progress_cb=None) -> dict:
     """{(col_name, window): {symbol: {"daily": [(date_iso, value), ...]}}}
     for Group A/B (col_name, window) *pairs* (split_extreme_pairs_by_kind's

@@ -90,15 +90,17 @@ def referenced_symbols(strategy: dict) -> list:
     return out
 
 
-def _rows_by_date(raw_symbol: str, bars: list, dates: set) -> dict:
+def _rows_by_date(raw_symbol: str, bars: list, dates: set, derived: dict | None = None) -> dict:
     """{trade_date: row values} for *raw_symbol* on each of *dates* (where it
-    has a bar), built the way the EOD universe snapshot builds a row."""
+    has a bar), built the way the EOD universe snapshot builds a row.
+    *derived*: precomputed {trade_date: Group A/B values} covering *dates*."""
     from services import inception_compute_service, inception_settings
 
     targets = [b for b in bars if b["trade_date"] in dates]
     if not targets:
         return {}
-    derived = inception_compute_service._compute_rows_for_days(bars, inception_settings.load(), targets)
+    if derived is None:
+        derived = inception_compute_service._compute_rows_for_days(bars, inception_settings.load(), targets)
     index_of = {b["trade_date"]: i for i, b in enumerate(bars)}
     display = emv_report_data._display_symbol(raw_symbol)
     out = {}
@@ -117,7 +119,7 @@ def column_series(symbol: str, strategy: dict, column_name: str, date_from: date
     inception_historical_field_series.historical_field_series). A day the
     formula can't be evaluated (a referenced stock has no bar, a missing
     field) has value None — never 0."""
-    from services import inception_formula_variable_store
+    from services import emv_backtest, inception_compute_service, inception_formula_variable_store, inception_settings
 
     raw = emv_report_data.resolve_symbol(symbol)
     bars = inception_bars_store.bars_for_symbol(raw, date_to=date_to)
@@ -126,7 +128,17 @@ def column_series(symbol: str, strategy: dict, column_name: str, date_from: date
         return []
     dates = {b["trade_date"] for b in window}
 
-    own_rows = _rows_by_date(raw, bars, dates)
+    # Look-back functions (VALUE_DAYS_AGO, MAX_DAYS, AVG_DATES, ...) need the
+    # day history View by Date builds — per day, as of that day. Without it
+    # every such column plotted blank (issues #116, #126: "52wh (pd)",
+    # "OI Score" built on MAX_DAYS/MIN_DAYS of OPENINT).
+    bundle = emv_backtest._Bundle(strategy, {})
+    position = {b["trade_date"]: i for i, b in enumerate(bars)}
+    first = position[window[0]["trade_date"]]
+    group_rows = inception_compute_service._compute_rows_for_days(
+        bars, inception_settings.load(), bars[bundle.group_rows_start(bars, first):first] + window)
+
+    own_rows = _rows_by_date(raw, bars, dates, group_rows)
     known = set(inception_bars_store.available_symbols())
     ref_rows = {}
     for ref in referenced_symbols(strategy):
@@ -144,8 +156,9 @@ def column_series(symbol: str, strategy: dict, column_name: str, date_from: date
         value = None
         if rows:
             headers = ["Symbol"] + sorted({k for r in rows for k in r} - {"Symbol"})
+            history = bundle.history(own_display, bars[: position[d] + 1], group_rows)
             new_headers, new_data = apply_strategies(
-                [runnable], headers, [[r.get(h) for h in headers] for r in rows], day_history={},
+                [runnable], headers, [[r.get(h) for h in headers] for r in rows], day_history=history,
                 include_streak_columns=False, symbol_col="Symbol", variable_store=inception_formula_variable_store,
             )
             if column_name in new_headers:

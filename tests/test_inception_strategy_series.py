@@ -146,3 +146,34 @@ def test_stock_report_plots_a_strategy_column_with_its_legend(monkeypatch):
     html = "".join(emv_report_data.build_stock_report_pages(data))
     # Rel (~0.01) is on a far smaller scale than the price (~230), so it gets the right-hand axis
     assert "CLOSE, Rel [Ratio] vs Close" in html and ">Rel [Ratio] (right axis)<" in html and 'stroke="#aa00aa"' in html
+
+
+def test_column_series_resolves_look_back_functions(monkeypatch):
+    """Issues #116 / #126: a strategy column built on VALUE_DAYS_AGO /
+    MAX_DAYS / MIN_DAYS (or on a Group A/B column such as 52WH) plotted
+    blank in the EMV stock report — no day history was built."""
+    def func(name, col, n):
+        return {"type": "func", "value": f"{name}(", "col_arg": col, "days_arg": n}
+    strategy = {"id": "sc", "name": "Short Covering", "active": True, "category": "Daily", "row_filter": [],
+                "columns": [
+                    {"name": "Max5", "formula": [func("MAX_DAYS", "CLOSE", 5)]},
+                    {"name": "Min5", "formula": [func("MIN_DAYS", "CLOSE", 5)]},
+                    {"name": "Score", "formula": [_paren("("), _col("CLOSE"), _op("-"), _col("Min5"), _paren(")"),
+                                                  _op("/"), _paren("("), _col("Max5"), _op("-"), _col("Min5"),
+                                                  _paren(")"), _op("*"), _num(100)]},
+                    {"name": "Prev52", "formula": [func("VALUE_DAYS_AGO", "52WH", 1)]},
+                ]}
+    _use(monkeypatch, strategy)
+    bars = _seed("ABB_I", date(2026, 1, 5), 40, 200, 2)
+    series = hfs.historical_field_series("ABB", "Max5 [Short Covering]", date(2026, 2, 2), date(2026, 2, 27))
+    close_of = {b["trade_date"]: b["close"] for b in bars}
+    assert series and all(e["value"] == close_of[e["date"]] for e in series)   # rising: max of last 5 = today
+    score = hfs.historical_field_series("ABB", "Score [Short Covering]", date(2026, 2, 2), date(2026, 2, 27))
+    assert score and all(e["value"] == pytest.approx(100) for e in score)
+    prev52 = hfs.historical_field_series("ABB", "Prev52 [Short Covering]", date(2026, 2, 2), date(2026, 2, 27))
+    # 52WH of a steadily rising stock = yesterday's high (close + 1)
+    assert prev52 and all(e["value"] is not None for e in prev52)
+    dates = [b["trade_date"] for b in bars]
+    for e in prev52:
+        prev = dates[dates.index(e["date"]) - 1]
+        assert e["value"] == pytest.approx(close_of[prev] + 1)

@@ -433,11 +433,58 @@ def _snapshot_table(snap_rows: list) -> tuple:
     return inception_sector.inject_sector_rows(headers, data)
 
 
-def classify_strategy(strategy_id: str, as_of_date: date) -> dict:
+def _strategy_column_codes(columns: list | None, own: dict) -> tuple:
+    """Split the report's selected *columns* into strategy-column codes
+    ("<column> [<strategy>]", the form the column picker offers them in):
+    ({code: column_name} for *own*'s columns, [(code, other_strategy,
+    column_name), ...] for any other strategy's)."""
+    from services import inception_strategy_series as iss
+    own_codes = {iss.field_code(own, c["name"]): c["name"]
+                 for c in own.get("columns", []) if c.get("name")}
+    wanted = [c for c in columns or [] if c not in own_codes and iss.looks_like_strategy_field(c)]
+    if not wanted:
+        return own_codes, []
+    from services import inception_strategy_store
+    by_code = {iss.field_code(st, c["name"]): (st, c["name"])
+               for st in inception_strategy_store.load_all() for c in st.get("columns", []) if c.get("name")}
+    return own_codes, [(code, *by_code[code]) for code in wanted if code in by_code]
+
+
+def _other_strategy_values(others: list, headers: list, data: list, day_history: dict) -> dict:
+    """{code: {display_symbol: value}} — each other strategy's column for
+    every stock in the universe (its row filter ignored: the report's own
+    strategy decides which stocks qualify). One apply per strategy, the
+    column picked by position, so two strategies sharing a column name
+    (RSC in both "RSC" and "RSC M-O-M PCNT CHANGE") can't mix up."""
+    from services import inception_formula_variable_store
+    by_strategy: dict = {}
+    for code, strategy, column_name in others:
+        by_strategy.setdefault(strategy.get("id"), (strategy, []))[1].append((code, column_name))
+    out: dict = {}
+    for strategy, wanted in by_strategy.values():
+        names = [c.get("name") for c in strategy.get("columns", [])]
+        new_headers, new_data = apply_strategies(
+            [dict(strategy, active=True, row_filter=[])], headers, data, day_history=day_history,
+            include_streak_columns=False, symbol_col="Symbol", variable_store=inception_formula_variable_store,
+        )
+        sym_idx = new_headers.index("Symbol")
+        for code, column_name in wanted:
+            idx = len(headers) + names.index(column_name)
+            if idx < len(new_headers):
+                out[code] = {row[sym_idx]: row[idx] for row in new_data}
+    return out
+
+
+def classify_strategy(strategy_id: str, as_of_date: date, columns: list | None = None) -> dict:
     """Qualifying stocks (rows passing the strategy's row_filter — see
     services.strategy_engine.apply_strategies, which drops the rest) plus
     each stock's Fuku Score (see this module's own docstring for why every
-    score is currently 100/100)."""
+    score is currently 100/100).
+
+    *columns* (the report's selected table columns) may name strategy
+    columns as "<column> [<strategy>]" — this strategy's own or another
+    strategy's. Each row's values carry them under that code (issues #116,
+    #123: they were silently dropped from the table)."""
     from services import inception_bars_store, inception_formula_variable_store, inception_strategy_store
 
     # A weekend/holiday (or a day not synced yet) has no bars of its own —
@@ -452,7 +499,10 @@ def classify_strategy(strategy_id: str, as_of_date: date) -> dict:
         return {"strategy": {"name": "Unknown Strategy", "id": strategy_id},
                 "as_of_date": as_of_date, "headers": [], "rows": []}
 
-    headers, data, day_history = universe_snapshot_with_history(as_of_date, [strategy])
+    own_codes, others = _strategy_column_codes(columns, strategy)
+    other_strategies = list({o[1].get("id"): o[1] for o in others}.values())
+    headers, data, day_history = universe_snapshot_with_history(as_of_date, [strategy] + other_strategies)
+    other_values = _other_strategy_values(others, headers, data, day_history) if others else {}
     universe_sector_idx = headers.index("Sector") if "Sector" in headers else None
     sector_totals: dict = {}
     if universe_sector_idx is not None:
@@ -475,6 +525,10 @@ def classify_strategy(strategy_id: str, as_of_date: date) -> dict:
     rows = []
     for row in new_data:
         row_dict = dict(zip(new_headers, row))
+        for code, column_name in own_codes.items():
+            row_dict[code] = row_dict.get(column_name)
+        for code, values in other_values.items():
+            row_dict[code] = values.get(row[symbol_idx])
         score_result = fuku_score.compute_score(score_config, row_dict, [row_dict])
         rows.append({
             "symbol": row[symbol_idx],
@@ -483,7 +537,8 @@ def classify_strategy(strategy_id: str, as_of_date: date) -> dict:
             "score": score_result,
         })
 
-    return {"strategy": strategy, "as_of_date": as_of_date, "headers": new_headers, "rows": rows,
+    extra_headers = [c for c in list(own_codes) + list(other_values) if c not in new_headers]
+    return {"strategy": strategy, "as_of_date": as_of_date, "headers": new_headers + extra_headers, "rows": rows,
             "sector_totals": sector_totals}
 
 

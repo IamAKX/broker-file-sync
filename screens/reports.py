@@ -183,7 +183,8 @@ def _build_emv_html(report: dict, today: date | None = None) -> str:
 
     if subtype == "strategy":
         as_of = date.fromisoformat(subject["as_of_date"]) if subject.get("as_of_date") else today
-        classification = emv_report_data.classify_strategy(subject.get("strategy_id"), as_of)
+        classification = emv_report_data.classify_strategy(
+            subject.get("strategy_id"), as_of, columns=report.get("columns"))
         return emv_report_data.build_strategy_report_html(
             classification, doc_title=report.get("name", "EMV EOD Report"),
             columns=report.get("columns"),

@@ -618,3 +618,36 @@ def test_classify_strategy_resolves_lookback_columns_like_view_by_date(monkeypat
     assert "Prev Close" in result["headers"]
     html = emv_report_data.build_strategy_report_html(result, columns=["Stock", "Sector", "CLOSE", "Prev Close"])
     assert "No stocks currently qualify" not in html and "ABB" in html
+
+
+def _days_ago(col, n):
+    return [{"type": "func", "value": "VALUE_DAYS_AGO(", "col_arg": col, "days_arg": n}]
+
+
+def test_strategy_report_table_shows_own_and_other_strategy_columns(monkeypatch):
+    """Issues #116 / #123: a strategy column picked as "<col> [<strategy>]"
+    — the report's own strategy or another one — must reach the table."""
+    from services import inception_strategy_store
+
+    _seed("ABB_I", date(2026, 1, 1), 10, start_price=200)
+    _seed("TCS_I", date(2026, 1, 1), 10, start_price=50)
+    own = {"id": "own", "name": "Above 150", "active": True, "category": "Daily",
+           "row_filter": _cond_close_above(150),
+           "columns": [{"name": "Prev Close", "formula": _days_ago("CLOSE", 1)}]}
+    other = {"id": "oth", "name": "Other", "active": False, "category": "Daily",
+             "row_filter": _cond_close_above(10 ** 9),        # its own filter must not matter
+             "columns": [{"name": "Double", "formula": [{"type": "col", "value": "CLOSE"},
+                                                         {"type": "op", "value": "*"},
+                                                         {"type": "num", "value": "2"}]}]}
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [own, other])
+
+    cols = ["Stock", "CLOSE", "Prev Close [Above 150]", "Double [Other]"]
+    result = emv_report_data.classify_strategy("own", date(2026, 1, 14), columns=cols)
+    (row,) = result["rows"]
+    assert row["values"]["Prev Close [Above 150]"] == row["values"]["CLOSE"] - 1
+    assert row["values"]["Double [Other]"] == row["values"]["CLOSE"] * 2
+
+    pages = emv_report_data.build_strategy_report_pages(result, columns=cols)
+    html = "".join(pages)
+    assert "Prev Close [Above 150]" in html and "Double [Other]" in html
+    assert f'{row["values"]["CLOSE"] * 2:,.2f}' in html

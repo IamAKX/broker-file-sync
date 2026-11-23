@@ -28,8 +28,9 @@ How a stock is walked, one trading day at a time (each stock independently):
 Informational metrics are evaluated on the entry day's row and shown in the
 trade ledger. Limits, reported in the report itself: a formula that compares a
 stock with the whole universe (the *_ALL aggregates / "[X of OtherStock]") reads
-blank because stocks are walked one by one, and a look-back into a Group A/B
-column (VALUE_DAYS_AGO([52WH], ...)) is not resolved.
+blank because stocks are walked one by one, and VALUE_BEFORE_CHANGE /
+VALUE_AT_MAX/MIN on a Group A/B column (52WH, ...) is not resolved.
+VALUE_DAYS_AGO / VALUE_ON_DATE / *_DAYS on a Group A/B column are (#116).
 """
 
 from datetime import date
@@ -72,18 +73,27 @@ class _Bundle:
         derived = inception_day_history.derived_day_specs(pseudo)
         self.derived_fb = [s for s in derived if s[1] in FORMULA_CODES]
         derived_group = [s for s in derived if s[1] not in FORMULA_CODES]
+        # Group A/B look-backs of ONE stock (VALUE_DAYS_AGO([52WH], 1), ...)
+        # resolve from that stock's own per-day Group A/B rows (issue #116).
+        self.derived_group = derived_group
         all_extreme = inception_day_history.extreme_specs_for_strategies(pseudo)
         extra = (inception_day_history.extreme_needed_pairs(all_extreme)
                  - inception_day_history.extreme_needed_pairs(self.extreme_specs))
         self.extra_raw, self.extra_fb, extra_group = inception_day_history.split_extreme_pairs_by_kind(extra)
         self.strategy_columns = inception_day_history.strategy_column_specs(pseudo, store)
         # Group A/B look-backs need a whole-universe range pass per day — not supported.
-        self.unsupported = bool(vbc_other or vbc_n_other or derived_group or extra_group)
+        self.unsupported = bool(vbc_other or vbc_n_other or extra_group)
         self.needed = bool(self.specs or self.extreme_specs or self.vbc_fb or self.vbc_n_fb or self.derived_fb
-                           or self.extra_raw or self.extra_fb or self.strategy_columns)
+                           or self.extra_raw or self.extra_fb or self.strategy_columns or self.derived_group)
 
-    def history(self, symbol: str, bars: list) -> dict:
-        """The day_history View by Date would build for *symbol* as of bars[-1]."""
+    def group_rows_start(self, bars: list, first_index: int) -> int:
+        """Earliest bars index whose Group A/B row history() may read."""
+        return inception_day_history.lookback_start_index(self.derived_group, bars, first_index)
+
+    def history(self, symbol: str, bars: list, group_rows: dict | None = None) -> dict:
+        """The day_history View by Date would build for *symbol* as of bars[-1].
+        *group_rows*: {trade_date: Group A/B values} for this symbol covering
+        the look-back windows (see group_rows_start)."""
         if not self.needed:
             return {}
         merge = inception_day_history.merge_into
@@ -105,6 +115,8 @@ class _Bundle:
             merge(out, inception_day_history.resolve_formula_builder_day(self.derived_fb, symbol, bars))
         if self.extra_fb:
             merge(out, inception_day_history.resolve_formula_builder_extreme(self.extra_fb, symbol, bars))
+        if self.derived_group and group_rows is not None:
+            merge(out, inception_day_history.resolve_group_a_b_for_symbol(self.derived_group, symbol, bars, group_rows))
         return out
 
 
@@ -130,8 +142,10 @@ def _walk_symbol(strategy: dict, config: dict, bundle: _Bundle, symbol: str, bar
         return [], False
     display = emv_report_data._display_symbol(symbol)
     sector = inception_sector.sector_for(display)
-    ab_rows = inception_compute_service._compute_rows_for_days(bars, settings, in_range)
     position_in_bars = {b["trade_date"]: i for i, b in enumerate(bars)}
+    first = position_in_bars[in_range[0]["trade_date"]]
+    ab_rows = inception_compute_service._compute_rows_for_days(
+        bars, settings, bars[bundle.group_rows_start(bars, first):first] + in_range)
 
     entry_tokens = config.get("entry_condition") or []
     exit_tokens = config.get("exit_condition") or []
@@ -149,7 +163,7 @@ def _walk_symbol(strategy: dict, config: dict, bundle: _Bundle, symbol: str, bar
         upto = bars[: position_in_bars[bar["trade_date"]] + 1]
         values = dict(ab_rows.get(bar["trade_date"]) or {})
         values.update(inception_formula_builder_columns.compute_for_bars(symbol, upto))
-        history = bundle.history(display, upto)
+        history = bundle.history(display, upto, ab_rows)
 
         keys = ["Sector", "Symbol"] + sorted(values)
         row_values = {"Sector": sector, "Symbol": display, **values}
@@ -195,8 +209,8 @@ def run(strategy: dict, config: dict, date_from: date, date_to: date, stock: str
                      "and the trade closes once it no longer holds")
     bundle = _Bundle(strategy, config)
     if bundle.unsupported:
-        notes.append("a look-back into a Group A/B column (e.g. VALUE_DAYS_AGO([52WH], n)) is not resolved in a "
-                     "back-test and reads blank")
+        notes.append("VALUE_BEFORE_CHANGE / VALUE_AT_MAX / VALUE_AT_MIN on a Group A/B column (e.g. 52WH) is not "
+                     "resolved in a back-test and reads blank")
     settings = inception_settings.load()
     if stock:
         symbols = [emv_report_data.resolve_symbol(stock)]
