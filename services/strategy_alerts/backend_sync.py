@@ -68,6 +68,11 @@ def _to_payload(signal: dict) -> dict:
         "exit_price": signal.get("exit_price"),
         "running_high": signal.get("running_high"),
         "running_low": signal.get("running_low"),
+        # #127 — ignored by a backend without these columns yet (pydantic
+        # drops unknown fields), stored once it has them.
+        "high_after_signal": signal.get("high_after_signal"),
+        "low_after_signal": signal.get("low_after_signal"),
+        "active_since": signal.get("active_since"),
         "score": signal.get("score"),
         "risk_reward": signal.get("risk_reward"),
         "metrics": signal.get("metrics", {}),

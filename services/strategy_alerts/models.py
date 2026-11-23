@@ -53,7 +53,9 @@ Open-signal shape (see services/strategy_alerts/state_store.py):
                              "achieved": bool, "achieved_at": iso str | None}},
     "risk_reward": {"numerator": float|None, "denominator": float|None, "ratio": float|None} | None,
     "score": float | None,
-    "running_high": float | None, "running_low": float | None,
+    "running_high": float | None, "running_low": float | None,   # day High/Low (incl. pre-signal)
+    "high_after_signal": float | None, "low_after_signal": float | None,   # #127: since the signal only
+    "active_since": iso str | None,   # #127: when the trigger first turned true (pending start)
     "repeat_armed": bool,             # issue #43: edge-trigger state for repeat
                                        # alerts — True means the next true reading
                                        # of repeat_condition fires a repeat.

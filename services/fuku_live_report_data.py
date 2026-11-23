@@ -223,12 +223,18 @@ def timeline_events(data: dict) -> list:
                 "when": t["achieved_at"], "title": _fmt_time(t["achieved_at"]),
                 "detail": f'{t["name"].upper()} ACHIEVED {_fmt_price(t["value"])}', "kind": "good",
             })
-    extreme = signal.get("running_high") if direction == "BUY" else signal.get("running_low")
-    if extreme is not None:
-        events.append({
-            "when": None, "title": "HIGH" if direction == "BUY" else "LOW",
-            "detail": _fmt_price(extreme), "kind": "info",
-        })
+    # #127: the day's High/Low can be from BEFORE the signal (a 09:20 high
+    # on a 12:49 signal) — show it apart from the high/low made after the
+    # signal, so "targets unachieved although High > target" reads right.
+    word = "HIGH" if direction == "BUY" else "LOW"
+    day_extreme = signal.get("running_high") if direction == "BUY" else signal.get("running_low")
+    after = signal.get("high_after_signal") if direction == "BUY" else signal.get("low_after_signal")
+    if day_extreme is not None:
+        events.append({"when": None, "title": f"{word} OF THE DAY",
+                       "detail": _fmt_price(day_extreme), "kind": "info"})
+    if after is not None:
+        events.append({"when": None, "title": f"{word} AFTER SIGNAL",
+                       "detail": _fmt_price(after), "kind": "info"})
     events.sort(key=lambda e: (e["when"] is None, e["when"] or ""))
     resolution = signal.get("resolution")
     if resolution:
@@ -565,8 +571,11 @@ def card_html(data: dict, generated_at: datetime | None = None, embed_indicators
         indicator_html = '<div class="fk-h" style="margin-top:10px">Indicators</div>' + "".join(parts)
         indicator_px += 24
 
+    active_since = data["signal"].get("active_since")
     sub = " · ".join(x for x in (
         data.get("sector") or "—", data["strategy_name"], data["alert_mode"].title(),
+        # #127: when the trigger first turned true (before the debounce).
+        f'active since {_fmt_time(active_since)}' if active_since else "",
         f'opened {_fmt_time(data["signal"].get("entry_time"))}', f'age {data["elapsed"]}',
     ) if x)
     html_ = (

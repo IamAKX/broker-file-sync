@@ -167,6 +167,7 @@ def _evaluate_strategy(
                     _fire_entry(
                         strategy, config, row, all_dicts, sym_index, agg_cache,
                         symbol, direction, now, key, day_history,
+                        active_since=signal.get("first_true_at"),
                     )
                 )
             continue
@@ -185,6 +186,7 @@ def _evaluate_strategy(
 def _fire_entry(
     strategy: dict, config: dict, row: dict, all_dicts: list, sym_index, agg_cache,
     symbol: str, direction: str, now: datetime, key: str, day_history: dict | None = None,
+    active_since: str | None = None,
 ) -> AlertEvent:
     entry_price = _to_float(row.get(_PRICE_COLUMN))
     metrics_state: dict = {}
@@ -238,8 +240,19 @@ def _fire_entry(
         "score": config.get("score"),
         "last_price": entry_price,
         "last_tick_time": now.isoformat(),
+        # The row's day High/Low — includes prices from BEFORE the signal
+        # fired (e.g. a 09:20 high on a 12:49 signal).
         "running_high": high,
         "running_low": low,
+        # Issue #127: the high/low made AFTER the signal — starts at the
+        # entry price, then follows every later tick (see
+        # _update_after_signal_extremes). Lets the report and Live Alerts
+        # tell "high of the day" apart from "high after the signal".
+        "high_after_signal": entry_price,
+        "low_after_signal": entry_price,
+        # When the trigger condition first turned true (the "pending" start,
+        # before the debounce) — "active since" on Live Alerts (#127).
+        "active_since": active_since or now.isoformat(),
         # The row's High/Low as of the previous tick — see _new_extremes.
         "last_seen_high": high,
         "last_seen_low": low,
@@ -371,6 +384,20 @@ def _new_extremes(signal: dict, high, low) -> tuple:
     return new_high, new_low
 
 
+def _update_after_signal_extremes(signal: dict, price, new_high, new_low) -> None:
+    """high_after_signal/low_after_signal (#127): the tick price and any new
+    High/Low the row printed since the previous tick (_new_extremes — only
+    ever prices after the signal fired). A signal opened before this field
+    existed starts from its entry price."""
+    for key, extremes, pick in (("high_after_signal", (price, new_high), max),
+                                ("low_after_signal", (price, new_low), min)):
+        values = [v for v in (signal.get(key), *extremes) if v is not None]
+        if signal.get(key) is None and signal.get("entry_price") is not None:
+            values.append(signal["entry_price"])
+        if values:
+            signal[key] = pick(values)
+
+
 def _update_open_signal(
     config: dict, signal: dict, row: dict, all_dicts: list, sym_index, agg_cache,
     now: datetime, key: str, day_history: dict | None = None,
@@ -380,6 +407,7 @@ def _update_open_signal(
     high = _to_float(row.get(_HIGH_COLUMN))
     low = _to_float(row.get(_LOW_COLUMN))
     new_high, new_low = _new_extremes(signal, high, low)
+    _update_after_signal_extremes(signal, price, new_high, new_low)
     if price is not None:
         # Latest live price + when it was seen — the Fuku Live Report's
         # "Current" (a signal otherwise only stores entry/high/low).

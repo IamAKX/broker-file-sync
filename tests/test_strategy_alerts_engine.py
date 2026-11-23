@@ -878,3 +878,48 @@ def test_multiple_targets_are_each_achieved_by_the_same_spike():
     assert sorted(e.payload["metric_name"] for e in events) == ["Target 1", "Target 2"]   # not Target 3 (120)
     signal = next(iter(state_store.get_open_signals().values()))
     assert signal["state"] == "open"                                # Target 3 still pending
+
+
+def test_high_after_signal_is_kept_apart_from_the_days_high():
+    """Issue #127 (SBIN, 16-Nov): day High 1,099 printed at 09:20, signal at
+    12:49 @ 1,090.65, best price after the signal 1,092, stopped out later.
+    running_high stays the day's High (1,099); high_after_signal is 1,092 —
+    and active_since is when the trigger first turned true."""
+    from services.strategy_alerts import backend_sync
+    day = datetime(2026, 11, 16, 12, 47)
+    configs = {"strat-1": _make_config(debounce_minutes=2, stop_loss=1086.29, target=1096.18)}
+
+    def tick(minutes, price, high, low):
+        return evaluate_tick([STRATEGY], configs, [_row(signal=1, price=price, high=high, low=low, symbol="SBIN")],
+                             now=day + timedelta(minutes=minutes))
+
+    tick(0, 1090.0, 1099.0, 1078.0)          # trigger true -> pending
+    tick(2, 1090.65, 1099.0, 1078.0)         # 12:49 entry
+    signal = next(iter(state_store.get_open_signals().values()))
+    assert signal["entry_price"] == 1090.65
+    assert signal["running_high"] == 1099.0 and signal["high_after_signal"] == 1090.65
+    assert signal["active_since"] == day.isoformat()
+
+    tick(10, 1091.5, 1099.0, 1078.0)
+    tick(20, 1091.0, 1099.0, 1078.0)
+    signal = next(iter(state_store.get_open_signals().values()))
+    assert signal["high_after_signal"] == 1091.5
+    assert signal["low_after_signal"] == 1090.65
+    # The day's High never moved after the signal, so 1,099 must not count
+    # as a post-signal high (and must not hit the 1,096.18 target).
+    assert not any(m.get("achieved") for m in signal["metrics"].values())
+
+    payload = backend_sync._to_payload(signal)
+    assert payload["high_after_signal"] == 1091.5 and payload["running_high"] == 1099.0
+    assert payload["active_since"] == day.isoformat()
+
+
+def test_a_new_day_high_after_the_signal_counts():
+    day = datetime(2026, 11, 16, 12, 47)
+    configs = {"strat-1": _make_config(debounce_minutes=2, stop_loss=50, target=2000)}
+    rows = [(0, 1090.0, 1095.0), (2, 1090.65, 1095.0), (5, 1094.0, 1097.0)]   # High 1095 -> 1097 after entry
+    for minutes, price, high in rows:
+        evaluate_tick([STRATEGY], configs, [_row(signal=1, price=price, high=high, low=1080.0, symbol="SBIN")],
+                      now=day + timedelta(minutes=minutes))
+    signal = next(iter(state_store.get_open_signals().values()))
+    assert signal["high_after_signal"] == 1097.0 and signal["running_high"] == 1097.0

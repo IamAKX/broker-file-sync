@@ -94,10 +94,28 @@ def _metrics_summary(metrics: dict) -> str:
     return "  |  ".join(parts) if parts else "—"
 
 
+def _after_signal(signal: dict, key: str):
+    """high_after_signal / low_after_signal (#127) — None for a signal from
+    before that was tracked (shown as "—", never the day's High/Low)."""
+    return signal.get(key)
+
+
+def _active_since_text(signal: dict) -> str:
+    when = _parse_iso(signal.get("active_since")) or _parse_iso(signal.get("first_true_at"))
+    if when is None:
+        return "—"
+    entry = _parse_iso(signal.get("entry_time"))
+    # Same day as the entry (the usual case): the time is enough.
+    return when.strftime("%H:%M") if entry is not None and entry.date() == when.date() else _fmt_dt(when)
+
+
 def _pct_move(signal: dict) -> str:
+    """Best move since the signal in its direction. Uses the after-signal
+    high/low (#127) — the day's High/Low can be a price from BEFORE the
+    signal and overstated the move."""
     entry = signal.get("entry_price")
     direction = signal.get("direction", "BUY")
-    extreme = signal.get("running_high") if direction == "BUY" else signal.get("running_low")
+    extreme = _after_signal(signal, "high_after_signal" if direction == "BUY" else "low_after_signal")
     if entry in (None, 0) or extreme is None:
         return "—"
     return f"{(extreme - entry) / entry * 100:.2f}%"
@@ -158,6 +176,9 @@ def _signal_from_api_item(item: dict) -> dict:
         "exit_price": item.get("exit_price"),
         "running_high": item.get("running_high"),
         "running_low": item.get("running_low"),
+        "high_after_signal": item.get("high_after_signal"),
+        "low_after_signal": item.get("low_after_signal"),
+        "active_since": item.get("active_since"),
         "score": item.get("score"),
         "risk_reward": item.get("risk_reward"),
         "metrics": item.get("metrics") or {},
@@ -200,6 +221,9 @@ class LiveAlertsScreen(QWidget):
     # while leaving short columns (Direction, % Move) with room to spare.
     _COLUMN_WIDTHS = [
         ("Date / Time", 155),
+        # #127: when the stock's trigger first turned true (before the
+        # debounce) — "since what time the strategy has been active".
+        ("Active Since", 110),
         ("Strategy", 130),
         ("Direction", 70),
         ("Stock", 100),
@@ -207,8 +231,12 @@ class LiveAlertsScreen(QWidget):
         ("Status", 140),
         ("Entry Price", 95),
         ("Details", None),   # stretch
-        ("High", 90),
-        ("Low", 90),
+        # #127: the day's High/Low (incl. prices from before the signal) vs
+        # the high/low made after the signal fired.
+        ("Day High", 90),
+        ("High After Signal", 120),
+        ("Day Low", 90),
+        ("Low After Signal", 120),
         ("% Move", 85),
         ("Fuku", 95),
         ("Age", 80),
@@ -765,6 +793,7 @@ class LiveAlertsScreen(QWidget):
             details = _metrics_summary(signal.get("metrics", {}))
             values = [
                 _fmt_dt(when),
+                _active_since_text(signal),
                 signal.get("strategy_name", ""),
                 signal.get("direction", ""),
                 signal.get("symbol", ""),
@@ -773,7 +802,9 @@ class LiveAlertsScreen(QWidget):
                 _fmt_price(signal.get("entry_price")),
                 details,
                 _fmt_price(signal.get("running_high")),
+                _fmt_price(_after_signal(signal, "high_after_signal")),
                 _fmt_price(signal.get("running_low")),
+                _fmt_price(_after_signal(signal, "low_after_signal")),
                 _pct_move(signal),
                 _fuku_text(signal, score_configs),
                 fuku_live_report_data.elapsed_label(signal.get("entry_time"), signal.get("resolved_at")),
@@ -896,7 +927,8 @@ class LiveAlertsScreen(QWidget):
             layout.addWidget(rule_lbl)
 
         direction = signal.get("direction", "BUY")
-        current = signal.get("running_high") if direction == "BUY" else signal.get("running_low")
+        current = (_after_signal(signal, "high_after_signal" if direction == "BUY" else "low_after_signal")
+                   or (signal.get("running_high") if direction == "BUY" else signal.get("running_low")))
         levels = []
         try:
             levels = fuku_live_report_data.support_resistance_data(
@@ -919,9 +951,14 @@ class LiveAlertsScreen(QWidget):
         fields = [
             ("Date / Time", _fmt_dt(when)),
             ("Sector", signal.get("sector") or "—"),
+            ("Active since", _active_since_text(signal)),
             ("Entry Price", _fmt_price(signal.get("entry_price"))),
-            ("High since signal", _fmt_price(signal.get("running_high"))),
-            ("Low since signal", _fmt_price(signal.get("running_low"))),
+            # #127: "High since signal" used to show the day's High, which
+            # can be from before the signal fired.
+            ("High of the day", _fmt_price(signal.get("running_high"))),
+            ("High after signal", _fmt_price(_after_signal(signal, "high_after_signal"))),
+            ("Low of the day", _fmt_price(signal.get("running_low"))),
+            ("Low after signal", _fmt_price(_after_signal(signal, "low_after_signal"))),
             ("% Move", _pct_move(signal)),
         ]
         if signal.get("score") is not None:

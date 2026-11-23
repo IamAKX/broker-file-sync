@@ -81,9 +81,9 @@ def test_open_signal_appears_in_table(screen, monkeypatch):
     screen._refresh_table()
 
     assert screen._table.rowCount() == 1
-    assert screen._table.item(0, 1).text() == "PWHBUY"
-    assert screen._table.item(0, 3).text() == "INFY"
-    assert screen._table.item(0, 5).text() == "Open"
+    assert screen._table.item(0, screen._COLUMNS.index("Strategy")).text() == "PWHBUY"
+    assert screen._table.item(0, screen._COLUMNS.index("Stock")).text() == "INFY"
+    assert screen._table.item(0, screen._COLUMNS.index("Status")).text() == "Open"
 
 
 def test_resolved_alert_shows_resolution_status(screen, monkeypatch):
@@ -93,8 +93,8 @@ def test_resolved_alert_shows_resolution_status(screen, monkeypatch):
     monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
     screen._refresh_table()
 
-    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, 3).text() == "WIPRO")
-    assert screen._table.item(row, 5).text() == "Stopped Out"
+    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, screen._COLUMNS.index("Stock")).text() == "WIPRO")
+    assert screen._table.item(row, screen._COLUMNS.index("Status")).text() == "Stopped Out"
 
 
 def test_targets_achieved_status(screen, monkeypatch):
@@ -104,8 +104,8 @@ def test_targets_achieved_status(screen, monkeypatch):
     monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
     screen._refresh_table()
 
-    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, 3).text() == "HDFC")
-    assert screen._table.item(row, 5).text() == "Targets Achieved"
+    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, screen._COLUMNS.index("Stock")).text() == "HDFC")
+    assert screen._table.item(row, screen._COLUMNS.index("Status")).text() == "Targets Achieved"
 
 
 def test_trade_cancelled_status(screen, monkeypatch):
@@ -118,8 +118,8 @@ def test_trade_cancelled_status(screen, monkeypatch):
     monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
     screen._refresh_table()
 
-    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, 3).text() == "WIPRO")
-    assert screen._table.item(row, 5).text() == "Trade Cancelled"
+    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, screen._COLUMNS.index("Stock")).text() == "WIPRO")
+    assert screen._table.item(row, screen._COLUMNS.index("Status")).text() == "Trade Cancelled"
 
 
 def test_intraday_closed_status(screen, monkeypatch):
@@ -133,8 +133,8 @@ def test_intraday_closed_status(screen, monkeypatch):
     monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
     screen._refresh_table()
 
-    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, 3).text() == "RELIANCE")
-    assert screen._table.item(row, 5).text() == "Closed (Intraday)"
+    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, screen._COLUMNS.index("Stock")).text() == "RELIANCE")
+    assert screen._table.item(row, screen._COLUMNS.index("Status")).text() == "Closed (Intraday)"
 
 
 def test_metrics_summary_shows_target_achieved_marker(screen, monkeypatch):
@@ -144,8 +144,8 @@ def test_metrics_summary_shows_target_achieved_marker(screen, monkeypatch):
     monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
     screen._refresh_table()
 
-    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, 3).text() == "HDFC")
-    details = screen._table.item(row, 7).text()
+    row = next(r for r in range(screen._table.rowCount()) if screen._table.item(r, screen._COLUMNS.index("Stock")).text() == "HDFC")
+    details = screen._table.item(row, screen._COLUMNS.index("Details")).text()
     assert "Target 1: 110.00 ✓" in details
     assert "Stop Loss: 95.00" in details
 
@@ -491,8 +491,8 @@ def test_reload_alerts_resets_filters_and_refreshes(screen, monkeypatch):
 # ── Column layout (regression guard for the truncation fix) ─────────────────
 
 def test_high_and_low_are_separate_columns(screen):
-    assert "High" in screen._COLUMNS
-    assert "Low" in screen._COLUMNS
+    assert "Day High" in screen._COLUMNS and "High After Signal" in screen._COLUMNS
+    assert "Day Low" in screen._COLUMNS and "Low After Signal" in screen._COLUMNS
     assert "High / Low" not in screen._COLUMNS
 
 
@@ -810,7 +810,7 @@ def test_open_signal_with_some_targets_achieved_has_its_own_status(screen, monke
     monkeypatch.setattr(strategy_signals_api, "list_signals", fake)
     screen._refresh_table()
 
-    status = {screen._table.item(r, 3).text(): screen._table.item(r, 5).text() for r in range(screen._table.rowCount())}
+    status = {screen._table.item(r, screen._COLUMNS.index("Stock")).text(): screen._table.item(r, screen._COLUMNS.index("Status")).text() for r in range(screen._table.rowCount())}
     assert status["PNBHOUSING"] == "Targets Partially Achieved"
     assert status["PLAIN"] == "Open"                         # nothing achieved yet
     assert status["DONE"] == "Open"                          # (resolution decides "all achieved", not these flags)
@@ -823,10 +823,33 @@ def test_partial_status_filter_asks_for_open_signals_and_keeps_only_partial_rows
     screen._refresh_table(reset_page=True)
 
     assert fake.calls[-1]["status"] == "open"                # the backend has no such status
-    symbols = [screen._table.item(r, 3).text() for r in range(screen._table.rowCount())]
+    symbols = [screen._table.item(r, screen._COLUMNS.index("Stock")).text() for r in range(screen._table.rowCount())]
     assert symbols == ["PNBHOUSING"]
 
 
 def test_status_dropdown_lists_the_new_category(screen):
     labels = [screen._status_combo.itemText(i) for i in range(screen._status_combo.count())]
     assert "Targets Partially Achieved" in labels
+
+
+def test_day_high_and_high_after_signal_and_active_since_columns(screen, monkeypatch):
+    """#127: day High (may be from before the signal) and the high made after
+    the signal are separate columns; % Move uses the after-signal high; the
+    time the trigger first turned true is shown as Active Since."""
+    entry = datetime(2026, 11, 16, 12, 49)
+    item = _api_item(symbol="SBIN", status="stopped_out", entry_time=entry.isoformat(), entry_price=1090.65,
+                     running_high=1099.0, running_low=1078.0, high_after_signal=1092.0, low_after_signal=1086.0,
+                     active_since=datetime(2026, 11, 16, 12, 47).isoformat())
+    old = _api_item(symbol="OLD", running_high=105.0)             # a signal from before this was tracked
+    monkeypatch.setattr(strategy_signals_api, "list_signals", _FakeListApi(items=[item, old]))
+    screen._refresh_table()
+
+    def cell(row, name):
+        return screen._table.item(row, screen._COLUMNS.index(name)).text()
+    rows = {cell(r, "Stock"): r for r in range(screen._table.rowCount())}
+    r = rows["SBIN"]
+    assert cell(r, "Day High") == "1099.00" and cell(r, "High After Signal") == "1092.00"
+    assert cell(r, "Day Low") == "1078.00" and cell(r, "Low After Signal") == "1086.00"
+    assert cell(r, "Active Since") == "12:47"
+    assert cell(r, "% Move") == f"{(1092.0 - 1090.65) / 1090.65 * 100:.2f}%"
+    assert cell(rows["OLD"], "High After Signal") == "—" and cell(rows["OLD"], "% Move") == "—"
