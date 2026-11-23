@@ -1942,6 +1942,38 @@ def test_hmv_strategy_picker_lets_multiple_strategies_be_selected_and_applied(qa
     assert screen._strat_btn.text() == "⚡  Strategies  0/1"
 
 
+def test_hmv_load_keeps_the_picker_selection(qapp, controller, monkeypatch, bars_db):
+    """Issue #115: pick only YTBUY in the "⚡ Strategies" picker, click Load
+    — every other strategy active in Strategy Builder must stay off."""
+    from screens.inception_hmv import InceptionHmvScreen
+    from services import inception_strategy_store
+    from PySide6.QtCore import QDate
+
+    bars_db.upsert_bars([_bar("ABB_I", date(2026, 8, 18), 90, 105, 85, 100)])
+    screen = InceptionHmvScreen(controller)
+    screen._from_date.setDate(QDate(2026, 1, 1))
+    screen._to_date.setDate(QDate(2026, 8, 18))
+
+    def strat(sid, name):
+        return {"id": sid, "name": name, "active": True, "row_filter": [],
+                "columns": [{"name": f"{name} Col", "formula": [{"type": "col", "value": "CLOSE"}]}]}
+
+    stored = [strat("s1", "YTBUY"), strat("s2", "QTBUY"), strat("s3", "MTBUY")]
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [dict(s) for s in stored])
+
+    screen._on_load()
+    _run_worker(qapp, screen)
+    assert {"YTBUY Col", "QTBUY Col", "MTBUY Col"} <= set(screen._headers)
+
+    screen._on_strategies_applied([dict(s, active=(s["id"] == "s1")) for s in screen._strategies])
+    screen._on_load()
+    assert [s["id"] for s in screen._worker._strategies if s.get("active")] == ["s1"]
+    _run_worker(qapp, screen)
+    assert "YTBUY Col" in screen._headers
+    assert "QTBUY Col" not in screen._headers and "MTBUY Col" not in screen._headers
+    assert screen._strat_btn.text() == "⚡  Strategies  1/3"
+
+
 def test_hmv_strategies_applied_never_deactivates_unchecked_ones_server_side(qapp, controller, monkeypatch, bars_db):
     """End-to-end regression for the "6 strategies disappear when a 7th is
     activated" bug — applying a subset via the picker must not silently

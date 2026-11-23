@@ -588,8 +588,14 @@ class InceptionHmvScreen(QWidget):
         self._progress_bar.setValue(0)
         self._progress_bar.setVisible(True)
 
+        # Keep the "⚡ Strategies" picker's selection (issue #115): a plain
+        # load_all() here put back every strategy Strategy Builder has
+        # active, so picking just YTBUY and clicking Load applied them all.
+        # Same merge View by Date uses.
+        self._strategies = inception_strategy_store.merge_session_active(
+            inception_strategy_store.load_all(), self._strategies)
         self._worker = _HmvLoadWorker(date_from, date_to, parent=self,
-                                      strategies=inception_strategy_store.load_all())
+                                      strategies=self._strategies)
         self._worker.progress.connect(self._on_load_progress)
         self._worker.succeeded.connect(
             lambda as_of_date, rows, day_history: self._on_load_succeeded(date_from, date_to, as_of_date, rows, day_history)
@@ -644,7 +650,9 @@ class InceptionHmvScreen(QWidget):
         # a specific subset for the current session without needing another
         # Load; that picker also re-syncs from the store on open, so a
         # strategy just edited in Strategy Builder always shows up promptly.
-        self._strategies = inception_strategy_store.load_all()
+        # Re-synced, but the picker's session selection wins (issue #115).
+        self._strategies = inception_strategy_store.merge_session_active(
+            inception_strategy_store.load_all(), self._strategies)
         self._recompute_display()
         self._status_lbl.setText(
             f"{len(rows)} instruments. Blank cells mean this range doesn't cover enough "
