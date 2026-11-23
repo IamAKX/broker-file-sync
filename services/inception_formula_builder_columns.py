@@ -48,6 +48,14 @@ _cache: dict[tuple, dict] = {}
 
 def clear_cache() -> None:
     _cache.clear()
+    # inception_day_history keeps its own per-(symbol, day) copy of these
+    # values for history lookups — stale after a sync the same way.
+    try:
+        from services import inception_day_history
+        inception_day_history._fb_cache.clear()
+        inception_day_history._other_bars_cache.clear()
+    except Exception:
+        pass
 
 
 _holiday_cache: dict[tuple, frozenset] = {}

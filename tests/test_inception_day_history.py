@@ -296,12 +296,12 @@ def test_derived_day_specs_excludes_raw_fields():
     assert idh.derived_day_specs(strategies) == []
 
 
-def test_derived_day_specs_excludes_days_family_aggregates():
-    """AVG_DAYS/MAX_DAYS/etc against a derived column stay out of scope —
-    _DAYS_AGG_BASE never produces agg_key "First", see this fix's
-    Non-goals."""
-    strategies = [_strategy([tok_days("AVG_DAYS", "CWTO", 20)])]
-    assert idh.derived_day_specs(strategies) == []
+def test_derived_day_specs_include_days_family_aggregates():
+    """Issue #125: AVG_DAYS/MAX_DAYS/... against a derived column (CWTO,
+    P.CLOSE, ...) are resolved too — they used to be skipped and read blank."""
+    strategies = [_strategy([tok_days("AVG_DAYS", "CWTO", 20)]),
+                  _strategy([tok_days("MAX_DAYS", "P.CLOSE", 5)])]
+    assert idh.derived_day_specs(strategies) == [("Average", "CWTO", 20), ("Max", "P.CLOSE", 5)]
 
 
 def test_derived_day_specs_excludes_value_before_change():
@@ -742,3 +742,49 @@ def test_value_days_ago_of_synced_field_reads_previous_bar():
     assert out[("VAH", 2)]["TEST"]["First"] == 201
     assert out[("Max Pain", 2)]["TEST"]["First"] == 301
     assert out[("OR.High", 2)]["TEST"]["First"] == 401
+
+
+
+def test_resolve_formula_builder_day_aggregates_over_window():
+    from services import inception_formula_builder_columns
+    inception_formula_builder_columns.clear_cache()
+    bars = _bars([100, 105, 110, 120])
+    for i, b in enumerate(bars):
+        b["vah"] = 10 * (i + 1)                      # 10, 20, 30, 40
+    out = idh.resolve_formula_builder_day(
+        [("Max", "VAH", 3), ("Average", "VAH", 3), ("Min", "VAH", ("2025-01-01", "2025-01-02"))],
+        "AGGTEST", bars)
+    assert out[("VAH", 3)]["AGGTEST"] == {"Max": 40, "Average": 30}
+    assert out[("VAH", ("2025-01-01", "2025-01-02"))]["AGGTEST"]["Min"] == 10
+
+
+def test_resolve_group_a_b_day_aggregates_over_window():
+    """MAX_DAYS([P.CLOSE], 3) / AVG_DATES([P.OI], ...) from the universe range rows."""
+    days = []
+    for i, d in enumerate(["2025-01-01", "2025-01-02", "2025-01-03", "2025-01-06"]):
+        days.append({"trade_date": d, "stocks": [{"symbol": "ABB", "metrics": {"P.CLOSE": 100 + i, "P.OI": 10 * i}}]})
+    as_of = date(2025, 1, 6)
+    out = idh.resolve_group_a_b_day(
+        [("Max", "P.CLOSE", 3), ("First", "P.CLOSE", 2), ("Average", "P.OI", ("2025-01-02", "2025-01-03"))],
+        as_of, range_response={"days": days})
+    assert out[("P.CLOSE", 3)]["ABB"]["Max"] == 103
+    assert out[("P.CLOSE", 2)]["ABB"]["First"] == 102
+    assert out[("P.OI", ("2025-01-02", "2025-01-03"))]["ABB"]["Average"] == 15
+
+
+def test_strategy_column_history_reads_group_a_b_fields_per_day(monkeypatch):
+    """Issue #124: OI DIFF = [OPENINT] - [P.OI]; STDDEV_DAYS([OI DIFF], n)
+    needs P.OI on every past bar — it read None, so the STD was blank."""
+    import statistics
+    bars = _bars([100, 101, 102, 103, 104, 105])
+    for i, b in enumerate(bars):
+        b["open_interest"] = 1000 + i * i * 10       # 1000, 1010, 1040, 1090, 1160, 1250
+    strategy = {"id": "s", "name": "OI Standard Deviation", "columns": [
+        {"name": "OI DIFF", "formula": [{"type": "col", "value": "OPENINT"}, {"type": "op", "value": "-"},
+                                        {"type": "col", "value": "P.OI"}]},
+        {"name": "OI DIFF STD", "formula": [tok_days("STDDEV_DAYS", "OI DIFF", 4)]},
+    ]}
+    specs = idh.strategy_column_specs([strategy])
+    out = idh.resolve_strategy_columns(specs, "TEST", bars)
+    diffs = [1040 - 1010, 1090 - 1040, 1160 - 1090, 1250 - 1160]
+    assert out[("OI DIFF", 4)]["TEST"]["Std Dev"] == pytest.approx(statistics.stdev(diffs))

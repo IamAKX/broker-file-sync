@@ -337,7 +337,10 @@ def derived_day_specs(strategies: list) -> list:
             if compiled is None:
                 continue
             for _, agg_key, col_name, window in compiled.day_specs:
-                if col_name in RAW_FIELDS or agg_key != "First":
+                # Aggregates (MAX_DAYS/AVG_DATES/...) of a derived column are
+                # resolved too now (issue #125: MAX_DAYS([P.CLOSE], n) was
+                # always blank), not just the "First" point lookups.
+                if col_name in RAW_FIELDS:
                     continue
                 if col_name in own:
                     # one of the strategy's OWN columns — resolve_strategy_columns'
@@ -351,6 +354,32 @@ def derived_day_specs(strategies: list) -> list:
                     seen.add(key)
                     out.append(key)
     return out
+
+
+def _aggregate(agg_key: str, values: list):
+    """"First" -> the oldest value; anything else -> that AGGREGATES entry
+    over the numeric values (None when there are none)."""
+    from services.formula_stats_engine import AGGREGATES
+    if agg_key == "First":
+        v = values[0] if values else None
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+    numeric = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    agg_fn = AGGREGATES.get(agg_key)
+    return agg_fn(numeric) if agg_fn and numeric else None
+
+
+def _window_indices(bars: list, agg_key: str, window) -> list:
+    """bars indices a (agg_key, window) lookup covers, as of bars[-1]: an int
+    window = the last N bars; a (date, date) window = VALUE_ON_DATE's one
+    date ("First") or every bar dated within the range (an aggregate)."""
+    if isinstance(window, tuple):
+        if agg_key == "First":
+            return [i for i, b in enumerate(bars) if b["trade_date"].isoformat() == window[0]][:1]
+        lo, hi = window[0], window[-1]
+        return [i for i, b in enumerate(bars) if lo <= b["trade_date"].isoformat() <= hi]
+    if isinstance(window, int) and 0 < window <= len(bars):
+        return list(range(len(bars) - window, len(bars)))
+    return []
 
 
 def resolve_formula_builder_day(specs: list, symbol: str, bars: list) -> dict:
@@ -373,25 +402,17 @@ def resolve_formula_builder_day(specs: list, symbol: str, bars: list) -> dict:
     found" convention build()'s own tuple-window branch uses."""
     if not specs or not bars:
         return {}
-    from services import inception_formula_builder_columns
 
     out: dict = {}
     for agg_key, col_name, window in specs:
-        value = None
-        if isinstance(window, tuple):
-            target_date = window[0]
-            idx = None
-            for i, bar in enumerate(bars):
-                if bar["trade_date"].isoformat() == target_date:
-                    idx = i
-                    break
-            if idx is not None:
-                v = inception_formula_builder_columns.compute_for_bars(symbol, bars[:idx + 1]).get(col_name)
-                value = v if isinstance(v, (int, float)) else None
-        elif window > 0 and len(bars) >= window:
-            idx = len(bars) - window
-            v = inception_formula_builder_columns.compute_for_bars(symbol, bars[:idx + 1]).get(col_name)
-            value = v if isinstance(v, (int, float)) else None
+        indices = _window_indices(bars, agg_key, window)
+        if agg_key == "First":
+            indices = indices[:1]
+        # Each day's value through _fb_value's per-(symbol, day) cache, so an
+        # aggregate over N days (MAX_DAYS([PWTO], 10), issue #125) costs one
+        # compute_for_bars per day, shared by every column asking for it.
+        values = [_fb_value(symbol, bars, i, col_name) for i in indices]
+        value = _aggregate(agg_key, values) if indices else None
         out.setdefault((col_name, window), {}).setdefault(symbol, {})[agg_key] = value
     return out
 
@@ -610,21 +631,28 @@ def resolve_group_a_b_day(specs: list, as_of_date: date, range_response: dict = 
 
     out: dict = {}
     for agg_key, col_name, window in specs:
-        entries: dict = {}
+        entries = out.setdefault((col_name, window), {})
         if isinstance(window, tuple):
-            target_date = date.fromisoformat(window[0])
-            for symbol, metrics in by_date.get(target_date, {}).items():
-                v = metrics.get(col_name)
-                entries[symbol] = {agg_key: v if isinstance(v, (int, float)) else None}
+            if agg_key == "First":
+                window_dates = [date.fromisoformat(window[0])]
+            else:
+                lo, hi = window[0], window[-1]
+                window_dates = [d for d in sorted_dates if lo <= d.isoformat() <= hi and d <= as_of_date]
         elif window > 0:
             # Same indexing build()'s own int-window branch uses for a raw
-            # column (bars[-window:][0]) — see this function's docstring.
+            # column (bars[-window:]) — see this function's docstring.
             target_idx = as_of_idx - window + 1
-            if 0 <= target_idx < len(sorted_dates):
-                for symbol, metrics in by_date.get(sorted_dates[target_idx], {}).items():
-                    v = metrics.get(col_name)
-                    entries[symbol] = {agg_key: v if isinstance(v, (int, float)) else None}
-        out[(col_name, window)] = entries
+            window_dates = sorted_dates[target_idx:as_of_idx + 1] if target_idx >= 0 else []
+            if agg_key == "First":
+                window_dates = window_dates[:1]
+        else:
+            window_dates = []
+        if not window_dates:
+            continue
+        symbols = set(by_date.get(as_of_date, {})) | set(by_date.get(window_dates[0], {}))
+        for symbol in symbols:
+            values = [by_date.get(d, {}).get(symbol, {}).get(col_name) for d in window_dates]
+            entries.setdefault(symbol, {})[agg_key] = _aggregate(agg_key, values)
     return out
 
 
@@ -815,10 +843,34 @@ def _fb_value(symbol_key: str, bars: list, i: int, code: str):
     return _fb_cache[key]
 
 
+_GROUP_HISTORY_BARS = 300    # past bars a strategy column's Group A/B references are computed for
+_settings_cache: list = []   # [(monotonic_time, settings)] — inception_settings.load() is a server call
+
+
+def _settings():
+    import time
+    from services import inception_settings
+    now = time.monotonic()
+    if not _settings_cache or now - _settings_cache[0][0] > 60:
+        _settings_cache[:] = [(now, inception_settings.load())]
+    return _settings_cache[0][1]
+
+
+def _group_codes() -> frozenset:
+    from services import inception_columns
+    return frozenset(inception_columns.all_derived_codes()) | frozenset(inception_columns.gap_sub_fields())
+
+
 def resolve_strategy_columns(specs: list, symbol: str, bars: list, variable_store=None) -> dict:
     """day_history chunk ({(col_name, window): {symbol: {agg_key: value}}},
     same shape build() returns) for *specs* (strategy_column_specs output),
-    as of bars[-1]. See the section comment above for the method."""
+    as of bars[-1]. See the section comment above for the method.
+
+    Group A/B fields a column reads on an earlier bar (P.OI, P.CLOSE, 52WH,
+    ...) come from this symbol's own per-day Group A/B rows, computed once
+    (one forward pass) the first time one is needed — issue #124:
+    STDDEV_DAYS([OI DIFF], 22) with OI DIFF = [OPENINT] - [P.OI] was blank
+    because P.OI read None on every past bar."""
     from services.formula_stats_engine import AGGREGATES
     from services.strategy_engine import evaluate_compiled
 
@@ -827,6 +879,16 @@ def resolve_strategy_columns(specs: list, symbol: str, bars: list, variable_stor
         return out
     n = len(bars)
     date_index = {b["trade_date"].isoformat(): i for i, b in enumerate(bars)}
+    group_codes = _group_codes()
+    group_rows: dict = {}
+
+    def group_value(col_name, i):
+        if not group_rows:
+            from services import inception_compute_service
+            group_rows.update(inception_compute_service._compute_rows_for_days(
+                bars, _settings(), bars[max(0, n - _GROUP_HISTORY_BARS):]) or {None: {}})
+        v = (group_rows.get(bars[i]["trade_date"]) or {}).get(col_name)
+        return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
     for strat, wanted in specs:
         cols = _strategy_cols(strat)
@@ -855,6 +917,13 @@ def resolve_strategy_columns(specs: list, symbol: str, bars: list, variable_stor
                 return v if isinstance(v, (int, float)) else None
             comp = compiled.get(name)
             if comp is None:
+                # A day function inside a column reading a Formula Builder
+                # or Group A/B field directly (AVG_DAYS([P.OI], 5)) on bar i.
+                if name in FORMULA_CODES:
+                    v = _fb_value(symbol, bars, i, name)
+                    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+                if name in group_codes:
+                    return group_value(name, i)
                 return None
             key = (name, i)
             if key in memo:
@@ -866,6 +935,8 @@ def resolve_strategy_columns(specs: list, symbol: str, bars: list, variable_stor
                     row[col_name] = value_at(col_name, i)
                 elif col_name in FORMULA_CODES:
                     row[col_name] = _fb_value(symbol, bars, i, col_name)   # PMC, CML, ... at that day
+                elif col_name in group_codes:
+                    row[col_name] = group_value(col_name, i)               # P.OI, 52WH, ... at that day
                 else:
                     row[col_name] = None
             sym_idx = {}
