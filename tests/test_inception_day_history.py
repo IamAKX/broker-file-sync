@@ -718,3 +718,27 @@ def test_derived_day_specs_skip_the_strategys_own_columns():
         {"name": "RSC PREV", "formula": [tok_days("VALUE_DAYS_AGO", "RSC", 1)]},
         {"name": "X", "formula": [tok_days("VALUE_DAYS_AGO", "52WH", 1)]}]}
     assert idh.derived_day_specs([strat]) == [("First", "52WH", 2)]
+
+
+def test_synced_bar_fields_route_to_formula_builder_path():
+    """Issue #113: VAH/POC/VAL/Max Pain/OI strikes/OR.High/OR.Low (synced
+    onto the bar, exposed by compute_for_bars) must take the Formula
+    Builder path — the Group A/B path doesn't know them and returned blank
+    for every previous-day lookup."""
+    synced = ["VAH", "POC", "VAL", "Max Pain", "callstrikehighestoi",
+              "Callstrikewithsecondhighestoi", "TodayPutHighestStrike",
+              "PutStrikeWithsecondHighestOI", "OR.High", "OR.Low", "Avg Rate"]
+    pairs = {(c, 2) for c in synced}
+    _raw, fb_pairs, other = idh.split_extreme_pairs_by_kind(pairs)
+    assert fb_pairs == pairs and not other
+
+
+def test_value_days_ago_of_synced_field_reads_previous_bar():
+    bars = _bars([100, 105, 110])
+    for i, b in enumerate(bars):
+        b.update({"vah": 200 + i, "max_pain": 300 + i, "or_high": 400 + i})
+    specs = [("First", "VAH", 2), ("First", "Max Pain", 2), ("First", "OR.High", 2)]
+    out = idh.resolve_formula_builder_day(specs, "TEST", bars)
+    assert out[("VAH", 2)]["TEST"]["First"] == 201
+    assert out[("Max Pain", 2)]["TEST"]["First"] == 301
+    assert out[("OR.High", 2)]["TEST"]["First"] == 401

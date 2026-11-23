@@ -109,6 +109,29 @@ _LMV_SYNCED_NEW_FIELD_MAP = {
 }
 
 
+class _FieldCodes:
+    """Every field compute_for_bars puts on a row — formula_engine's
+    FORMULA_CODES plus "Avg Rate", the synced Options-OI / Max Pain /
+    Market Profile / Opening Range fields (VAH, POC, OR.High, ...) and the
+    configured Indicator Library outputs. Historic lookups
+    (VALUE_DAYS_AGO, MAX_DAYS, VALUE_ON_DATE, ... — services.
+    inception_day_history and the screens that split specs by kind) use
+    ``code in FIELD_CODES`` to route a field to the compute_for_bars path;
+    checking FORMULA_CODES alone sent VAH/Max Pain/... to the Group A/B
+    path, which doesn't know them, so every previous-day value came back
+    blank (issue #113). Indicator codes are read network-free on each
+    check (they change when the library is edited)."""
+
+    def __contains__(self, code) -> bool:
+        if code in _STATIC_FIELD_CODES:
+            return True
+        try:
+            return any(code == c for inst in indicator_library.peek_instances()
+                       for c, _ in indicator_library._safe_codes(inst))
+        except Exception:
+            return False
+
+
 def compute_for_bars(symbol: str, bars: list[dict]) -> dict:
     """{code: value} for every services.formula_engine.FORMULA_CODES code,
     as of the LAST bar in *bars* — ascending-by-trade_date, same shape
@@ -153,3 +176,10 @@ def compute_for_bars(symbol: str, bars: list[dict]) -> dict:
     values.update(indicator_library.latest_values(bars, indicator_library.peek_instances()))
     _cache[cache_key] = values
     return dict(values)
+
+
+_STATIC_FIELD_CODES = frozenset(
+    list(formula_engine.FORMULA_CODES) + list(_LMV_SYNCED_CODE_MAP)
+    + ["Avg Rate"] + list(_LMV_SYNCED_NEW_FIELD_MAP)
+)
+FIELD_CODES = _FieldCodes()

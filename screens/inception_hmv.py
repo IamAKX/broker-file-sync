@@ -86,7 +86,8 @@ from services import (
     inception_day_history, inception_formula_builder_columns, inception_formula_variable_store,
     inception_sector, inception_strategy_store, inception_value_before_change,
 )
-from services.formula_engine import FORMULA_CODES
+# FORMULA_CODES + synced VAH/POC/Max Pain/... + indicators (issue #113)
+from services.inception_formula_builder_columns import FIELD_CODES as FORMULA_CODES
 from services.strategy_engine import apply_strategies, build_symbol_index, get_row_fmt_colors
 
 _FROZEN_HEADERS = ["Sector", "Symbol"]

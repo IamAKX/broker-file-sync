@@ -52,7 +52,8 @@ compute_day_history).
 import math
 from datetime import date, timedelta
 
-from services.formula_engine import FORMULA_CODES
+# FORMULA_CODES + synced VAH/POC/Max Pain/... + indicators (issue #113)
+from services.inception_formula_builder_columns import FIELD_CODES as FORMULA_CODES
 from services.inception_columns import RAW_FIELDS
 from services.strategy_engine import (
     VALUE_BEFORE_CHANGE_DAILY_TAG, VALUE_BEFORE_CHANGE_N_TAG,
@@ -441,8 +442,6 @@ def split_extreme_pairs_by_kind(pairs: set) -> tuple:
     metrics dict, producing an empty "daily" list — the same silent-blank
     fallback services.strategy_engine.evaluate_compiled already applies
     for a missing day_history entry, never a crash)."""
-    from services.formula_engine import FORMULA_CODES
-
     raw_pairs, fb_pairs, other_pairs = set(), set(), set()
     for col_name, window in pairs:
         if col_name in RAW_FIELDS:
