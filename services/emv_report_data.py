@@ -683,14 +683,19 @@ def _recent_rows(display_symbol: str, as_of_date: date, lookback: int, cache: di
     from services import inception_bars_store, inception_compute_service, inception_settings
 
     if cache is not None and display_symbol in cache:
-        return cache[display_symbol]
+        return cache[display_symbol][:3]
     raw = resolve_symbol(display_symbol)
     bars = inception_bars_store.bars_for_symbol(raw, date_to=as_of_date)
+    group_rows: dict = {}
     if not bars:
         result = ([], ["Symbol"], [])
     else:
         window = bars[-lookback:]
-        derived = inception_compute_service._compute_rows_for_days(bars, inception_settings.load(), window)
+        # Group A/B rows also for the days BEFORE the window — a filter's
+        # own look-backs (VALUE_DAYS_AGO([52WH], 1), ...) read them (#130).
+        derived = inception_compute_service._compute_rows_for_days(
+            bars, inception_settings.load(), bars[-(lookback + _STREAK_HISTORY_PAD):])
+        group_rows = derived
         index_of = {b["trade_date"]: i for i, b in enumerate(bars)}
         rows = []
         for bar in window:
@@ -703,8 +708,19 @@ def _recent_rows(display_symbol: str, as_of_date: date, lookback: int, cache: di
         headers = sorted({k for r in rows for k in r} - {"Symbol"})
         result = (window, ["Symbol"] + headers, rows)
     if cache is not None:
-        cache[display_symbol] = result
+        cache[display_symbol] = result + (bars, group_rows)
     return result
+
+
+_STREAK_HISTORY_PAD = 300   # extra earlier days of Group A/B rows for a streak day's own look-backs
+
+
+def _streak_context(display_symbol: str, as_of_date: date, lookback: int, cache: dict | None) -> tuple:
+    """(window, headers, rows, bars, group_rows) — _recent_rows plus the full
+    bar history and Group A/B rows the per-day look-back history needs."""
+    local = cache if cache is not None else {}
+    _recent_rows(display_symbol, as_of_date, lookback, local)
+    return local[display_symbol]
 
 
 def trailing_streak(display_symbol: str, strategy: dict, as_of_date: date,
@@ -717,18 +733,46 @@ def trailing_streak(display_symbol: str, strategy: dict, as_of_date: date,
     live day-history reads blank here, exactly as it does for the snapshot.
     Pass a shared *cache* dict when checking several strategies for the same
     stock."""
-    from services import inception_formula_variable_store
+    from services import emv_backtest, inception_formula_variable_store
+    from services import inception_strategy_series as iss
 
-    window, headers, rows = _recent_rows(display_symbol, as_of_date, lookback, cache)
+    cache = cache if cache is not None else {}
+    window, headers, rows, bars, group_rows = _streak_context(display_symbol, as_of_date, lookback, cache)
     if not window:
         return 0, None
-    new_headers, new_data = apply_strategies(
-        [dict(strategy, active=True)], headers, [[r.get(h) for h in headers] for r in rows],
-        day_history={}, include_streak_columns=False, symbol_col="Symbol",
-        variable_store=inception_formula_variable_store,
-    )
-    date_idx = new_headers.index("__date__")
-    true_dates = {row[date_idx] for row in new_data}
+    # Each day is evaluated the way View by Date evaluates it on that day:
+    # with the rows of any stock the formulas reference ("[CLOSE of NIFTY]")
+    # and that day's own look-back history (VALUE_DAYS_AGO, AVG_DAYS, ...).
+    # Without them, RSC (a NIFTY ratio) and its VALUE_DAYS_AGO read blank
+    # on every past day, the filter was never true and "Days True" stayed
+    # 0 (issue #130).
+    refs = {}
+    for ref in iss.referenced_symbols(strategy):
+        ref_display = _display_symbol(resolve_symbol(ref))
+        if ref_display.upper() == str(display_symbol).upper():
+            continue
+        r_window, _h, r_rows, _b, _g = _streak_context(ref_display, as_of_date, lookback, cache)
+        refs[ref_display] = {w["trade_date"]: row for w, row in zip(r_window, r_rows)}
+    bundle_key = ("__bundle__", strategy.get("id"), repr(strategy.get("columns")), repr(strategy.get("row_filter")))
+    if bundle_key not in cache:
+        cache[bundle_key] = emv_backtest._Bundle(strategy, {})
+    bundle = cache[bundle_key]
+    position = {b["trade_date"]: i for i, b in enumerate(bars)}
+    runnable = [dict(strategy, active=True)]
+    true_dates = set()
+    for bar, row in zip(window, rows):
+        d = bar["trade_date"]
+        day_rows = [row] + [by_date[d] for by_date in refs.values() if d in by_date]
+        day_headers = ["Symbol"] + sorted({k for r in day_rows for k in r} - {"Symbol"})
+        history = bundle.history(display_symbol, bars[: position[d] + 1], group_rows)
+        new_headers, new_data = apply_strategies(
+            runnable, day_headers, [[r.get(h) for h in day_headers] for r in day_rows],
+            day_history=history, include_streak_columns=False, symbol_col="Symbol",
+            variable_store=inception_formula_variable_store,
+        )
+        sym_idx = new_headers.index("Symbol")
+        if any(r[sym_idx] == display_symbol for r in new_data):
+            true_dates.add(d.isoformat())
     streak, since = 0, None
     for bar in reversed(window):
         if bar["trade_date"].isoformat() in true_dates:
@@ -768,10 +812,15 @@ class StreakLookup:
         return (strategy.get("id"), symbol, repr(strategy.get("row_filter")))
 
     def _compute(self, strategy: dict, symbol) -> tuple:
+        """("Days True", "Since") — same convention as LMV's own streak
+        columns: Days True counts the consecutive PREVIOUS trading days the
+        filter was also true (the first day it is true reads 0, the next 1,
+        ... — issue #130); Since is the day the current run began."""
         key = self._key(strategy, symbol)
         if key not in self._results:
-            days, since = trailing_streak(symbol, strategy, self._as_of, self._lookback, self._rows_cache)
-            capped = days >= self._lookback
+            streak, since = trailing_streak(symbol, strategy, self._as_of, self._lookback, self._rows_cache)
+            capped = streak >= self._lookback
+            days = max(streak - 1, 0)
             self._results[key] = (f"≥{days}" if capped else days,
                                   since.isoformat() if since and not capped else None)
         return self._results[key]

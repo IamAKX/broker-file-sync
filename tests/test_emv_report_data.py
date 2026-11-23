@@ -417,9 +417,11 @@ def test_streak_lookup_reads_pending_until_warmed_then_gives_days_true_and_since
     lookup = emv_report_data.StreakLookup(as_of)
     assert lookup(s130, "SBIN") == (lookup.PENDING, None)       # nothing computed on the GUI thread
     lookup.warm([s130], headers, data)
-    expected_days, expected_since = emv_report_data.trailing_streak("SBIN", s130, as_of)
-    assert expected_days > 0
-    assert lookup(s130, "SBIN") == (expected_days, expected_since.isoformat())
+    streak, expected_since = emv_report_data.trailing_streak("SBIN", s130, as_of)
+    assert streak > 1
+    # LMV's convention (#130): the previous consecutive true days — the first
+    # true day reads 0 — and Since = the day the run began.
+    assert lookup(s130, "SBIN") == (streak - 1, expected_since.isoformat())
     assert lookup(s130, None) == (None, None)
 
 
@@ -430,7 +432,7 @@ def test_streak_lookup_caps_a_full_lookback_as_a_lower_bound(monkeypatch):
     s_all = dict(strategies[0], row_filter=_cond_close_above(0))      # true on every day
     lookup.warm([s_all], ["Symbol", "CLOSE"], [["ABB", 100.0]])
     days, since = lookup(s_all, "ABB")
-    assert days == f"≥{emv_report_data.DAYS_TRUE_LOOKBACK}" and since is None
+    assert days == f"≥{emv_report_data.DAYS_TRUE_LOOKBACK - 1}" and since is None
 
 
 def test_trend_report_pages_show_distribution_days_true_and_multi_timeframe_columns(monkeypatch):
@@ -663,3 +665,32 @@ def test_stock_report_header_uses_display_symbol_and_sector(monkeypatch):
         emv_report_data.resolve_symbol("RVNL"), "CLOSE", date(2026, 1, 1), date(2026, 1, 14))
     assert data["symbol"] == "RVNL" and data["sector"] == "INFRA"
     assert "RVNL (INFRA)" in emv_report_data.build_stock_report_html(data)
+
+
+def test_streak_days_resolve_row_references_and_look_backs(monkeypatch):
+    """Issue #130: a filter on RSC ([CLOSE of NIFTY]) and VALUE_DAYS_AGO
+    read blank on every past day, so Days True stayed 0. Each day must see
+    that day's NIFTY row and its own look-back history."""
+    from services import inception_strategy_store
+    start = date(2026, 1, 1)
+    _seed("ABB_I", start, 40, start_price=100)          # +1 a day
+    _seed("NIFTY_I", start, 40, start_price=1000)       # +1 a day: ABB/NIFTY ratio rises
+    ratio = [{"type": "col", "value": "CLOSE"}, {"type": "op", "value": "/"},
+             {"type": "col", "value": "CLOSE", "of": "NIFTY"}, {"type": "op", "value": "*"},
+             {"type": "num", "value": "1000"}]
+    strategy = {"id": "rs", "name": "RS", "active": True, "category": "Daily", "columns": [
+        {"name": "RS", "formula": ratio},
+        {"name": "RS PREV", "formula": [{"type": "func", "value": "VALUE_DAYS_AGO(", "col_arg": "RS", "days_arg": 1}]},
+    ], "row_filter": [{"type": "col", "value": "RS"}, {"type": "op", "value": ">"},
+                      {"type": "col", "value": "RS PREV"}, {"type": "op", "value": " and "},
+                      {"type": "col", "value": "RS"}, {"type": "op", "value": ">"}, {"type": "num", "value": "125"}]}
+    monkeypatch.setattr(inception_strategy_store, "load_all", lambda: [strategy])
+    bars = inception_bars_store.bars_for_symbol("ABB_I")
+    # RS = (100+i)/(1000+i)*1000 > 125 from i = 29 onwards (first true day)
+    first_true = next(b["trade_date"] for i, b in enumerate(bars) if (100 + i) / (1000 + i) * 1000 > 125)
+    days_after = [b["trade_date"] for b in bars if b["trade_date"] >= first_true]
+    for k, d in enumerate(days_after[:3]):
+        streak, since = emv_report_data.trailing_streak("ABB", strategy, d)
+        assert (streak, since) == (k + 1, first_true)
+        lookup = emv_report_data.StreakLookup(d)
+        assert lookup._compute(strategy, "ABB") == (k, first_true.isoformat())   # 0, 1, 2 — like LMV

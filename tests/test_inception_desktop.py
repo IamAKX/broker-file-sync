@@ -1785,7 +1785,8 @@ def test_hmv_screen_adds_row_filter_streak_columns(qapp, controller, monkeypatch
     _run_worker(qapp, screen)
     assert "Range — Days True" in screen._headers and "Range — Since" in screen._headers
     row = dict(zip(screen._headers, screen._data[0]))
-    assert row["Range — Days True"] == 1 and row["Range — Since"] == "2026-08-18"
+    # First (only) day it is true: 0 previous days, like LMV (#130).
+    assert row["Range — Days True"] == 0 and row["Range — Since"] == "2026-08-18"
     assert "Sector" in screen._headers   # see services.inception_sector
     assert screen._strat_btn.text() == "⚡  Strategies  1/1"
 
