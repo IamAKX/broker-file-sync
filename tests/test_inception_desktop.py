@@ -332,9 +332,13 @@ def test_compute_group_b_opens_and_fills_a_daily_gap_up():
     result = compute_group_b(bars, threshold_pct=0.5)
 
     assert result[d1]["DAY UF GUP 1"] is None
-    assert result[d3]["DAY FD GUP 1"] == (100, 106, d2)
-    assert result[d3]["DAY UF GUP 1"] == (106, 107, d3)
-    assert result[d3]["DAY UF GUP 2"] is None
+    assert result[d2]["DAY UF GUP 1"] == (100, 106, d2)
+    # d3 gaps up again (106 -> 107) but closes at 99, back through BOTH areas:
+    # d2's fills, and d3's own fills on its opening day (#129 — "filled = a
+    # close back through the area" applies from the day it opens).
+    assert result[d3]["DAY FD GUP 1"] == (106, 107, d3)
+    assert result[d3]["DAY FD GUP 2"] == (100, 106, d2)
+    assert result[d3]["DAY UF GUP 1"] is None
     assert result[d3]["DAY UF GDN 1"] is None
     assert result[d3]["WEEK UF GUP 1"] is None
 
@@ -370,6 +374,46 @@ def test_compute_group_b_gap_down_uses_mirror_condition():
     result = compute_group_b(bars, threshold_pct=0.5)
     assert result[d2]["DAY UF GDN 1"] == (94, 100, d2)
     assert result[d2]["DAY UF GUP 1"] is None
+
+
+def test_older_unfilled_gap_reappears_after_newer_gaps_fill():
+    """Issue #129 (INDUSINDBK): a gap-down area stays unfilled until a close
+    reaches its HIGH, however many newer gaps open meanwhile. Three newer
+    gap-downs used to push it out of the 3-deep list for good, so it was
+    missing once those newer ones had filled."""
+    from datetime import timedelta
+    from services.inception_formula_engine import compute_group_b
+
+    d = date(2026, 9, 21)
+    bars = [_bar("X", d, 990, 991, 989, 990)]
+    def add(open_, close):
+        nonlocal d
+        d += timedelta(days=1)
+        bars.append(_bar("X", d, open_, max(open_, close) + 1, min(open_, close) - 1, close))
+        return d
+    big = add(915, 930)                     # gap down 990 -> 915: area (915, 990)
+    for _ in range(3):                      # three more gap-downs below it, each small
+        last_close = bars[-1]["close"]
+        add(last_close * 0.97, last_close * 0.97)
+    lows_before = compute_group_b(bars, threshold_pct=0.5)[bars[-1]["trade_date"]]
+    assert all(lows_before[f"DAY UF GDN {r}"][2] != big for r in (1, 2, 3))   # 4 open, only 3 shown
+    fill_day = add(940, 945)               # closes above the three newer areas' highs, below 990
+    row = compute_group_b(bars, threshold_pct=0.5)[fill_day]
+    assert row["DAY UF GDN 1"] == (915, 990, big)
+    unfill_day = add(946, 995)             # finally closes above 990 -> filled
+    row = compute_group_b(bars, threshold_pct=0.5)[unfill_day]
+    assert row["DAY UF GDN 1"] is None and row["DAY FD GDN 1"][2] == big
+
+
+def test_gap_closed_back_through_on_its_own_day_is_filled():
+    """#129, INDUSINDBK 19-Nov: gap-down 908.85 -> 902.30, close 921.80
+    (above the area's high) — filled that day, not listed as unfilled."""
+    from services.inception_formula_engine import compute_group_b
+    d1, d2 = date(2026, 11, 18), date(2026, 11, 19)
+    bars = [_bar("X", d1, 925, 925.5, 906.8, 908.85), _bar("X", d2, 902.3, 922.9, 902.3, 921.8)]
+    row = compute_group_b(bars, threshold_pct=0.5)[d2]
+    assert row["DAY UF GDN 1"] is None
+    assert row["DAY FD GDN 1"] == (902.3, 908.85, d2)
 
 
 # ── services.inception_formula_engine: required_lookback_start ──────────────

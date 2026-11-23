@@ -55,9 +55,15 @@ PREVIOUS close (the pre-gap reference price): a gap-up area fills when close
 <= that previous close; a gap-down area fills the mirror way (close >= it).
 
 State per instrument/direction/period-type: two FIFOs (unfilled, filled),
-each holding at most fifo_cap areas (default 3), most-recent-first (rank 1 =
-index 0). A new day/week can (a) open a new gap (pushed onto the front of
-`unfilled`, trimming to fifo_cap) if |pct change| exceeds gap_threshold_pct,
+most-recent-first (rank 1 = index 0); only the first fifo_cap (default 3)
+of each are SHOWN. The unfilled list itself keeps every still-unfilled area
+(up to _UNFILLED_TRACK_CAP): an area stays unfilled until a close crosses
+back through it, however many newer gaps open meanwhile — trimming it to
+fifo_cap used to drop an older, still-unfilled area for good once three
+newer gaps opened, so it never reappeared after those filled (issue #129:
+INDUSINDBK's 24-Sep gap-down area 915-964.5 vanished by 19-Nov although no
+close had reached 964.5). A new day/week can (a) open a new gap (pushed onto
+the front of `unfilled`) if |pct change| exceeds gap_threshold_pct,
 independently of whether it also (b) fills one or more already-open areas of
 the SAME direction (each filled area is removed from `unfilled` and pushed
 onto the front of `filled`, trimming to fifo_cap) — both can happen on the
@@ -437,6 +443,9 @@ def _to_period_bars(bars: list[dict], period_type: str) -> list[dict]:
     return out
 
 
+_UNFILLED_TRACK_CAP = 250   # bound on tracked still-unfilled areas (per list) — keeps a decade of history cheap
+
+
 def _run_gap_state_machine(period_bars: list[dict], threshold_pct: float, fifo_cap: int) -> dict[date, dict]:
     """period_bars: ascending bars (daily, or the week-synthesized bars from
     _to_period_bars). Returns {period_end_date: {"UF_GUP": [...], "FD_GUP":
@@ -462,19 +471,28 @@ def _run_gap_state_machine(period_bars: list[dict], threshold_pct: float, fifo_c
                     fifos[filled_key] = ([area] + fifos[filled_key])[:fifo_cap]
                 else:
                     still_open.append(area)
-            fifos[unfilled_key] = still_open[:fifo_cap]
+            fifos[unfilled_key] = still_open
 
-        # 2) Does today open a new gap?
+        # 2) Does today open a new gap? A gap whose own day already closes
+        #    back through it (gap-down 908.85 -> 902.30, close 921.80) is
+        #    filled on that same day — "filled = a close beyond the area"
+        #    applies from the day it opens (#129).
         if prev_close is not None and prev_close != 0:
             pct = (bar["open"] - prev_close) / prev_close * 100.0
             if pct > threshold_pct:
                 area = _GapArea(min(prev_close, bar["open"]), max(prev_close, bar["open"]), d, prev_close)
-                fifos["UF_GUP"] = ([area] + fifos["UF_GUP"])[:fifo_cap]
+                if bar["close"] <= area.reference_close:
+                    fifos["FD_GUP"] = ([area] + fifos["FD_GUP"])[:fifo_cap]
+                else:
+                    fifos["UF_GUP"] = ([area] + fifos["UF_GUP"])[:_UNFILLED_TRACK_CAP]
             elif pct < -threshold_pct:
                 area = _GapArea(min(prev_close, bar["open"]), max(prev_close, bar["open"]), d, prev_close)
-                fifos["UF_GDN"] = ([area] + fifos["UF_GDN"])[:fifo_cap]
+                if bar["close"] >= area.reference_close:
+                    fifos["FD_GDN"] = ([area] + fifos["FD_GDN"])[:fifo_cap]
+                else:
+                    fifos["UF_GDN"] = ([area] + fifos["UF_GDN"])[:_UNFILLED_TRACK_CAP]
 
-        out[d] = {k: list(v) for k, v in fifos.items()}
+        out[d] = {k: v[:fifo_cap] for k, v in fifos.items()}   # shown ranks only
         prev_close = bar["close"]
 
     return out

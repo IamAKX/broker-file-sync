@@ -73,7 +73,9 @@ _GROUP_A_FIELDS = [
 # Every gap area is offered as the bare code (its HIGH alias) AND its explicit
 # LOW / HIGH / DATE sub-fields (#88) — a gap is a price range plus the date it
 # opened, not one number.
-_FIELDS_SCHEMA = "gap-subfields-v1"
+# v2: unfilled gap areas are no longer dropped after 3 newer gaps (#129) —
+# a cache built by the old rule must not be reused.
+_FIELDS_SCHEMA = "gap-subfields-v2"
 
 FIELD_CODES: list[str] = _GROUP_A_FIELDS + [
     name

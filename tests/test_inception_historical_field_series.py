@@ -149,7 +149,7 @@ def test_gap_sub_fields_are_offered_and_resolve_per_day():
     inception_bars_store.upsert_bars([
         {"symbol": "GAPPY", "trade_date": d1, "open": 99, "high": 101, "low": 98, "close": 100, "volume": 1},
         {"symbol": "GAPPY", "trade_date": d2, "open": 106, "high": 108, "low": 105, "close": 106, "volume": 1},
-        {"symbol": "GAPPY", "trade_date": d3, "open": 107, "high": 109, "low": 98, "close": 99, "volume": 1},
+        {"symbol": "GAPPY", "trade_date": d3, "open": 106.2, "high": 109, "low": 98, "close": 99, "volume": 1},
     ])
     by_field = {
         f: {e["date"]: e["value"] for e in hfs.historical_field_series("GAPPY", f, d1, d3)}
