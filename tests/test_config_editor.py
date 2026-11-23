@@ -225,6 +225,21 @@ def test_column_name_sources_cover_formula_strategy_and_inception_columns(monkey
     assert inception[:2] == ["Sector", "Symbol"] and "52WH" in inception and len(inception) > 100
 
 
+def test_inception_column_order_lists_every_view_by_date_column(monkeypatch):
+    """#117: View by Date shows Formula Builder columns (WEEK % CHANGE, MT,
+    pivots), synced fields (VAH, Max Pain, OR.High, PWTO, ...) and strategy
+    columns — all must be orderable in the Inception Column Order tab."""
+    from screens import config_editor
+    from services import inception_strategy_store
+    monkeypatch.setattr(inception_strategy_store, "load_all",
+                        lambda: [{"id": "r", "name": "RSC", "columns": [{"name": "RSC"}, {"name": "RSC PCNT"}]}])
+    names = config_editor._all_inception_column_names()
+    for code in ("WEEK % CHANGE", "MONTH % CHANGE", "MT", "DAY PIVOT", "VAH", "Max Pain", "OR.High",
+                 "callstrikehighestoi", "PWTO", "DAY TO", "Avg Rate", "RSC", "RSC PCNT", "52WH", "CLOSE"):
+        assert code in names, code
+    assert len(names) == len(set(names))
+
+
 def test_main_column_order_lists_row_filter_streak_columns_of_every_strategy(monkeypatch):
     """#85: "<strategy> — Days True" / "— Since" show in LMV but were missing here."""
     from screens import config_editor

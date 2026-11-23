@@ -62,10 +62,28 @@ def _all_lmv_column_names() -> list:
 
 
 def _all_inception_column_names() -> list:
-    """Every Inception (HMV / View by Date) column: Sector/Symbol plus the
-    full raw + derived catalogue."""
-    from services import inception_columns
-    return ["Sector", "Symbol"] + [c.code for c in inception_columns.column_catalogue()]
+    """Every Inception (HMV / View by Date) column: Sector/Symbol, the raw +
+    derived catalogue, the Formula Builder columns View by Date adds (MT,
+    WEEK % CHANGE, pivots, ...), the synced VAH/POC/Max Pain/OI-strike/
+    OR.High-Low/turnover fields, Indicator Library outputs and every
+    Inception strategy's own columns (issue #117: only the first group was
+    listed — 151 of View by Date's ~250 columns)."""
+    from services import formula_engine, inception_columns, inception_formula_builder_columns as ifbc
+    names = ["Sector", "Symbol"] + [c.code for c in inception_columns.column_catalogue()]
+    names += list(formula_engine.FORMULA_CODES) + list(ifbc._LMV_SYNCED_CODE_MAP)
+    names += ["Avg Rate"] + list(ifbc._LMV_SYNCED_NEW_FIELD_MAP)
+    try:
+        from services import indicator_library
+        names += indicator_library.field_codes()
+    except Exception:
+        pass   # config store unreachable — the built-in columns still list
+    try:
+        from services import inception_strategy_store
+        for strategy in inception_strategy_store.load_all():
+            names += [c.get("name") for c in strategy.get("columns", []) if c.get("name")]
+    except Exception:
+        pass
+    return list(dict.fromkeys(names))
 
 
 class ConfigTabWidget(QWidget):
