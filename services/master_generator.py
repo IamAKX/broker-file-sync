@@ -56,14 +56,43 @@ _NI_DATA_INDICES = [1]             # skip index 0 (Symbol FK)
 _MP_DATA_INDICES = [1, 2, 3]       # skip index 0 (stock FK): VAH, POC, VAL
 
 
+def _name_key(name) -> str:
+    """Matching key for a broker full name: lowercased, whitespace collapsed,
+    trailing dots dropped. ReliableSoftware writes "City Union Bank Ltd."
+    (the company's own "Ltd." plus ".rolling.20D"), while the Script Name
+    tab may say "City Union Bank Ltd" — an exact match missed it and every
+    ReliableSoftware column stayed blank for CUB (issue #118)."""
+    return " ".join(str(name).split()).lower().rstrip(". ")
+
+
+class _ScriptNameLookup(dict):
+    """{full_name -> symbol}; every lookup goes through _name_key, so callers'
+    existing ``lookup.get(name.lower())`` calls match regardless of a
+    trailing dot or doubled space."""
+
+    def get(self, key, default=None):
+        return super().get(_name_key(key), default)
+
+    def __getitem__(self, key):
+        return super().__getitem__(_name_key(key))
+
+    def __contains__(self, key):
+        return super().__contains__(_name_key(key))
+
+
 def _build_script_name_lookup(script_name_data: list) -> dict:
     """
     Build a dict from full name → symbol using the Script Name config table.
     script_name_data is a list of (full_name, symbol) tuples.
-    Both keys are stored normalised (stripped, lowercased) for robust matching.
+    Keys are normalised by _name_key (lowercased, whitespace collapsed,
+    trailing dots dropped) on both store and lookup.
     """
-    return {str(full).strip().lower(): str(sym).strip()
-            for full, sym in script_name_data}
+    lookup = _ScriptNameLookup()
+    for full, sym in script_name_data:
+        key = _name_key(full)
+        if key:
+            dict.__setitem__(lookup, key, str(sym).strip())
+    return lookup
 
 
 def _normalise(value) -> str:
